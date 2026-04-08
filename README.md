@@ -11,6 +11,27 @@ curl $TYTUS_AI_GATEWAY/v1/models -H "Authorization: Bearer $TYTUS_API_KEY"
 
 ## Installation
 
+### Quick install (macOS / Linux)
+
+```bash
+curl -fsSL https://tytus.traylinx.com/install.sh | sh
+```
+
+### From GitHub Releases
+
+Download the latest binary from [Releases](https://github.com/traylinx/tytus-cli/releases):
+
+| Platform | Asset |
+|----------|-------|
+| macOS (Apple Silicon) | `tytus-macos-aarch64.tar.gz` |
+| macOS (Intel) | `tytus-macos-x86_64.tar.gz` |
+| Linux (x86_64) | `tytus-linux-x86_64.tar.gz` |
+
+```bash
+tar xzf tytus-macos-aarch64.tar.gz
+sudo mv tytus /usr/local/bin/
+```
+
 ### From source (requires Rust toolchain)
 
 ```bash
