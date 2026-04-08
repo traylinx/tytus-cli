@@ -1,0 +1,19 @@
+[package]
+name = "atomek-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+base64.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+dirs.workspace = true
+libc.workspace = true

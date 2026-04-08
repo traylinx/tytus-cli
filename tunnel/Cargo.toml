@@ -1,0 +1,15 @@
+[package]
+name = "atomek-tunnel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+atomek-core = { path = "../core" }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+boringtun.workspace = true
+tun.workspace = true
+socket2.workspace = true
+base64.workspace = true
+x25519-dalek.workspace = true
