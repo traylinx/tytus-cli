@@ -41,7 +41,7 @@ enum Commands {
         #[arg(short, long, value_enum, default_value = "nemoclaw")]
         agent: AgentType,
     },
-    /// Disconnect a pod's tunnel
+    /// Clear stale tunnel state (tunnels are stopped via Ctrl+C in connect)
     Disconnect {
         /// Pod ID to disconnect. Omit to disconnect all.
         #[arg(short, long)]
@@ -337,7 +337,7 @@ async fn cmd_revoke(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
-    match atomek_pods::revoke_pod(&client).await {
+    match atomek_pods::revoke_pod(&client, pod_id).await {
         Ok(_) => {
             state.pods.retain(|p| p.pod_id != pod_id);
             state.save();
@@ -379,8 +379,9 @@ async fn cmd_logout(http: &atomek_core::HttpClient, json: bool) {
     if state.is_logged_in() {
         if let (Some(ref sk), Some(ref auid)) = (&state.secret_key, &state.agent_user_id) {
             let client = atomek_pods::TytusClient::new(http, sk, auid);
-            // Revoke all pods (API revokes all for this client)
-            let _ = atomek_pods::revoke_pod(&client).await;
+            if let Err(e) = atomek_pods::revoke_all_pods(&client).await {
+                tracing::warn!("Revoke failed: {}", e);
+            }
         }
         if let Some(ref email) = state.email {
             let _ = atomek_auth::KeychainStore::delete_refresh_token(email);

@@ -64,7 +64,8 @@ impl CliState {
     }
 
     pub fn is_logged_in(&self) -> bool {
-        self.email.is_some() && self.refresh_token.is_some()
+        self.email.as_ref().map_or(false, |e| !e.is_empty())
+            && self.refresh_token.as_ref().map_or(false, |t| !t.is_empty())
     }
 
     pub fn has_valid_token(&self) -> bool {

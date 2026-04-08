@@ -68,23 +68,7 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("permission") || msg.contains("Operation not permitted") {
-                tracing::warn!("TUN creation needs elevated privileges, attempting escalation...");
-                #[cfg(target_os = "macos")]
-                {
-                    // Install sudoers rule (one-time password prompt) then relaunch as root
-                    relaunch_with_privileges()?;
-                    // relaunch_with_privileges exits the current process on success,
-                    // so we only reach here if it failed
-                    return Err(AtomekError::Tunnel(
-                        "Could not acquire admin privileges. Please try again.".into()
-                    ));
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    return Err(AtomekError::Tunnel(
-                        "Elevated privileges required. Run with sudo or as administrator.".into()
-                    ));
-                }
+                return Err(AtomekError::PrivilegesRequired);
             } else {
                 return Err(AtomekError::Tunnel(format!("Failed to create TUN device: {}", msg)));
             }
@@ -372,74 +356,3 @@ fn cidr_to_netmask(cidr: u8) -> String {
     )
 }
 
-/// macOS: Relaunch Atomek with admin privileges to create TUN device.
-/// Uses osascript to show the standard macOS password dialog, then relaunches
-/// the binary with sudo. The user's session is preserved via keychain auto-login.
-/// On success, this function terminates the current process.
-#[cfg(target_os = "macos")]
-fn relaunch_with_privileges() -> Result<(), AtomekError> {
-    use std::process::Command;
-
-    let atomek_path = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "/Applications/Atomek.app/Contents/MacOS/atomek".to_string());
-
-    tracing::info!("Relaunching Atomek with admin privileges");
-
-    // Read session handoff from global and pass as env vars to the elevated process.
-    // The elevated process runs as root and can't access the user's keychain.
-    let env_prefix = if let Some((email, token, pod_id)) = atomek_core::take_session_handoff() {
-        tracing::info!("Passing session handoff to elevated process for {} (pod {})", email, pod_id);
-        format!(
-            "ATOMEK_HANDOFF_EMAIL='{}' ATOMEK_HANDOFF_TOKEN='{}' ATOMEK_HANDOFF_POD='{}' ",
-            email.replace('\'', "'\\''"),
-            token.replace('\'', "'\\''"),
-            pod_id.replace('\'', "'\\''"),
-        )
-    } else {
-        tracing::warn!("No session handoff available for elevated process");
-        String::new()
-    };
-
-    // Use osascript to run Atomek as root. This shows the macOS password dialog.
-    // The "& sleep 0" trick detaches the child so osascript returns immediately.
-    let script = format!(
-        "do shell script \"{env}{path} & sleep 0\" with administrator privileges with prompt \"Atomek needs admin permission to create a secure network tunnel.\"",
-        env = env_prefix.replace('"', "\\\""),
-        path = atomek_path.replace('"', "\\\""),
-    );
-
-    let result = Command::new("osascript")
-        .args(["-e", &script])
-        .spawn();
-
-    match result {
-        Ok(_) => {
-            tracing::info!("Elevated Atomek launched.");
-            // Give the new process a moment to start
-            std::thread::sleep(std::time::Duration::from_secs(2));
-
-            #[cfg(not(debug_assertions))]
-            {
-                // Production: kill the unprivileged instance — the elevated one takes over.
-                tracing::info!("Exiting current instance (production mode).");
-                std::process::exit(0);
-            }
-
-            #[cfg(debug_assertions)]
-            {
-                // Dev: keep alive so the Vite dev server doesn't die with us.
-                tracing::info!("Development mode detected. Keeping current instance alive to preserve the Vite dev server.");
-                Err(AtomekError::Tunnel("Relaunched with admin privileges. Please use the new window to test the tunnel.".into()))
-            }
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("canceled") || msg.contains("cancelled") {
-                Err(AtomekError::Tunnel("Permission cancelled. Tunnel requires admin access to create a secure connection.".into()))
-            } else {
-                Err(AtomekError::Tunnel(format!("Failed to relaunch with privileges: {}", msg)))
-            }
-        }
-    }
-}
