@@ -415,98 +415,101 @@ async fn activate_tunnel_elevated(
     let config_path_str = config_path.display().to_string();
     let json_flag = if json { " --json" } else { "" };
 
-    #[cfg(target_os = "macos")]
-    {
-        // macOS: osascript shows native password dialog, runs tunnel-up as root
-        let cmd = format!(
-            "{} tunnel-up {}{}",
-            shell_escape(&exe_str),
-            shell_escape(&config_path_str),
-            json_flag,
-        );
-        let status = std::process::Command::new("osascript")
-            .args(["-e", &format!(
-                "do shell script \"{}\" with administrator privileges",
-                cmd.replace('\\', "\\\\").replace('"', "\\\"")
-            )])
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status();
+    let mut full_args = vec!["tunnel-up".to_string(), config_path_str.clone()];
+    if json { full_args.push("--json".to_string()); }
 
-        // Clean up temp file
-        let _ = std::fs::remove_file(&config_path);
+    // Try elevation strategies in order:
+    // 1. sudo (works in terminals, can be passwordless via sudoers)
+    // 2. osascript (macOS GUI password dialog, works in GUI apps)
+    let status = std::process::Command::new("sudo")
+        .arg("-n") // non-interactive first: succeeds if passwordless sudo is configured
+        .arg(&exe_str)
+        .args(&full_args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status();
 
-        match status {
-            Ok(s) if s.success() => {
-                if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
-                    pod.tunnel_iface = None; // cleared after tunnel-up exits
+    let status = match status {
+        Ok(s) if s.success() => Ok(s),
+        _ => {
+            // sudo -n failed (no cached creds or no sudoers entry)
+            // Try osascript on macOS (shows GUI password dialog)
+            #[cfg(target_os = "macos")]
+            {
+                let cmd = format!(
+                    "{} tunnel-up {}{}",
+                    shell_escape(&exe_str),
+                    shell_escape(&config_path_str),
+                    json_flag,
+                );
+                let osa_result = std::process::Command::new("osascript")
+                    .args(["-e", &format!(
+                        "do shell script \"{}\" with administrator privileges",
+                        cmd.replace('\\', "\\\\").replace('"', "\\\"")
+                    )])
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .status();
+
+                match osa_result {
+                    Ok(s) if s.success() => Ok(s),
+                    _ => {
+                        // osascript also failed (headless context) — fall back to interactive sudo
+                        std::process::Command::new("sudo")
+                            .arg(&exe_str)
+                            .args(&full_args)
+                            .stdin(std::process::Stdio::inherit())
+                            .stdout(std::process::Stdio::inherit())
+                            .stderr(std::process::Stdio::inherit())
+                            .status()
+                    }
                 }
-                state.save();
             }
-            Ok(s) => {
-                let code = s.code().unwrap_or(1);
-                if code == 1 {
-                    // User cancelled the password dialog
-                    eprintln!("Tunnel activation cancelled.");
-                } else {
-                    eprintln!("Tunnel activation failed (exit {}).", code);
-                }
-                std::process::exit(code);
-            }
-            Err(e) => {
-                eprintln!("Failed to request administrator access: {}", e);
-                std::process::exit(1);
-            }
-        }
-    }
 
-    #[cfg(target_os = "linux")]
-    {
-        let mut full_args = vec!["tunnel-up".to_string(), config_path_str.clone()];
-        if json { full_args.push("--json".to_string()); }
-
-        // Try pkexec first, fall back to sudo
-        let status = std::process::Command::new("pkexec")
-            .arg(&exe_str)
-            .args(&full_args)
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .or_else(|_| {
-                std::process::Command::new("sudo")
-                    .arg("-E")
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Linux: try pkexec, fall back to interactive sudo
+                std::process::Command::new("pkexec")
                     .arg(&exe_str)
                     .args(&full_args)
                     .stdin(std::process::Stdio::inherit())
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit())
                     .status()
-            });
-
-        let _ = std::fs::remove_file(&config_path);
-
-        match status {
-            Ok(s) => {
-                if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
-                    pod.tunnel_iface = None;
-                }
-                state.save();
-                if !s.success() { std::process::exit(s.code().unwrap_or(1)); }
-            }
-            Err(e) => {
-                eprintln!("Failed to request administrator access: {}", e);
-                std::process::exit(1);
+                    .or_else(|_| {
+                        std::process::Command::new("sudo")
+                            .arg(&exe_str)
+                            .args(&full_args)
+                            .stdin(std::process::Stdio::inherit())
+                            .stdout(std::process::Stdio::inherit())
+                            .stderr(std::process::Stdio::inherit())
+                            .status()
+                    })
             }
         }
-    }
+    };
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = std::fs::remove_file(&config_path);
-        eprintln!("Tunnel requires administrator privileges on this platform.");
-        std::process::exit(1);
+    // Clean up temp file
+    let _ = std::fs::remove_file(&config_path);
+
+    match status {
+        Ok(s) if s.success() => {
+            if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
+                pod.tunnel_iface = None;
+            }
+            state.save();
+        }
+        Ok(s) => {
+            let code = s.code().unwrap_or(1);
+            eprintln!("Tunnel activation failed (exit {}).", code);
+            std::process::exit(code);
+        }
+        Err(e) => {
+            eprintln!("Failed to request administrator access: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
