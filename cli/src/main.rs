@@ -80,6 +80,18 @@ enum Commands {
         #[arg(short, long, default_value = "claude")]
         format: String,
     },
+    /// Run a command inside your pod's agent container
+    Exec {
+        /// Command to run (e.g. "openclaw config set gateway.port 3000")
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+        /// Pod ID (defaults to first pod)
+        #[arg(short, long)]
+        pod: Option<String>,
+        /// Timeout in seconds (default: 30, max: 120)
+        #[arg(short, long, default_value = "30")]
+        timeout: u32,
+    },
     /// Run diagnostics: check auth, tunnel, gateway connectivity
     Doctor,
     /// (internal) Activate tunnel from a temp config file — called by elevated helper
@@ -113,6 +125,7 @@ async fn main() {
         Commands::Env { pod, export } => cmd_env(pod, export, cli.json),
         Commands::Infect { dir, only } => cmd_infect(&dir, only, cli.json),
         Commands::Mcp { format } => cmd_mcp(&format, cli.json),
+        Commands::Exec { command, pod, timeout } => cmd_exec(&http, command, pod, timeout, cli.json).await,
         Commands::Doctor => cmd_doctor(&http, cli.json).await,
         // Hidden subcommand: called by elevated helper to activate tunnel from a temp config file
         Commands::TunnelUp { config_file } => cmd_tunnel_up(&config_file, cli.json).await,
@@ -718,6 +731,57 @@ async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
         println!("✓ {} tunnel(s) stopped", killed);
     } else {
         println!("✓ Tunnel state cleared (no active daemons found)");
+    }
+}
+
+// ── Exec ────────────────────────────────────────────────────
+
+async fn cmd_exec(http: &atomek_core::HttpClient, command: Vec<String>, pod_id: Option<String>, timeout: u32, json: bool) {
+    let mut state = CliState::load();
+
+    if !state.is_logged_in() {
+        eprintln!("Not logged in. Run: tytus login");
+        std::process::exit(1);
+    }
+
+    ensure_token(&mut state, http).await;
+    let (sk, auid) = get_credentials(&mut state, http).await;
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+
+    let target_pod_id = pod_id.unwrap_or_else(|| {
+        state.pods.first().map(|p| p.pod_id.clone()).unwrap_or_else(|| {
+            eprintln!("No pods. Run: tytus connect");
+            std::process::exit(1);
+        })
+    });
+
+    let cmd_str = command.join(" ");
+    if !json { eprintln!("Running on pod {}...", target_pod_id); }
+
+    match atomek_pods::exec_in_agent(&client, &target_pod_id, &cmd_str, timeout.min(120)).await {
+        Ok(result) => {
+            if json {
+                println!("{}", serde_json::json!({
+                    "exit_code": result.exit_code,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }));
+            } else {
+                if let Some(ref stdout) = result.stdout {
+                    if !stdout.is_empty() { print!("{}", stdout); }
+                }
+                if let Some(ref stderr) = result.stderr {
+                    if !stderr.is_empty() { eprint!("{}", stderr); }
+                }
+                if result.exit_code != 0 {
+                    std::process::exit(result.exit_code as i32);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Exec failed: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 

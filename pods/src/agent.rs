@@ -76,6 +76,33 @@ pub async fn restart_agent(client: &TytusClient, pod_id: &str) -> atomek_core::R
     Err(AtomekError::ApiStatus { status, message: body })
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ExecResult {
+    pub exit_code: i64,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+}
+
+pub async fn exec_in_agent(client: &TytusClient, pod_id: &str, command: &str, timeout: u32) -> atomek_core::Result<ExecResult> {
+    let resp = client.post("/pod/agent/exec")
+        .json(&serde_json::json!({
+            "pod_id": pod_id,
+            "command": command,
+            "timeout": timeout,
+        }))
+        .send().await
+        .map_err(|e| AtomekError::Network(e.to_string()))?;
+
+    let status = resp.status().as_u16();
+    if resp.status().is_success() {
+        return resp.json().await
+            .map_err(|e| AtomekError::Other(format!("Failed to parse exec result: {}", e)));
+    }
+
+    let body = resp.text().await.unwrap_or_default();
+    Err(AtomekError::ApiStatus { status, message: body })
+}
+
 pub async fn stop_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Result<()> {
     let resp = client.post("/pod/agent/stop")
         .json(&serde_json::json!({ "pod_id": pod_id }))
