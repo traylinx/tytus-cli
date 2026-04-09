@@ -310,7 +310,8 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
     }
 }
 
-/// Activate tunnel directly (when already running as root)
+/// Activate tunnel directly (when already running as root).
+/// This path is used when the user explicitly runs as root. Same daemon behavior.
 async fn activate_tunnel_inline(
     state: &mut CliState,
     target_pod_id: &str,
@@ -331,6 +332,13 @@ async fn activate_tunnel_inline(
     match atomek_tunnel::connect(tunnel_config).await {
         Ok(handle) => {
             let iface = handle.interface_name.clone();
+
+            // Write PID + iface files (same as tunnel-up daemon path)
+            let pid_dir = std::path::PathBuf::from("/tmp/tytus");
+            std::fs::create_dir_all(&pid_dir).ok();
+            let _ = std::fs::write(pid_dir.join(format!("tunnel-{}.pid", target_pod_id)), format!("{}", std::process::id()));
+            let _ = std::fs::write(pid_dir.join(format!("tunnel-{}.iface", target_pod_id)), &iface);
+
             if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
                 pod.tunnel_iface = Some(iface.clone());
             }
@@ -342,7 +350,6 @@ async fn activate_tunnel_inline(
             } else {
                 eprintln!("✓ Tunnel active on {}", iface);
                 if let Some(pod) = state.pods.iter().find(|p| p.pod_id == target_pod_id) {
-                    println!();
                     if let Some(ref ep) = pod.ai_endpoint {
                         println!("AI_GATEWAY={}", ep);
                     }
@@ -353,17 +360,19 @@ async fn activate_tunnel_inline(
                         println!("API_KEY={}", key);
                     }
                 }
-                eprintln!("\nTunnel running. Press Ctrl+C to disconnect.");
+                eprintln!("Tunnel daemon running (pid {}). Stop with: tytus disconnect", std::process::id());
             }
 
+            // Block until signal — this process IS the daemon
             tokio::signal::ctrl_c().await.ok();
-            if !json { eprintln!("\nShutting down tunnel..."); }
             handle.shutdown().await;
+
+            let _ = std::fs::remove_file(pid_dir.join(format!("tunnel-{}.pid", target_pod_id)));
+            let _ = std::fs::remove_file(pid_dir.join(format!("tunnel-{}.iface", target_pod_id)));
             if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
                 pod.tunnel_iface = None;
             }
             state.save();
-            if !json { eprintln!("✓ Disconnected"); }
         }
         Err(e) => {
             state.save();
@@ -415,106 +424,149 @@ async fn activate_tunnel_elevated(
     let config_path_str = config_path.display().to_string();
     let json_flag = if json { " --json" } else { "" };
 
-    let mut full_args = vec!["tunnel-up".to_string(), config_path_str.clone()];
-    if json { full_args.push("--json".to_string()); }
+    let full_args = vec!["tunnel-up".to_string(), config_path_str.clone()];
 
-    // Try elevation strategies in order:
-    // 1. sudo (works in terminals, can be passwordless via sudoers)
-    // 2. osascript (macOS GUI password dialog, works in GUI apps)
-    let status = std::process::Command::new("sudo")
-        .arg("-n") // non-interactive first: succeeds if passwordless sudo is configured
-        .arg(&exe_str)
-        .args(&full_args)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status();
+    // Spawn tunnel-up as a detached background process with elevated privileges.
+    // The subprocess writes PID + interface name to /tmp/tytus/ and prints TUNNEL_READY to stdout.
+    // We capture stdout to detect when the tunnel is up, then return immediately.
+    let child = try_spawn_elevated(&exe_str, &full_args, &config_path_str, json_flag);
 
-    let status = match status {
-        Ok(s) if s.success() => Ok(s),
-        _ => {
-            // sudo -n failed (no cached creds or no sudoers entry)
-            // Try osascript on macOS (shows GUI password dialog)
-            #[cfg(target_os = "macos")]
-            {
-                let cmd = format!(
-                    "{} tunnel-up {}{}",
-                    shell_escape(&exe_str),
-                    shell_escape(&config_path_str),
-                    json_flag,
-                );
-                let osa_result = std::process::Command::new("osascript")
-                    .args(["-e", &format!(
-                        "do shell script \"{}\" with administrator privileges",
-                        cmd.replace('\\', "\\\\").replace('"', "\\\"")
-                    )])
-                    .stdin(std::process::Stdio::inherit())
-                    .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
-                    .status();
-
-                match osa_result {
-                    Ok(s) if s.success() => Ok(s),
-                    _ => {
-                        // osascript also failed (headless context) — fall back to interactive sudo
-                        std::process::Command::new("sudo")
-                            .arg(&exe_str)
-                            .args(&full_args)
-                            .stdin(std::process::Stdio::inherit())
-                            .stdout(std::process::Stdio::inherit())
-                            .stderr(std::process::Stdio::inherit())
-                            .status()
-                    }
-                }
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                // Linux: try pkexec, fall back to interactive sudo
-                std::process::Command::new("pkexec")
-                    .arg(&exe_str)
-                    .args(&full_args)
-                    .stdin(std::process::Stdio::inherit())
-                    .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
-                    .status()
-                    .or_else(|_| {
-                        std::process::Command::new("sudo")
-                            .arg(&exe_str)
-                            .args(&full_args)
-                            .stdin(std::process::Stdio::inherit())
-                            .stdout(std::process::Stdio::inherit())
-                            .stderr(std::process::Stdio::inherit())
-                            .status()
-                    })
-            }
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&config_path);
+            eprintln!("Failed to start tunnel: {}", e);
+            std::process::exit(1);
         }
     };
 
-    // Clean up temp file
+    // Wait for tunnel to signal readiness (reads stdout for "TUNNEL_READY")
+    // Timeout after 15 seconds
+    let stdout = child.stdout.take();
+    let mut iface_name = None;
+    let mut tunnel_pid = None;
+
+    if let Some(stdout) = stdout {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(stdout);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+
+        for line in reader.lines() {
+            if std::time::Instant::now() > deadline { break; }
+            match line {
+                Ok(l) if l.starts_with("TUNNEL_READY") => {
+                    // Parse: TUNNEL_READY iface=utunX pid=12345
+                    for part in l.split_whitespace() {
+                        if let Some(v) = part.strip_prefix("iface=") { iface_name = Some(v.to_string()); }
+                        if let Some(v) = part.strip_prefix("pid=") { tunnel_pid = v.parse::<u32>().ok(); }
+                    }
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+    }
+
+    // Clean up temp file (tunnel-up also removes it, but be safe)
     let _ = std::fs::remove_file(&config_path);
 
-    match status {
-        Ok(s) if s.success() => {
-            if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
-                pod.tunnel_iface = None;
+    if let Some(ref iface) = iface_name {
+        if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
+            pod.tunnel_iface = Some(iface.clone());
+        }
+        state.save();
+
+        if json {
+            let pod = state.pods.iter().find(|p| p.pod_id == target_pod_id);
+            println!("{}", serde_json::to_string_pretty(&pod).unwrap_or_default());
+        } else {
+            eprintln!("✓ Tunnel active on {}", iface);
+            if let Some(pod) = state.pods.iter().find(|p| p.pod_id == target_pod_id) {
+                if let Some(ref ep) = pod.ai_endpoint {
+                    println!("AI_GATEWAY={}", ep);
+                }
+                if let Some(ref ep) = pod.agent_endpoint {
+                    println!("AGENT_API={}", ep);
+                }
+                if let Some(ref key) = pod.pod_api_key {
+                    println!("API_KEY={}", key);
+                }
             }
-            state.save();
+            if let Some(pid) = tunnel_pid {
+                eprintln!("Tunnel daemon running (pid {}). Stop with: tytus disconnect", pid);
+            }
         }
-        Ok(s) => {
-            let code = s.code().unwrap_or(1);
-            eprintln!("Tunnel activation failed (exit {}).", code);
-            std::process::exit(code);
+    } else {
+        // Tunnel didn't signal readiness — check if the child exited with error
+        let exit = child.try_wait().ok().flatten();
+        if let Some(status) = exit {
+            eprintln!("Tunnel failed (exit {}).", status.code().unwrap_or(1));
+        } else {
+            eprintln!("Tunnel did not start within 15 seconds.");
+            let _ = child.kill();
         }
-        Err(e) => {
-            eprintln!("Failed to request administrator access: {}", e);
-            std::process::exit(1);
-        }
+        std::process::exit(1);
     }
 }
 
-/// Hidden subcommand: runs as root, reads tunnel config from temp file, activates tunnel
-async fn cmd_tunnel_up(config_file: &str, json: bool) {
+/// Try to spawn `tytus tunnel-up` with elevated privileges as a detached background process.
+fn try_spawn_elevated(
+    exe: &str,
+    args: &[String],
+    config_path: &str,
+    json_flag: &str,
+) -> Result<std::process::Child, String> {
+    // Strategy 1: sudo -n (passwordless, works with sudoers entry)
+    if let Ok(child) = std::process::Command::new("sudo")
+        .arg("-n")
+        .arg(exe)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped()) // capture TUNNEL_READY
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        return Ok(child);
+    }
+
+    // Strategy 2: osascript on macOS (GUI password dialog)
+    #[cfg(target_os = "macos")]
+    {
+        let cmd = format!(
+            "{} tunnel-up {}{}",
+            shell_escape(exe),
+            shell_escape(config_path),
+            json_flag,
+        );
+        if let Ok(child) = std::process::Command::new("osascript")
+            .args(["-e", &format!(
+                "do shell script \"{}\" with administrator privileges",
+                cmd.replace('\\', "\\\\").replace('"', "\\\"")
+            )])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            return Ok(child);
+        }
+    }
+
+    // Strategy 3: interactive sudo (terminal required)
+    std::process::Command::new("sudo")
+        .arg(exe)
+        .args(args)
+        .stdin(std::process::Stdio::inherit()) // needs terminal for password
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("All elevation strategies failed: {}", e))
+}
+
+/// Hidden subcommand: runs as root, reads tunnel config from temp file, activates tunnel.
+/// Runs as a background daemon — writes PID file, detaches from terminal, handles SIGTERM.
+async fn cmd_tunnel_up(config_file: &str, _json: bool) {
     let data = match std::fs::read_to_string(config_file) {
         Ok(d) => d,
         Err(e) => {
@@ -533,6 +585,8 @@ async fn cmd_tunnel_up(config_file: &str, json: bool) {
     // Clean up the temp file immediately (contains private key)
     let _ = std::fs::remove_file(config_file);
 
+    let pod_id = v["pod_id"].as_str().unwrap_or("00").to_string();
+
     let tunnel_config = atomek_tunnel::TunnelConfig {
         private_key: v["private_key"].as_str().unwrap_or("").to_string(),
         address: v["address"].as_str().unwrap_or("").to_string(),
@@ -547,15 +601,27 @@ async fn cmd_tunnel_up(config_file: &str, json: bool) {
     match atomek_tunnel::connect(tunnel_config).await {
         Ok(handle) => {
             let iface = handle.interface_name.clone();
-            if !json {
-                eprintln!("✓ Tunnel active on {}", iface);
-                eprintln!("Tunnel running. Press Ctrl+C to disconnect.");
-            }
 
+            // Write PID file so `tytus disconnect` can find and stop us
+            let pid_dir = std::path::PathBuf::from("/tmp/tytus");
+            std::fs::create_dir_all(&pid_dir).ok();
+            let pid_file = pid_dir.join(format!("tunnel-{}.pid", pod_id));
+            let _ = std::fs::write(&pid_file, format!("{}", std::process::id()));
+
+            // Write interface name so parent process can read it
+            let iface_file = pid_dir.join(format!("tunnel-{}.iface", pod_id));
+            let _ = std::fs::write(&iface_file, &iface);
+
+            // Signal to parent that tunnel is ready (print to stdout for capture)
+            println!("TUNNEL_READY iface={} pid={}", iface, std::process::id());
+
+            // Wait for SIGTERM (from `tytus disconnect`) or SIGINT (Ctrl+C)
             tokio::signal::ctrl_c().await.ok();
-            if !json { eprintln!("\nShutting down tunnel..."); }
             handle.shutdown().await;
-            if !json { eprintln!("✓ Disconnected"); }
+
+            // Clean up PID + iface files
+            let _ = std::fs::remove_file(&pid_file);
+            let _ = std::fs::remove_file(&iface_file);
         }
         Err(e) => {
             eprintln!("Tunnel failed: {}", e);
@@ -596,20 +662,58 @@ async fn cmd_revoke(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
 
 async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
     let mut state = CliState::load();
+    let mut killed = 0u32;
 
-    if let Some(ref pid) = pod_id {
-        if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == *pid) {
-            pod.tunnel_iface = None;
-        }
+    let pod_ids: Vec<String> = if let Some(ref pid) = pod_id {
+        vec![pid.clone()]
     } else {
-        for pod in &mut state.pods {
+        state.pods.iter().map(|p| p.pod_id.clone()).collect()
+    };
+
+    for pid in &pod_ids {
+        // Kill the tunnel daemon via PID file
+        let pid_file = std::path::PathBuf::from(format!("/tmp/tytus/tunnel-{}.pid", pid));
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+            if let Ok(tunnel_pid) = pid_str.trim().parse::<i32>() {
+                // Tunnel runs as root — use sudo -n to send SIGTERM
+                let kill_ok = std::process::Command::new("sudo")
+                    .args(["-n", "kill", "-TERM", &tunnel_pid.to_string()])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+
+                if kill_ok {
+                    killed += 1;
+                    if !json { eprintln!("Stopped tunnel for pod {} (pid {})", pid, tunnel_pid); }
+                } else {
+                    // Maybe process already dead, or sudo not available
+                    let is_alive = unsafe { libc::kill(tunnel_pid, 0) } == 0;
+                    if !is_alive {
+                        if !json { eprintln!("Tunnel for pod {} already stopped", pid); }
+                    } else {
+                        eprintln!("Could not stop tunnel pid {}. Run: sudo kill {}", tunnel_pid, tunnel_pid);
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&pid_file);
+        }
+        let iface_file = std::path::PathBuf::from(format!("/tmp/tytus/tunnel-{}.iface", pid));
+        let _ = std::fs::remove_file(&iface_file);
+
+        // Clear state
+        if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == *pid) {
             pod.tunnel_iface = None;
         }
     }
     state.save();
 
-    if json { println!(r#"{{"status":"disconnected"}}"#); }
-    else { println!("✓ Tunnel state cleared"); }
+    if json {
+        println!(r#"{{"status":"disconnected","tunnels_stopped":{}}}"#, killed);
+    } else if killed > 0 {
+        println!("✓ {} tunnel(s) stopped", killed);
+    } else {
+        println!("✓ Tunnel state cleared (no active daemons found)");
+    }
 }
 
 // ── Logout ───────────────────────────────────────────────────

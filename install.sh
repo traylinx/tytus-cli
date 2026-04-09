@@ -64,7 +64,7 @@ SUDOERS_FILE="/etc/sudoers.d/tytus"
 CURRENT_USER="${SUDO_USER:-$(whoami)}"
 
 setup_sudoers() {
-  local entry="${CURRENT_USER} ALL=(root) NOPASSWD: ${TYTUS_BIN} tunnel-up *"
+  local entry="${CURRENT_USER} ALL=(root) NOPASSWD: ${TYTUS_BIN} tunnel-up *, /bin/kill -TERM *"
   if [ -f "$SUDOERS_FILE" ] && grep -qF "$entry" "$SUDOERS_FILE" 2>/dev/null; then
     echo "  Passwordless tunnel: already configured"
     return
@@ -78,7 +78,7 @@ if [ "$(id -u)" = "0" ]; then
   setup_sudoers
 elif command -v sudo >/dev/null 2>&1; then
   sudo bash -c "
-    echo '${CURRENT_USER} ALL=(root) NOPASSWD: ${TYTUS_BIN} tunnel-up *' > ${SUDOERS_FILE} && chmod 440 ${SUDOERS_FILE}
+    echo '${CURRENT_USER} ALL=(root) NOPASSWD: ${TYTUS_BIN} tunnel-up *, /bin/kill -TERM *' > ${SUDOERS_FILE} && chmod 440 ${SUDOERS_FILE}
   " 2>/dev/null && echo "  Passwordless tunnel: configured" || echo "  Note: run with sudo to enable passwordless tunnel activation"
 fi
 
