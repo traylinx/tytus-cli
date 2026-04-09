@@ -4,7 +4,7 @@ Connect to your **private AI pod** from any terminal. Tytus provides a WireGuard
 
 ```bash
 tytus login                    # One-time browser auth
-sudo tytus connect             # Allocate pod + activate tunnel
+tytus connect             # Allocate pod + activate tunnel
 eval $(tytus env --export)     # Export connection vars
 curl $TYTUS_AI_GATEWAY/v1/models -H "Authorization: Bearer $TYTUS_API_KEY"
 ```
@@ -52,7 +52,7 @@ sudo cp target/release/tytus target/release/tytus-mcp /usr/local/bin/
 tytus login
 
 # 2. Connect (allocates pod + WireGuard tunnel)
-sudo tytus connect
+tytus connect
 
 # 3. Use your private AI
 eval $(tytus env --export)
@@ -149,7 +149,7 @@ Every command supports `--json`:
 ```bash
 tytus status --json | jq .tier
 tytus env --json | jq -r .ai_endpoint
-sudo tytus connect --json 2>/dev/null | jq .pod_id
+tytus connect --json 2>/dev/null | jq .pod_id
 ```
 
 ## Commands
@@ -158,7 +158,7 @@ sudo tytus connect --json 2>/dev/null | jq .pod_id
 |---------|-------------|------|
 | `tytus login` | Browser-based device auth | No |
 | `tytus status` | Plan, pods, tunnel state | No |
-| `sudo tytus connect` | Allocate pod + tunnel (blocks until Ctrl+C) | Yes |
+| `tytus connect` | Allocate pod + tunnel (blocks until Ctrl+C) | Yes |
 | `tytus disconnect` | Clear stale tunnel state | No |
 | `tytus revoke <pod>` | Release pod, free units | No |
 | `tytus logout` | Revoke all + clear auth | No |
@@ -169,10 +169,10 @@ sudo tytus connect --json 2>/dev/null | jq .pod_id
 ### `tytus connect` options
 
 ```bash
-sudo tytus connect                     # OpenClaw agent (1 unit)
-sudo tytus connect --agent hermes      # Hermes agent (2 units)
-sudo tytus connect --pod 02            # Reconnect existing pod
-sudo tytus connect --json              # JSON output
+tytus connect                     # OpenClaw agent (1 unit)
+tytus connect --agent hermes      # Hermes agent (2 units)
+tytus connect --pod 02            # Reconnect existing pod
+tytus connect --json              # JSON output
 ```
 
 ### `tytus env` options
@@ -243,11 +243,11 @@ Crate structure:
 
 | Problem | Solution |
 |---------|----------|
-| "TUN device requires root" | `sudo tytus connect` |
+| "TUN device requires root" | Re-run install script to set up passwordless tunnel |
 | "No Tytus subscription" | Upgrade at traylinx.com |
-| "Config download failed" | Pod provisioning. Wait, then `sudo tytus connect --pod XX` |
+| "Config download failed" | Pod provisioning. Wait, then `tytus connect --pod XX` |
 | "Token refresh failed" | `tytus logout && tytus login` |
-| Debug logging | `RUST_LOG=debug sudo tytus connect` |
+| Debug logging | `RUST_LOG=debug tytus connect` |
 
 ## Development
 

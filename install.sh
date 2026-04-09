@@ -55,6 +55,33 @@ install_bin "tytus"
 install_bin "tytus-mcp"
 rm -rf "$TMP"
 
+# ── Set up passwordless sudo for tunnel activation ──────────
+# tytus connect needs root only for creating the TUN device.
+# This sudoers entry allows 'tytus tunnel-up' to run without a password
+# so users never have to type sudo themselves.
+TYTUS_BIN="${INSTALL_DIR}/tytus"
+SUDOERS_FILE="/etc/sudoers.d/tytus"
+CURRENT_USER="${SUDO_USER:-$(whoami)}"
+
+setup_sudoers() {
+  local entry="${CURRENT_USER} ALL=(root) NOPASSWD: ${TYTUS_BIN} tunnel-up *"
+  if [ -f "$SUDOERS_FILE" ] && grep -qF "$entry" "$SUDOERS_FILE" 2>/dev/null; then
+    echo "  Passwordless tunnel: already configured"
+    return
+  fi
+  echo "$entry" > "$SUDOERS_FILE" && chmod 440 "$SUDOERS_FILE"
+  echo "  Passwordless tunnel: configured for ${CURRENT_USER}"
+}
+
+# We're likely running with sudo already (from install_bin), or can elevate
+if [ "$(id -u)" = "0" ]; then
+  setup_sudoers
+elif command -v sudo >/dev/null 2>&1; then
+  sudo bash -c "
+    echo '${CURRENT_USER} ALL=(root) NOPASSWD: ${TYTUS_BIN} tunnel-up *' > ${SUDOERS_FILE} && chmod 440 ${SUDOERS_FILE}
+  " 2>/dev/null && echo "  Passwordless tunnel: configured" || echo "  Note: run with sudo to enable passwordless tunnel activation"
+fi
+
 echo ""
 echo "Installed:"
 echo "  tytus      — CLI for pod management"
@@ -62,7 +89,7 @@ echo "  tytus-mcp  — MCP server for AI CLI integration"
 echo ""
 echo "Quick start:"
 echo "  tytus login              # Authenticate (one-time)"
-echo "  sudo tytus connect       # Connect to your AI pod"
+echo "  tytus connect            # Connect to your AI pod"
 echo "  tytus env --export       # Show connection vars"
 echo ""
 echo "Infect any project (adds MCP + context files for all AI CLIs):"
