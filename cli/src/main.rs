@@ -82,6 +82,12 @@ enum Commands {
     },
     /// Run diagnostics: check auth, tunnel, gateway connectivity
     Doctor,
+    /// (internal) Activate tunnel from a temp config file — called by elevated helper
+    #[command(hide = true)]
+    TunnelUp {
+        /// Path to temp JSON file with tunnel config
+        config_file: String,
+    },
 }
 
 #[tokio::main]
@@ -108,6 +114,16 @@ async fn main() {
         Commands::Infect { dir, only } => cmd_infect(&dir, only, cli.json),
         Commands::Mcp { format } => cmd_mcp(&format, cli.json),
         Commands::Doctor => cmd_doctor(&http, cli.json).await,
+        // Hidden subcommand: called by elevated helper to activate tunnel from a temp config file
+        Commands::TunnelUp { config_file } => cmd_tunnel_up(&config_file, cli.json).await,
+    }
+}
+
+fn shell_escape(s: &str) -> String {
+    if s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/' || c == '.') {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
 
@@ -213,6 +229,7 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
         }
     }
 
+    // ── Phase 1: API calls (no root needed) ──
     ensure_token(&mut state, http).await;
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
@@ -226,7 +243,6 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
         match atomek_pods::request_pod_with_agent(&client, agent).await {
             Ok(a) => {
                 target_pod_id = a.pod_id.clone();
-                // Remove stale entry if exists, then add fresh
                 state.pods.retain(|p| p.pod_id != a.pod_id);
                 state.pods.push(PodEntry {
                     pod_id: a.pod_id.clone(),
@@ -278,9 +294,29 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
             }
         }
     }
+    state.save();
 
-    // Activate WireGuard tunnel
+    // ── Phase 2: Tunnel activation (needs root for TUN device) ──
     if !json { eprintln!("Activating WireGuard tunnel..."); }
+
+    let is_root = unsafe { libc::geteuid() == 0 };
+
+    if is_root {
+        // Already root — activate directly
+        activate_tunnel_inline(&mut state, &target_pod_id, &wg_config, json).await;
+    } else {
+        // Not root — write config to temp file and elevate only the tunnel-up step
+        activate_tunnel_elevated(&mut state, &target_pod_id, &wg_config, json).await;
+    }
+}
+
+/// Activate tunnel directly (when already running as root)
+async fn activate_tunnel_inline(
+    state: &mut CliState,
+    target_pod_id: &str,
+    wg_config: &atomek_pods::WireGuardConfig,
+    json: bool,
+) {
     let tunnel_config = atomek_tunnel::TunnelConfig {
         private_key: wg_config.private_key.clone(),
         address: wg_config.address.clone(),
@@ -301,7 +337,6 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
             state.save();
 
             if json {
-                // JSON output: pod info to stdout (status messages went to stderr)
                 let pod = state.pods.iter().find(|p| p.pod_id == target_pod_id);
                 println!("{}", serde_json::to_string_pretty(&pod).unwrap_or_default());
             } else {
@@ -321,7 +356,6 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
                 eprintln!("\nTunnel running. Press Ctrl+C to disconnect.");
             }
 
-            // Keep running until Ctrl+C
             tokio::signal::ctrl_c().await.ok();
             if !json { eprintln!("\nShutting down tunnel..."); }
             handle.shutdown().await;
@@ -333,13 +367,195 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
         }
         Err(e) => {
             state.save();
-            let msg = e.to_string();
-            if msg.contains("permission") || msg.contains("Operation not permitted") {
-                eprintln!("TUN device requires root. Run with sudo:\n");
-                eprintln!("  sudo tytus connect{}", pod_id.map(|p| format!(" --pod {}", p)).unwrap_or_default());
-            } else {
-                eprintln!("Tunnel failed: {}", msg);
+            eprintln!("Tunnel failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Write tunnel config to a temp file and elevate only `tytus tunnel-up <file>`
+async fn activate_tunnel_elevated(
+    state: &mut CliState,
+    target_pod_id: &str,
+    wg_config: &atomek_pods::WireGuardConfig,
+    json: bool,
+) {
+    // Serialize tunnel config to temp file (will be read by elevated process)
+    let tunnel_data = serde_json::json!({
+        "private_key": wg_config.private_key,
+        "address": wg_config.address,
+        "dns": wg_config.dns,
+        "peer_public_key": wg_config.public_key,
+        "preshared_key": wg_config.preshared_key,
+        "endpoint": wg_config.endpoint,
+        "allowed_ips": wg_config.allowed_ips,
+        "persistent_keepalive": wg_config.persistent_keepalive,
+        "pod_id": target_pod_id,
+    });
+
+    let tmp_dir = std::env::temp_dir().join("tytus");
+    std::fs::create_dir_all(&tmp_dir).ok();
+    let config_path = tmp_dir.join(format!("tunnel-{}.json", target_pod_id));
+    if let Err(e) = std::fs::write(&config_path, serde_json::to_string(&tunnel_data).unwrap()) {
+        eprintln!("Failed to write tunnel config: {}", e);
+        std::process::exit(1);
+    }
+    // Restrict permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| {
+        eprintln!("Cannot determine executable path");
+        std::process::exit(1);
+    });
+    let exe_str = exe.display().to_string();
+    let config_path_str = config_path.display().to_string();
+    let json_flag = if json { " --json" } else { "" };
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: osascript shows native password dialog, runs tunnel-up as root
+        let cmd = format!(
+            "{} tunnel-up {}{}",
+            shell_escape(&exe_str),
+            shell_escape(&config_path_str),
+            json_flag,
+        );
+        let status = std::process::Command::new("osascript")
+            .args(["-e", &format!(
+                "do shell script \"{}\" with administrator privileges",
+                cmd.replace('\\', "\\\\").replace('"', "\\\"")
+            )])
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&config_path);
+
+        match status {
+            Ok(s) if s.success() => {
+                if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
+                    pod.tunnel_iface = None; // cleared after tunnel-up exits
+                }
+                state.save();
             }
+            Ok(s) => {
+                let code = s.code().unwrap_or(1);
+                if code == 1 {
+                    // User cancelled the password dialog
+                    eprintln!("Tunnel activation cancelled.");
+                } else {
+                    eprintln!("Tunnel activation failed (exit {}).", code);
+                }
+                std::process::exit(code);
+            }
+            Err(e) => {
+                eprintln!("Failed to request administrator access: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut full_args = vec!["tunnel-up".to_string(), config_path_str.clone()];
+        if json { full_args.push("--json".to_string()); }
+
+        // Try pkexec first, fall back to sudo
+        let status = std::process::Command::new("pkexec")
+            .arg(&exe_str)
+            .args(&full_args)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .or_else(|_| {
+                std::process::Command::new("sudo")
+                    .arg("-E")
+                    .arg(&exe_str)
+                    .args(&full_args)
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .status()
+            });
+
+        let _ = std::fs::remove_file(&config_path);
+
+        match status {
+            Ok(s) => {
+                if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
+                    pod.tunnel_iface = None;
+                }
+                state.save();
+                if !s.success() { std::process::exit(s.code().unwrap_or(1)); }
+            }
+            Err(e) => {
+                eprintln!("Failed to request administrator access: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = std::fs::remove_file(&config_path);
+        eprintln!("Tunnel requires administrator privileges on this platform.");
+        std::process::exit(1);
+    }
+}
+
+/// Hidden subcommand: runs as root, reads tunnel config from temp file, activates tunnel
+async fn cmd_tunnel_up(config_file: &str, json: bool) {
+    let data = match std::fs::read_to_string(config_file) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Failed to read tunnel config: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let v: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Invalid tunnel config: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Clean up the temp file immediately (contains private key)
+    let _ = std::fs::remove_file(config_file);
+
+    let tunnel_config = atomek_tunnel::TunnelConfig {
+        private_key: v["private_key"].as_str().unwrap_or("").to_string(),
+        address: v["address"].as_str().unwrap_or("").to_string(),
+        dns: v["dns"].as_str().map(|s| s.to_string()),
+        peer_public_key: v["peer_public_key"].as_str().unwrap_or("").to_string(),
+        preshared_key: v["preshared_key"].as_str().map(|s| s.to_string()),
+        endpoint: v["endpoint"].as_str().unwrap_or("").to_string(),
+        allowed_ips: v["allowed_ips"].as_str().unwrap_or("").to_string(),
+        persistent_keepalive: v["persistent_keepalive"].as_u64().map(|n| n as u16),
+    };
+
+    match atomek_tunnel::connect(tunnel_config).await {
+        Ok(handle) => {
+            let iface = handle.interface_name.clone();
+            if !json {
+                eprintln!("✓ Tunnel active on {}", iface);
+                eprintln!("Tunnel running. Press Ctrl+C to disconnect.");
+            }
+
+            tokio::signal::ctrl_c().await.ok();
+            if !json { eprintln!("\nShutting down tunnel..."); }
+            handle.shutdown().await;
+            if !json { eprintln!("✓ Disconnected"); }
+        }
+        Err(e) => {
+            eprintln!("Tunnel failed: {}", e);
             std::process::exit(1);
         }
     }
@@ -431,7 +647,7 @@ fn cmd_env(pod_id: Option<String>, export: bool, json: bool) {
 
     let Some(pod) = pod else {
         if json { println!(r#"{{"error":"no_pods"}}"#); }
-        else { eprintln!("No pods. Run: sudo tytus connect"); }
+        else { eprintln!("No pods. Run: tytus connect"); }
         std::process::exit(1);
     };
 
@@ -741,7 +957,7 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
 
     // 5. Pods
     checks.push(("pods", !state.pods.is_empty(),
-        if state.pods.is_empty() { "No pods. Run: sudo tytus connect".into() }
+        if state.pods.is_empty() { "No pods. Run: tytus connect".into() }
         else { format!("{} pod(s)", state.pods.len()) }
     ));
 
@@ -754,7 +970,7 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
                 .collect();
             format!("Active on {}", ifaces.join(", "))
         } else if !state.pods.is_empty() {
-            "Not running. Run: sudo tytus connect --pod <id>".into()
+            "Not running. Run: tytus connect --pod <id>".into()
         } else {
             "No pods".into()
         }
@@ -876,7 +1092,7 @@ export OPENAI_BASE_URL=${TYTUS_AI_GATEWAY}/v1
 tytus status --json            # Pod and plan info (JSON)
 tytus env --json               # Connection details (JSON)
 tytus env --export             # Shell-sourceable exports
-sudo tytus connect             # Allocate pod + tunnel (blocks until Ctrl+C)
+tytus connect             # Allocate pod + tunnel (blocks until Ctrl+C)
 tytus revoke <pod_id>          # Free pod units
 ```
 
@@ -1065,7 +1281,7 @@ fn print_human_status(state: &CliState) {
     }
 
     if state.pods.is_empty() {
-        println!("No pods. Run: sudo tytus connect");
+        println!("No pods. Run: tytus connect");
     } else {
         for pod in &state.pods {
             let agent = pod.agent_type.as_deref().unwrap_or("?");

@@ -31,7 +31,25 @@ pub struct PodEntry {
 
 impl CliState {
     fn state_path() -> PathBuf {
-        let config = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        // When running elevated (sudo/osascript), TYTUS_REAL_HOME points to the
+        // original user's home so we read THEIR state, not root's.
+        // Fallback chain: TYTUS_REAL_HOME → SUDO_USER's home → dirs::config_dir()
+        let config = if let Ok(real_home) = std::env::var("TYTUS_REAL_HOME") {
+            PathBuf::from(real_home).join(if cfg!(target_os = "macos") {
+                "Library/Application Support"
+            } else {
+                ".config"
+            })
+        } else if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+            // Running under plain sudo without TYTUS_REAL_HOME
+            if cfg!(target_os = "macos") {
+                PathBuf::from(format!("/Users/{}/Library/Application Support", sudo_user))
+            } else {
+                PathBuf::from(format!("/home/{}/.config", sudo_user))
+            }
+        } else {
+            dirs::config_dir().unwrap_or_else(|| PathBuf::from("."))
+        };
         let dir = config.join(STATE_DIR);
         std::fs::create_dir_all(&dir).ok();
         dir.join(STATE_FILE)

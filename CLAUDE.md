@@ -20,7 +20,7 @@ tunnel/  — WireGuard tunnel via boringtun (userspace, cross-platform)
 ```bash
 cargo build -p atomek-cli          # Debug build
 cargo build --release -p atomek-cli # Release build
-sudo target/release/tytus connect   # Run (needs sudo for TUN)
+target/release/tytus connect   # Run (needs sudo for TUN)
 ```
 
 ## Key Commands
@@ -28,9 +28,9 @@ sudo target/release/tytus connect   # Run (needs sudo for TUN)
 ```bash
 tytus login                    # Device auth (opens browser)
 tytus status [--json]          # Show plan + pods
-sudo tytus connect             # Allocate pod + tunnel (Ctrl+C to stop)
-sudo tytus connect --agent hermes  # Hermes agent (2 units)
-sudo tytus connect --pod 01   # Reconnect existing pod
+tytus connect             # Allocate pod + tunnel (Ctrl+C to stop)
+tytus connect --agent hermes  # Hermes agent (2 units)
+tytus connect --pod 01   # Reconnect existing pod
 tytus env --export             # Print connection env vars
 tytus revoke <pod_id>          # Free a pod's units
 tytus logout                   # Revoke all + logout
