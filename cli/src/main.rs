@@ -238,6 +238,11 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
     if let Some(ref pid) = pod_id {
         target_pod_id = pid.clone();
         if !json { eprintln!("Connecting to pod {}...", pid); }
+    } else if let Some(existing) = state.pods.first() {
+        // Reuse existing pod — keeps the IP stable (important for users who
+        // configure the gateway URL in their tools)
+        target_pod_id = existing.pod_id.clone();
+        if !json { eprintln!("Reconnecting to pod {}...", target_pod_id); }
     } else {
         if !json { eprintln!("Allocating {} pod...", agent); }
         match atomek_pods::request_pod_with_agent(&client, agent).await {
