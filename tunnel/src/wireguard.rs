@@ -91,28 +91,30 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
 
         #[cfg(target_os = "macos")]
         {
-            let status = std::process::Command::new("route")
+            let output = std::process::Command::new("/sbin/route")
                 .args(["-n", "add", "-net", &format!("{}/{}", network, cidr_bits), "-interface", &interface_name])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .status();
-            match status {
-                Ok(s) if s.success() => tracing::info!("Route added: {}", allowed_ip),
-                Ok(s) => tracing::warn!("Route add exited with {}", s),
+                .output();
+            match output {
+                Ok(o) if o.status.success() => tracing::info!("Route added: {}", allowed_ip),
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    tracing::warn!("Route add exited with {}: {}", o.status, stderr.trim());
+                }
                 Err(e) => tracing::warn!("Failed to add route: {}", e),
             }
         }
 
         #[cfg(target_os = "linux")]
         {
-            let status = std::process::Command::new("ip")
+            let output = std::process::Command::new("/sbin/ip")
                 .args(["route", "add", allowed_ip, "dev", &interface_name])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .status();
-            match status {
-                Ok(s) if s.success() => tracing::info!("Route added: {}", allowed_ip),
-                Ok(s) => tracing::warn!("Route add exited with {}", s),
+                .output();
+            match output {
+                Ok(o) if o.status.success() => tracing::info!("Route added: {}", allowed_ip),
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    tracing::warn!("Route add exited with {}: {}", o.status, stderr.trim());
+                }
                 Err(e) => tracing::warn!("Failed to add route: {}", e),
             }
         }
