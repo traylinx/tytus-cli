@@ -8,7 +8,8 @@ CLI for connecting to Tytus private AI pods. Part of the Traylinx platform.
 
 ```
 cli/     — Binary crate (the `tytus` command)
-core/    — Error types, HTTP client, token state, session handoff
+mcp/     — Binary crate (the `tytus-mcp` MCP server)
+core/    — Error types, HTTP client, token state
 auth/    — Device auth (Sentinel), keychain, token refresh
 pods/    — Provider API: pod allocation, status, config, revoke
 tunnel/  — WireGuard tunnel via boringtun (userspace, cross-platform)
@@ -33,6 +34,9 @@ sudo tytus connect --pod 01   # Reconnect existing pod
 tytus env --export             # Print connection env vars
 tytus revoke <pod_id>          # Free a pod's units
 tytus logout                   # Revoke all + logout
+tytus infect [dir]             # Inject integration files for all AI CLIs
+tytus mcp [--format FORMAT]    # Print MCP server config
+tytus doctor                   # Run diagnostics (auth, tunnel, gateway)
 ```
 
 ## State

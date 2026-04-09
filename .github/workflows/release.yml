@@ -31,13 +31,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build
+      - name: Build CLI
         run: cargo build --release -p atomek-cli --target ${{ matrix.target }}
+
+      - name: Build MCP Server
+        run: cargo build --release -p tytus-mcp --target ${{ matrix.target }}
 
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.name }}.tar.gz tytus
+          tar czf ../../../${{ matrix.name }}.tar.gz tytus tytus-mcp
           cd ../../..
 
       - name: Upload artifact

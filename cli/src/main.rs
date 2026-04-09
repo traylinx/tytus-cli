@@ -63,6 +63,25 @@ enum Commands {
         #[arg(long)]
         export: bool,
     },
+    /// Inject Tytus integration files into a project directory.
+    /// Drops CLAUDE.md context, MCP config, custom commands, and AGENTS.md
+    /// so any AI CLI can natively manage your private pod.
+    Infect {
+        /// Target project directory (defaults to current dir)
+        #[arg(default_value = ".")]
+        dir: String,
+        /// Which integrations to inject (default: all)
+        #[arg(short, long, value_delimiter = ',')]
+        only: Option<Vec<String>>,
+    },
+    /// Print MCP server configuration for your AI CLI
+    Mcp {
+        /// Output format: claude, kilocode, opencode, archon, json
+        #[arg(short, long, default_value = "claude")]
+        format: String,
+    },
+    /// Run diagnostics: check auth, tunnel, gateway connectivity
+    Doctor,
 }
 
 #[tokio::main]
@@ -86,6 +105,9 @@ async fn main() {
         Commands::Revoke { pod } => cmd_revoke(&http, &pod, cli.json).await,
         Commands::Logout => cmd_logout(&http, cli.json).await,
         Commands::Env { pod, export } => cmd_env(pod, export, cli.json),
+        Commands::Infect { dir, only } => cmd_infect(&dir, only, cli.json),
+        Commands::Mcp { format } => cmd_mcp(&format, cli.json),
+        Commands::Doctor => cmd_doctor(&http, cli.json).await,
     }
 }
 
@@ -434,6 +456,498 @@ fn cmd_env(pod_id: Option<String>, export: bool, json: bool) {
     }
     println!("{}TYTUS_POD_ID={}", prefix, pod.pod_id);
 }
+
+// ── Infect (drop integration files) ─────────────────────────
+
+fn cmd_infect(dir: &str, only: Option<Vec<String>>, json: bool) {
+    let base = std::path::Path::new(dir).canonicalize().unwrap_or_else(|_| {
+        eprintln!("Directory not found: {}", dir);
+        std::process::exit(1);
+    });
+
+    let tytus_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("tytus-mcp").display().to_string()))
+        .unwrap_or_else(|| "tytus-mcp".into());
+
+    let should_inject = |name: &str| -> bool {
+        only.as_ref().map_or(true, |list| list.iter().any(|s| s == name))
+    };
+
+    let mut injected = Vec::new();
+
+    // 1. Claude Code: CLAUDE.md context + .claude/commands/ + .mcp.json
+    if should_inject("claude") {
+        // Append to existing CLAUDE.md or create new one
+        let claude_md = base.join("CLAUDE.md");
+        let tytus_block = CLAUDE_MD_BLOCK;
+        if claude_md.exists() {
+            let existing = std::fs::read_to_string(&claude_md).unwrap_or_default();
+            if !existing.contains("## Tytus Private AI Pod") {
+                let _ = std::fs::write(&claude_md, format!("{}\n\n{}", existing.trim(), tytus_block));
+                injected.push("CLAUDE.md (appended)");
+            } else {
+                injected.push("CLAUDE.md (already present)");
+            }
+        } else {
+            let _ = std::fs::write(&claude_md, tytus_block);
+            injected.push("CLAUDE.md (created)");
+        }
+
+        // .claude/commands/tytus.md
+        let cmd_dir = base.join(".claude").join("commands");
+        let _ = std::fs::create_dir_all(&cmd_dir);
+        let _ = std::fs::write(cmd_dir.join("tytus.md"), CLAUDE_COMMAND_TYTUS);
+        injected.push(".claude/commands/tytus.md");
+
+        // .mcp.json for Claude Code MCP
+        let mcp_json = base.join(".mcp.json");
+        let mcp_config = serde_json::json!({
+            "mcpServers": {
+                "tytus": {
+                    "command": tytus_bin,
+                    "args": [],
+                    "alwaysAllow": [
+                        "tytus_status",
+                        "tytus_env",
+                        "tytus_models",
+                        "tytus_setup_guide"
+                    ]
+                }
+            }
+        });
+        if mcp_json.exists() {
+            // Merge into existing .mcp.json
+            let existing = std::fs::read_to_string(&mcp_json).unwrap_or_default();
+            if let Ok(mut existing_val) = serde_json::from_str::<serde_json::Value>(&existing) {
+                if let Some(servers) = existing_val.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
+                    if !servers.contains_key("tytus") {
+                        servers.insert("tytus".into(), mcp_config["mcpServers"]["tytus"].clone());
+                        let _ = std::fs::write(&mcp_json, serde_json::to_string_pretty(&existing_val).unwrap());
+                        injected.push(".mcp.json (merged)");
+                    } else {
+                        injected.push(".mcp.json (tytus already present)");
+                    }
+                }
+            }
+        } else {
+            let _ = std::fs::write(&mcp_json, serde_json::to_string_pretty(&mcp_config).unwrap());
+            injected.push(".mcp.json (created)");
+        }
+    }
+
+    // 2. AGENTS.md (Codex, Gemini, generic agents)
+    if should_inject("agents") {
+        let agents_md = base.join("AGENTS.md");
+        let tytus_block = AGENTS_MD_BLOCK;
+        if agents_md.exists() {
+            let existing = std::fs::read_to_string(&agents_md).unwrap_or_default();
+            if !existing.contains("## Tytus Private AI Pod") {
+                let _ = std::fs::write(&agents_md, format!("{}\n\n{}", existing.trim(), tytus_block));
+                injected.push("AGENTS.md (appended)");
+            } else {
+                injected.push("AGENTS.md (already present)");
+            }
+        } else {
+            let _ = std::fs::write(&agents_md, tytus_block);
+            injected.push("AGENTS.md (created)");
+        }
+    }
+
+    // 3. Kilocode / OpenCode: .kilo/command/*.md
+    if should_inject("kilocode") || should_inject("opencode") {
+        let kilo_dir = base.join(".kilo").join("command");
+        let _ = std::fs::create_dir_all(&kilo_dir);
+        let _ = std::fs::write(kilo_dir.join("tytus.md"), KILO_COMMAND_TYTUS);
+        injected.push(".kilo/command/tytus.md");
+
+        // Also .kilo/mcp.json
+        let kilo_mcp = base.join(".kilo").join("mcp.json");
+        let mcp_config = serde_json::json!({
+            "mcpServers": {
+                "tytus": {
+                    "command": tytus_bin,
+                    "args": []
+                }
+            }
+        });
+        let _ = std::fs::write(&kilo_mcp, serde_json::to_string_pretty(&mcp_config).unwrap());
+        injected.push(".kilo/mcp.json");
+    }
+
+    // 4. Archon: .archon/commands/tytus.md
+    if should_inject("archon") {
+        let archon_dir = base.join(".archon").join("commands");
+        let _ = std::fs::create_dir_all(&archon_dir);
+        let _ = std::fs::write(archon_dir.join("tytus.md"), ARCHON_COMMAND_TYTUS);
+        injected.push(".archon/commands/tytus.md");
+    }
+
+    // 5. Shell env hook
+    if should_inject("shell") {
+        let shell_hook = base.join(".tytus-env.sh");
+        let _ = std::fs::write(&shell_hook, SHELL_ENV_HOOK);
+        injected.push(".tytus-env.sh");
+    }
+
+    if json {
+        println!("{}", serde_json::json!({
+            "status": "infected",
+            "directory": base.display().to_string(),
+            "files": injected,
+        }));
+    } else {
+        println!("Tytus integration injected into {}", base.display());
+        for file in &injected {
+            println!("  + {}", file);
+        }
+        println!("\nAI CLIs in this directory now have native Tytus access.");
+        println!("Run `tytus mcp` to see MCP server configuration.");
+    }
+}
+
+// ── MCP config printer ─────────────────────────────────────
+
+fn cmd_mcp(format: &str, json: bool) {
+    let tytus_mcp = which_tytus_mcp();
+
+    match format {
+        "claude" => {
+            let config = serde_json::json!({
+                "mcpServers": {
+                    "tytus": {
+                        "command": tytus_mcp,
+                        "args": [],
+                        "alwaysAllow": [
+                            "tytus_status",
+                            "tytus_env",
+                            "tytus_models",
+                            "tytus_setup_guide"
+                        ]
+                    }
+                }
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&config).unwrap());
+            } else {
+                println!("Add to .mcp.json or ~/.claude/settings.json:\n");
+                println!("{}", serde_json::to_string_pretty(&config).unwrap());
+            }
+        }
+        "kilocode" | "opencode" | "kilo" => {
+            let config = serde_json::json!({
+                "mcpServers": {
+                    "tytus": {
+                        "command": tytus_mcp,
+                        "args": []
+                    }
+                }
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&config).unwrap());
+            } else {
+                println!("Add to .kilo/mcp.json or .kilocode/mcp.json:\n");
+                println!("{}", serde_json::to_string_pretty(&config).unwrap());
+            }
+        }
+        "archon" => {
+            let config = serde_json::json!({
+                "tytus": {
+                    "command": tytus_mcp,
+                    "args": []
+                }
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&config).unwrap());
+            } else {
+                println!("Add to .archon/mcp/<name>.json:\n");
+                println!("{}", serde_json::to_string_pretty(&config).unwrap());
+            }
+        }
+        _ => {
+            let config = serde_json::json!({
+                "server": "tytus",
+                "transport": "stdio",
+                "command": tytus_mcp,
+                "args": [],
+                "tools": [
+                    "tytus_status",
+                    "tytus_env",
+                    "tytus_models",
+                    "tytus_chat",
+                    "tytus_revoke",
+                    "tytus_setup_guide"
+                ]
+            });
+            println!("{}", serde_json::to_string_pretty(&config).unwrap());
+        }
+    }
+}
+
+fn which_tytus_mcp() -> String {
+    // Check common locations
+    for path in &[
+        "/usr/local/bin/tytus-mcp",
+        "/opt/homebrew/bin/tytus-mcp",
+    ] {
+        if std::path::Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+    // Fallback: same dir as tytus binary
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("tytus-mcp").display().to_string()))
+        .unwrap_or_else(|| "tytus-mcp".into())
+}
+
+// ── Integration file templates ──────────────────────────────
+
+// ── Doctor (diagnostics) ────────────────────────────────────
+
+async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
+    let mut checks: Vec<(&str, bool, String)> = Vec::new();
+    let state = CliState::load();
+
+    // 1. State file
+    let state_path = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("tytus")
+        .join("state.json");
+    checks.push(("state_file", state_path.exists(),
+        if state_path.exists() { state_path.display().to_string() }
+        else { "Not found. Run: tytus login".into() }
+    ));
+
+    // 2. Login
+    checks.push(("logged_in", state.is_logged_in(),
+        if state.is_logged_in() { format!("as {}", state.email.as_deref().unwrap_or("?")) }
+        else { "Run: tytus login".into() }
+    ));
+
+    // 3. Token validity
+    let token_valid = state.has_valid_token();
+    checks.push(("token_valid", token_valid,
+        if token_valid { "Access token current".into() }
+        else if state.refresh_token.is_some() { "Expired (will auto-refresh)".into() }
+        else { "No token".into() }
+    ));
+
+    // 4. Tytus subscription
+    checks.push(("subscription", state.secret_key.is_some(),
+        if let Some(ref tier) = state.tier { format!("Plan: {}", tier) }
+        else { "No subscription. Upgrade at traylinx.com".into() }
+    ));
+
+    // 5. Pods
+    checks.push(("pods", !state.pods.is_empty(),
+        if state.pods.is_empty() { "No pods. Run: sudo tytus connect".into() }
+        else { format!("{} pod(s)", state.pods.len()) }
+    ));
+
+    // 6. Tunnel
+    let has_tunnel = state.pods.iter().any(|p| p.tunnel_iface.is_some());
+    checks.push(("tunnel", has_tunnel,
+        if has_tunnel {
+            let ifaces: Vec<&str> = state.pods.iter()
+                .filter_map(|p| p.tunnel_iface.as_deref())
+                .collect();
+            format!("Active on {}", ifaces.join(", "))
+        } else if !state.pods.is_empty() {
+            "Not running. Run: sudo tytus connect --pod <id>".into()
+        } else {
+            "No pods".into()
+        }
+    ));
+
+    // 7. Gateway reachability (only if tunnel active)
+    if has_tunnel {
+        if let Some(pod) = state.pods.iter().find(|p| p.tunnel_iface.is_some()) {
+            if let (Some(ref ep), Some(ref key)) = (&pod.ai_endpoint, &pod.pod_api_key) {
+                let url = format!("{}/v1/models", ep);
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .unwrap_or_default();
+                match client.get(&url)
+                    .header("Authorization", format!("Bearer {}", key))
+                    .send().await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let body = resp.text().await.unwrap_or_default();
+                        let count = serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|v| v.get("data").and_then(|d| d.as_array().map(|a| a.len())))
+                            .unwrap_or(0);
+                        checks.push(("gateway", true, format!("{} models available at {}", count, ep)));
+                    }
+                    Ok(resp) => {
+                        checks.push(("gateway", false, format!("HTTP {} from {}", resp.status(), ep)));
+                    }
+                    Err(e) => {
+                        checks.push(("gateway", false, format!("Unreachable: {}. Is tunnel running?", e)));
+                    }
+                }
+            }
+        }
+    }
+
+    // 8. MCP server
+    let mcp_exists = std::process::Command::new("which")
+        .arg("tytus-mcp")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    checks.push(("mcp_server", mcp_exists,
+        if mcp_exists { "tytus-mcp installed".into() }
+        else { "Not found. Install for AI CLI integration".into() }
+    ));
+
+    if json {
+        let results: Vec<serde_json::Value> = checks.iter().map(|(name, ok, msg)| {
+            serde_json::json!({ "check": name, "ok": ok, "message": msg })
+        }).collect();
+        let all_ok = checks.iter().all(|(_, ok, _)| *ok);
+        println!("{}", serde_json::json!({ "healthy": all_ok, "checks": results }));
+    } else {
+        println!("Tytus Doctor\n");
+        for (name, ok, msg) in &checks {
+            let icon = if *ok { "OK" } else { "!!" };
+            println!("  [{}] {}: {}", icon, name, msg);
+        }
+        let all_ok = checks.iter().all(|(_, ok, _)| *ok);
+        println!();
+        if all_ok {
+            println!("All checks passed.");
+        } else {
+            println!("Some checks failed. Follow the suggestions above.");
+        }
+    }
+}
+
+const CLAUDE_MD_BLOCK: &str = r#"## Tytus Private AI Pod
+
+This project has access to a Tytus private AI pod — an encrypted, OpenAI-compatible gateway with 383+ models.
+
+### Quick Start
+```bash
+eval $(tytus env --export)  # Load connection vars
+```
+
+### Available via MCP tools (if tytus MCP server is configured):
+- `tytus_status` — Check login state, plan, active pods
+- `tytus_env` — Get connection URLs and API keys
+- `tytus_models` — List available models on the pod
+- `tytus_chat` — Send chat completions through private pod
+- `tytus_setup_guide` — Step-by-step setup if not connected
+
+### Manual usage:
+```bash
+# List models
+curl -s "$TYTUS_AI_GATEWAY/v1/models" -H "Authorization: Bearer $TYTUS_API_KEY" | jq '.data[].id'
+
+# Chat completion
+curl "$TYTUS_AI_GATEWAY/v1/chat/completions" \
+  -H "Authorization: Bearer $TYTUS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"hello"}]}'
+```
+
+### OpenAI-compatible env (use with any OpenAI SDK):
+```bash
+export OPENAI_API_KEY=$TYTUS_API_KEY
+export OPENAI_BASE_URL=${TYTUS_AI_GATEWAY}/v1
+```
+"#;
+
+const AGENTS_MD_BLOCK: &str = r#"## Tytus Private AI Pod
+
+This project has Tytus pod access — private, encrypted OpenAI-compatible AI gateway.
+
+### Setup
+```bash
+eval $(tytus env --export)     # Load TYTUS_AI_GATEWAY, TYTUS_API_KEY, etc.
+export OPENAI_API_KEY=$TYTUS_API_KEY
+export OPENAI_BASE_URL=${TYTUS_AI_GATEWAY}/v1
+```
+
+### Commands
+```bash
+tytus status --json            # Pod and plan info (JSON)
+tytus env --json               # Connection details (JSON)
+tytus env --export             # Shell-sourceable exports
+sudo tytus connect             # Allocate pod + tunnel (blocks until Ctrl+C)
+tytus revoke <pod_id>          # Free pod units
+```
+
+### API (OpenAI-compatible)
+- Gateway: `$TYTUS_AI_GATEWAY/v1`
+- Auth: `Bearer $TYTUS_API_KEY`
+- Models: 383+ (qwen3-8b, llama-3.1-8b-instruct, etc.)
+"#;
+
+const CLAUDE_COMMAND_TYTUS: &str = r#"---
+description: "Check Tytus pod status, connection info, and available models"
+---
+
+Check the current Tytus private AI pod status and provide a summary.
+
+Run these commands:
+1. `tytus status --json` to get current state
+2. If connected, run `tytus env --json` to get connection details
+3. If tunnel is active, test connectivity: `curl -s "$TYTUS_AI_GATEWAY/v1/models" -H "Authorization: Bearer $TYTUS_API_KEY" | jq '.data | length'`
+
+Report:
+- Login status and plan tier
+- Active pods and their agent types
+- Whether the tunnel is running
+- AI gateway URL and model count (if reachable)
+- Any issues or recommended actions
+"#;
+
+const KILO_COMMAND_TYTUS: &str = r#"---
+description: "Check Tytus private AI pod status and connectivity"
+---
+
+Check the current Tytus private AI pod status.
+
+Steps:
+1. Run `tytus status --json` for current state
+2. If connected, run `tytus env --export` and source the vars
+3. Test: `curl -s "$TYTUS_AI_GATEWAY/v1/models" -H "Authorization: Bearer $TYTUS_API_KEY" | jq '.data | length'`
+
+Report login status, active pods, tunnel state, and gateway reachability.
+"#;
+
+const ARCHON_COMMAND_TYTUS: &str = r#"---
+description: "Check Tytus pod status and report connectivity"
+---
+
+Check Tytus private AI pod status and connectivity.
+
+1. `tytus status --json`
+2. `tytus env --json` (if pods exist)
+3. Test gateway if tunnel active
+
+Report: login state, pods, tunnel, gateway reachability, recommended actions.
+"#;
+
+const SHELL_ENV_HOOK: &str = r#"#!/bin/sh
+# Tytus environment loader — source this to inject pod connection vars.
+# Usage: source .tytus-env.sh
+#    or: eval $(tytus env --export)
+
+if command -v tytus >/dev/null 2>&1; then
+    _tytus_env=$(tytus env --export 2>/dev/null)
+    if [ -n "$_tytus_env" ]; then
+        eval "$_tytus_env"
+        # Also set OpenAI-compatible aliases
+        export OPENAI_API_KEY="${TYTUS_API_KEY}"
+        export OPENAI_BASE_URL="${TYTUS_AI_GATEWAY}/v1"
+    fi
+    unset _tytus_env
+fi
+"#;
 
 // ── Helpers ──────────────────────────────────────────────────
 

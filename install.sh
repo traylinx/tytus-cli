@@ -1,10 +1,9 @@
 #!/bin/bash
-# Tytus CLI installer
+# Tytus CLI installer — installs both tytus and tytus-mcp (MCP server)
 # Usage: curl -fsSL https://tytus.traylinx.com/install.sh | sh
 set -e
 
 REPO="traylinx/tytus-cli"
-BINARY="tytus"
 INSTALL_DIR="/usr/local/bin"
 
 # Detect platform
@@ -17,7 +16,7 @@ case "${OS}-${ARCH}" in
   linux-x86_64)   ASSET="tytus-linux-x86_64.tar.gz" ;;
   *)
     echo "Unsupported platform: ${OS}-${ARCH}"
-    echo "Build from source: cargo build --release -p atomek-cli"
+    echo "Build from source: cargo build --release -p atomek-cli -p tytus-mcp"
     exit 1
     ;;
 esac
@@ -32,27 +31,41 @@ if [ -z "$LATEST" ]; then
   exit 1
 fi
 
-# Download and install
+# Download and extract
 TMP=$(mktemp -d)
 curl -fsSL "$LATEST" -o "${TMP}/${ASSET}"
 tar xzf "${TMP}/${ASSET}" -C "${TMP}"
 
-if [ -w "$INSTALL_DIR" ]; then
-  mv "${TMP}/${BINARY}" "${INSTALL_DIR}/"
-else
-  echo "Installing to ${INSTALL_DIR} (requires sudo)..."
-  sudo mv "${TMP}/${BINARY}" "${INSTALL_DIR}/"
-fi
+# Install both binaries
+install_bin() {
+  local bin="$1"
+  if [ -f "${TMP}/${bin}" ]; then
+    if [ -w "$INSTALL_DIR" ]; then
+      mv "${TMP}/${bin}" "${INSTALL_DIR}/"
+    else
+      sudo mv "${TMP}/${bin}" "${INSTALL_DIR}/"
+    fi
+    chmod +x "${INSTALL_DIR}/${bin}"
+    echo "  + ${INSTALL_DIR}/${bin}"
+  fi
+}
 
-chmod +x "${INSTALL_DIR}/${BINARY}"
+echo "Installing..."
+install_bin "tytus"
+install_bin "tytus-mcp"
 rm -rf "$TMP"
 
 echo ""
-echo "✓ tytus installed to ${INSTALL_DIR}/${BINARY}"
+echo "Installed:"
+echo "  tytus      — CLI for pod management"
+echo "  tytus-mcp  — MCP server for AI CLI integration"
 echo ""
 echo "Quick start:"
 echo "  tytus login              # Authenticate (one-time)"
 echo "  sudo tytus connect       # Connect to your AI pod"
 echo "  tytus env --export       # Show connection vars"
+echo ""
+echo "Infect any project (adds MCP + context files for all AI CLIs):"
+echo "  cd your-project && tytus infect"
 echo ""
 echo "Docs: https://github.com/${REPO}"
