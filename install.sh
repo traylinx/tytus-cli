@@ -1,98 +1,307 @@
-#!/bin/bash
-# Tytus CLI installer — installs both tytus and tytus-mcp (MCP server)
-# Usage: curl -fsSL https://tytus.traylinx.com/install.sh | sh
-set -e
+#!/bin/sh
+# ============================================================
+# tytus-cli installer — installs both tytus and tytus-mcp
+# ============================================================
+#
+# Usage:
+#     curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh
+#
+# What it does:
+#   1. Detects your OS + arch
+#   2. Tries to download a prebuilt release from GitHub (future)
+#   3. Falls back to building from source via `cargo install --git`
+#      (installs rust via rustup if needed, with consent)
+#   4. Sets up a passwordless sudoers entry so `tytus connect` never
+#      prompts for a password when opening the WireGuard tunnel
+#   5. Prints clear next steps
+#
+# Env:
+#     TYTUS_INSTALL_DIR   Override the install directory (default: /usr/local/bin
+#                         for releases, $HOME/.cargo/bin for source builds)
+#     TYTUS_SKIP_SUDOERS  Set to "1" to skip sudoers configuration
+#     TYTUS_FORCE_SOURCE  Set to "1" to skip the release download and go
+#                         straight to cargo install --git
+# ============================================================
+
+set -eu
 
 REPO="traylinx/tytus-cli"
-INSTALL_DIR="/usr/local/bin"
+REPO_URL="https://github.com/${REPO}"
+BRAND="Tytus"
+CLI_NAME="tytus"
+MCP_NAME="tytus-mcp"
 
-# Detect platform
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-ARCH=$(uname -m)
-
-case "${OS}-${ARCH}" in
-  darwin-x86_64)  ASSET="tytus-macos-x86_64.tar.gz" ;;
-  darwin-arm64)   ASSET="tytus-macos-aarch64.tar.gz" ;;
-  linux-x86_64)   ASSET="tytus-linux-x86_64.tar.gz" ;;
-  *)
-    echo "Unsupported platform: ${OS}-${ARCH}"
-    echo "Build from source: cargo build --release -p atomek-cli -p tytus-mcp"
-    exit 1
-    ;;
-esac
-
-# Get latest release URL
-echo "Downloading tytus for ${OS}/${ARCH}..."
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep "browser_download_url.*${ASSET}" | cut -d'"' -f4)
-
-if [ -z "$LATEST" ]; then
-  echo "Error: Could not find release for ${ASSET}"
-  echo "Check https://github.com/${REPO}/releases"
-  exit 1
+# ── Colors ──────────────────────────────────────────────────
+if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+    BOLD=$(tput bold)
+    DIM=$(tput dim)
+    RED=$(tput setaf 1)
+    GREEN=$(tput setaf 2)
+    YELLOW=$(tput setaf 3)
+    BLUE=$(tput setaf 4)
+    RESET=$(tput sgr0)
+else
+    BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; RESET=""
 fi
 
-# Download and extract
-TMP=$(mktemp -d)
-curl -fsSL "$LATEST" -o "${TMP}/${ASSET}"
-tar xzf "${TMP}/${ASSET}" -C "${TMP}"
+msg()  { printf "%s==>%s %s\n" "$BLUE$BOLD" "$RESET$BOLD" "$1$RESET"; }
+ok()   { printf " %s✓%s %s\n" "$GREEN" "$RESET" "$1"; }
+warn() { printf " %s!%s %s\n" "$YELLOW" "$RESET" "$1" >&2; }
+err()  { printf " %s✗%s %s\n" "$RED" "$RESET" "$1" >&2; }
 
-# Install both binaries
-install_bin() {
-  local bin="$1"
-  if [ -f "${TMP}/${bin}" ]; then
-    if [ -w "$INSTALL_DIR" ]; then
-      mv "${TMP}/${bin}" "${INSTALL_DIR}/"
-    else
-      sudo mv "${TMP}/${bin}" "${INSTALL_DIR}/"
-    fi
-    chmod +x "${INSTALL_DIR}/${bin}"
-    echo "  + ${INSTALL_DIR}/${bin}"
-  fi
+banner() {
+    printf "\n"
+    printf "%s┌─────────────────────────────────────────────────┐%s\n" "$BOLD" "$RESET"
+    printf "%s│          Installing %sTytus CLI%s                    │%s\n" "$BOLD" "$BLUE" "$RESET$BOLD" "$RESET"
+    printf "%s│   %sPrivate AI pods driven from your terminal%s     │%s\n" "$BOLD" "$DIM" "$RESET$BOLD" "$RESET"
+    printf "%s└─────────────────────────────────────────────────┘%s\n" "$BOLD" "$RESET"
+    printf "\n"
 }
 
-echo "Installing..."
-install_bin "tytus"
-install_bin "tytus-mcp"
-rm -rf "$TMP"
+# Read from /dev/tty so prompts work when piped from curl
+read_reply() {
+    _prompt="$1"
+    _default="$2"
+    printf "%s%s%s " "$YELLOW" "$_prompt" "$RESET"
+    if [ -t 0 ]; then
+        read -r _reply || _reply="$_default"
+    elif [ -e /dev/tty ]; then
+        read -r _reply </dev/tty || _reply="$_default"
+    else
+        _reply="$_default"
+    fi
+    printf "%s" "$_reply"
+}
 
-# ── Set up passwordless sudo for tunnel activation ──────────
-# tytus connect needs root only for creating the TUN device.
-# This sudoers entry allows 'tytus tunnel-up' to run without a password
-# so users never have to type sudo themselves.
-TYTUS_BIN="${INSTALL_DIR}/tytus"
-SUDOERS_FILE="/etc/sudoers.d/tytus"
-CURRENT_USER="${SUDO_USER:-$(whoami)}"
+# ── Detection ───────────────────────────────────────────────
+
+detect_platform() {
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+
+    case "$OS" in
+        darwin) OS_PRETTY="macOS" ;;
+        linux) OS_PRETTY="Linux" ;;
+        *)
+            err "Unsupported OS: $OS. Tytus currently ships for macOS and Linux."
+            err "Windows support is planned. Track at ${REPO_URL}/issues."
+            exit 1
+            ;;
+    esac
+
+    # Normalise arch
+    case "$ARCH" in
+        x86_64|amd64)  ARCH_NORM="x86_64" ;;
+        arm64|aarch64) ARCH_NORM="aarch64" ;;
+        *)
+            warn "Architecture '$ARCH' has no prebuilt binary; will build from source."
+            ARCH_NORM="$ARCH"
+            ;;
+    esac
+
+    ok "Detected: ${OS_PRETTY} ${ARCH_NORM}"
+}
+
+# ── Try prebuilt release download ──────────────────────────
+
+try_release_download() {
+    [ "${TYTUS_FORCE_SOURCE:-}" = "1" ] && return 1
+
+    RELEASE_ASSET=""
+    case "${OS}-${ARCH_NORM}" in
+        darwin-x86_64)  RELEASE_ASSET="tytus-macos-x86_64.tar.gz" ;;
+        darwin-aarch64) RELEASE_ASSET="tytus-macos-aarch64.tar.gz" ;;
+        linux-x86_64)   RELEASE_ASSET="tytus-linux-x86_64.tar.gz" ;;
+        linux-aarch64)  RELEASE_ASSET="tytus-linux-aarch64.tar.gz" ;;
+        *)              return 1 ;;
+    esac
+
+    msg "Looking for prebuilt release (${RELEASE_ASSET})..."
+    RELEASE_URL=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+        | grep "browser_download_url.*${RELEASE_ASSET}" \
+        | cut -d'"' -f4 | head -1)
+
+    if [ -z "$RELEASE_URL" ]; then
+        warn "No prebuilt binary published yet for ${RELEASE_ASSET}. Falling back to source build."
+        return 1
+    fi
+
+    ok "Found release: $RELEASE_URL"
+
+    INSTALL_DIR="${TYTUS_INSTALL_DIR:-/usr/local/bin}"
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+
+    msg "Downloading..."
+    curl -fsSL "$RELEASE_URL" -o "${TMP}/${RELEASE_ASSET}"
+    tar xzf "${TMP}/${RELEASE_ASSET}" -C "${TMP}"
+
+    install_one() {
+        _bin="$1"
+        [ -f "${TMP}/${_bin}" ] || return 0
+        if [ -w "$INSTALL_DIR" ]; then
+            mv "${TMP}/${_bin}" "${INSTALL_DIR}/"
+        else
+            sudo mv "${TMP}/${_bin}" "${INSTALL_DIR}/"
+        fi
+        chmod +x "${INSTALL_DIR}/${_bin}"
+        ok "${INSTALL_DIR}/${_bin}"
+    }
+    msg "Installing to ${INSTALL_DIR}..."
+    install_one "${CLI_NAME}"
+    install_one "${MCP_NAME}"
+
+    BIN_PATH="${INSTALL_DIR}/${CLI_NAME}"
+    return 0
+}
+
+# ── Fallback: cargo install --git ──────────────────────────
+
+ensure_cargo() {
+    if command -v cargo >/dev/null 2>&1; then
+        ok "Rust toolchain: $(cargo --version)"
+        return 0
+    fi
+
+    warn "Rust (cargo) not found. Tytus is built from source with cargo."
+    reply=$(read_reply "Install Rust via rustup now? [y/N]" "n")
+    case "$reply" in
+        [yY]*)
+            msg "Installing Rust via rustup (~2 minutes)..."
+            curl --proto '=https' --tlsv1.2 -sSfL https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable --profile minimal
+            # shellcheck disable=SC1091
+            . "$HOME/.cargo/env"
+            if command -v cargo >/dev/null 2>&1; then
+                ok "Rust installed: $(cargo --version)"
+            else
+                err "rustup finished but cargo is still not on PATH."
+                err "Open a new terminal and re-run this installer."
+                exit 1
+            fi
+            ;;
+        *)
+            err "Rust is required to install Tytus from source."
+            err "Install manually from https://rustup.rs and re-run this script."
+            err "Or wait for us to ship prebuilt binaries — coming soon."
+            exit 1
+            ;;
+    esac
+}
+
+install_from_source() {
+    ensure_cargo
+    msg "Building ${CLI_NAME} and ${MCP_NAME} from source via cargo install --git..."
+    msg "First build takes 3–5 minutes. Subsequent upgrades take ~30 seconds."
+
+    CARGO_ARGS="--git ${REPO_URL} --branch main --bin ${CLI_NAME} --bin ${MCP_NAME} --force"
+    if [ -n "${TYTUS_INSTALL_DIR:-}" ]; then
+        msg "Installing to ${TYTUS_INSTALL_DIR}"
+        # shellcheck disable=SC2086
+        cargo install $CARGO_ARGS --root "${TYTUS_INSTALL_DIR%/bin}"
+        BIN_PATH="${TYTUS_INSTALL_DIR}/${CLI_NAME}"
+    else
+        # shellcheck disable=SC2086
+        cargo install $CARGO_ARGS
+        BIN_PATH="${HOME}/.cargo/bin/${CLI_NAME}"
+    fi
+}
+
+# ── Sudoers setup ──────────────────────────────────────────
 
 setup_sudoers() {
-  local entry="${CURRENT_USER} ALL=(root) NOPASSWD: ${TYTUS_BIN} tunnel-up *, /bin/kill -TERM *"
-  if [ -f "$SUDOERS_FILE" ] && grep -qF "$entry" "$SUDOERS_FILE" 2>/dev/null; then
-    echo "  Passwordless tunnel: already configured"
-    return
-  fi
-  echo "$entry" > "$SUDOERS_FILE" && chmod 440 "$SUDOERS_FILE"
-  echo "  Passwordless tunnel: configured for ${CURRENT_USER}"
+    [ "${TYTUS_SKIP_SUDOERS:-}" = "1" ] && { ok "Skipping sudoers setup (TYTUS_SKIP_SUDOERS=1)"; return 0; }
+
+    SUDOERS_FILE="/etc/sudoers.d/tytus"
+    CURRENT_USER="${SUDO_USER:-$(whoami)}"
+    ENTRY="${CURRENT_USER} ALL=(root) NOPASSWD: ${BIN_PATH} tunnel-up *, /bin/kill -TERM *"
+
+    msg "Configuring passwordless tunnel (optional)..."
+    if [ -f "$SUDOERS_FILE" ] && grep -qF "$ENTRY" "$SUDOERS_FILE" 2>/dev/null; then
+        ok "Passwordless tunnel already configured"
+        return 0
+    fi
+
+    write_entry() {
+        echo "$ENTRY" > "$SUDOERS_FILE"
+        chmod 440 "$SUDOERS_FILE"
+    }
+
+    if [ "$(id -u)" = "0" ]; then
+        write_entry && ok "Passwordless tunnel configured for ${CURRENT_USER}"
+    elif command -v sudo >/dev/null 2>&1; then
+        if sudo -n true 2>/dev/null; then
+            sudo sh -c "echo '$ENTRY' > '$SUDOERS_FILE' && chmod 440 '$SUDOERS_FILE'" \
+                && ok "Passwordless tunnel configured for ${CURRENT_USER}"
+        else
+            warn "Passwordless tunnel not configured — you'll be prompted for sudo on 'tytus connect'."
+            warn "To configure later, run: sudo ${BIN_PATH} install-sudoers (coming soon)"
+        fi
+    else
+        warn "sudo not available; passwordless tunnel not configured."
+    fi
 }
 
-# We're likely running with sudo already (from install_bin), or can elevate
-if [ "$(id -u)" = "0" ]; then
-  setup_sudoers
-elif command -v sudo >/dev/null 2>&1; then
-  sudo bash -c "
-    echo '${CURRENT_USER} ALL=(root) NOPASSWD: ${TYTUS_BIN} tunnel-up *, /bin/kill -TERM *' > ${SUDOERS_FILE} && chmod 440 ${SUDOERS_FILE}
-  " 2>/dev/null && echo "  Passwordless tunnel: configured" || echo "  Note: run with sudo to enable passwordless tunnel activation"
-fi
+# ── Verify ─────────────────────────────────────────────────
 
-echo ""
-echo "Installed:"
-echo "  tytus      — CLI for pod management"
-echo "  tytus-mcp  — MCP server for AI CLI integration"
-echo ""
-echo "Quick start:"
-echo "  tytus login              # Authenticate (one-time)"
-echo "  tytus connect            # Connect to your AI pod"
-echo "  tytus env --export       # Show connection vars"
-echo ""
-echo "Infect any project (adds MCP + context files for all AI CLIs):"
-echo "  cd your-project && tytus infect"
-echo ""
-echo "Docs: https://github.com/${REPO}"
+verify_install() {
+    if ! command -v "${CLI_NAME}" >/dev/null 2>&1; then
+        err "${CLI_NAME} was installed but isn't on PATH."
+        err "Add this to your shell profile and open a new terminal:"
+        err "    export PATH=\"\$HOME/.cargo/bin:\$PATH\""
+        exit 1
+    fi
+    ok "$(${CLI_NAME} --version)"
+    if command -v "${MCP_NAME}" >/dev/null 2>&1; then
+        ok "${MCP_NAME} ready (MCP server for Claude Code / OpenCode)"
+    fi
+}
+
+# ── Next steps ─────────────────────────────────────────────
+
+print_next_steps() {
+    printf "\n"
+    printf "%s┌─────────────────────────────────────────────────┐%s\n" "$GREEN$BOLD" "$RESET"
+    printf "%s│             %sTytus is ready to use!%s               │%s\n" "$GREEN$BOLD" "$RESET$GREEN$BOLD" "$RESET$GREEN$BOLD" "$RESET"
+    printf "%s└─────────────────────────────────────────────────┘%s\n" "$GREEN$BOLD" "$RESET"
+    printf "\n"
+    printf "${BOLD}Next steps:${RESET}\n"
+    printf "\n"
+    printf "  ${GREEN}1.${RESET} Interactive first-run wizard (login → plan → pod → tunnel → test):\n"
+    printf "       ${BOLD}tytus setup${RESET}\n"
+    printf "\n"
+    printf "  ${GREEN}2.${RESET} Or drive it manually:\n"
+    printf "       ${BOLD}tytus login${RESET}          # browser device-auth\n"
+    printf "       ${BOLD}tytus connect${RESET}        # allocate a pod + activate tunnel\n"
+    printf "       ${BOLD}tytus env --export${RESET}   # OPENAI_BASE_URL + OPENAI_API_KEY\n"
+    printf "       ${BOLD}tytus chat${RESET}           # REPL against your private pod\n"
+    printf "\n"
+    printf "  ${GREEN}3.${RESET} Make Claude Code / OpenCode / Cursor drive Tytus natively:\n"
+    printf "       ${BOLD}tytus bootstrap-prompt${RESET}   # short paste prompt for any AI tool\n"
+    printf "       ${BOLD}tytus link .${RESET}              # drop integration files into a project\n"
+    printf "\n"
+    printf "  ${GREEN}4.${RESET} Full LLM-facing reference (for AI agents):\n"
+    printf "       ${BOLD}tytus llm-docs${RESET}\n"
+    printf "\n"
+    printf "${DIM}Docs: %s${RESET}\n" "${REPO_URL}"
+    printf "\n"
+}
+
+# ── Main ───────────────────────────────────────────────────
+
+main() {
+    banner
+    detect_platform
+
+    if try_release_download; then
+        :
+    else
+        install_from_source
+    fi
+
+    verify_install
+    setup_sudoers
+    print_next_steps
+}
+
+main "$@"
