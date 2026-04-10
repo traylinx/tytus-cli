@@ -96,8 +96,17 @@ impl ToolResult {
 fn tool_definitions() -> Vec<ToolInfo> {
     vec![
         ToolInfo {
+            name: "tytus_docs".into(),
+            description: "Return the comprehensive LLM-facing reference for tytus-cli (same content as `tytus llm-docs`). Read this BEFORE driving any other tytus operation in a fresh session — it covers the command surface, agent types (nemoclaw=1u, hermes=2u), plan tiers, the only available models (ail-compound, ail-image, ail-embed, minimax/ail-compound, minimax/ail-image), the stable URL/key model, and the standard recipes. Cache the output in your context for the rest of the session.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolInfo {
             name: "tytus_status".into(),
-            description: "Get current Tytus status: login state, plan tier, active pods with endpoints and API keys. Use this first to check if the user is connected.".into(),
+            description: "Return the current state of the user's Tytus account: signed-in email, subscription plan tier (Explorer/Creator/Operator), active pods with their pod_id, droplet_id, agent_type, tunnel state, and the stable user key + stable AI endpoint. Always call this first in any new conversation to find out what the user actually has — branch on the result instead of guessing.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -106,13 +115,13 @@ fn tool_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "tytus_env".into(),
-            description: "Get connection environment variables for a specific pod (AI gateway URL, API key, agent endpoint). Returns values ready to use with curl or any OpenAI-compatible client.".into(),
+            description: "Return the connection environment variables for a pod. Default output is the STABLE pair: OPENAI_BASE_URL=http://10.42.42.1:18080/v1 and OPENAI_API_KEY=sk-tytus-user-<32hex>. These values are constant across pod revoke/reallocate cycles. Use these in any user-visible config file. The legacy per-pod values (10.18.X.Y + sk-<pod>) are available via tytus env --raw and should only be used for debugging.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pod_id": {
                         "type": "string",
-                        "description": "Pod ID (e.g. '01'). Omit for first available pod."
+                        "description": "Pod ID (e.g. '02'). Omit for first connected pod."
                     }
                 },
                 "required": []
@@ -120,27 +129,25 @@ fn tool_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "tytus_models".into(),
-            description: "List available AI models on the connected pod's gateway. Requires an active tunnel. Returns model IDs that can be used with the OpenAI-compatible API.".into(),
+            description: "List the LLM models available on the user's pod gateway. Returns the small fixed catalog: ail-compound (MiniMax M2.7, text+vision+audio), ail-image (MiniMax image-01), ail-embed (mistral-embed via SwitchAI), and the minimax/-prefixed aliases. Requires an active tunnel — call tytus_status first and tytus_setup_guide if no pod is connected.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "pod_id": {
-                        "type": "string",
-                        "description": "Pod ID. Omit for first available pod."
-                    }
+                    "pod_id": { "type": "string", "description": "Pod ID. Omit for first connected pod." }
                 },
                 "required": []
             }),
         },
         ToolInfo {
             name: "tytus_chat".into(),
-            description: "Send a chat completion request to the private AI gateway. Uses the OpenAI-compatible API on the connected pod. Requires an active tunnel (run `sudo tytus connect` first).".into(),
+            description: "Send a chat completion through the user's private pod gateway. The request is OpenAI-compatible and is routed via WireGuard tunnel through the droplet's SwitchAILocal proxy to MiniMax (no customer LLM traffic ever traverses Traylinx Cloud). The model parameter MUST be one of: ail-compound (default text/vision/audio), ail-image, ail-embed, minimax/ail-compound, minimax/ail-image. Do NOT pass any other model id — it will fail. Requires an active tunnel.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "model": {
                         "type": "string",
-                        "description": "Model ID (e.g. 'qwen3-8b', 'llama-3.1-8b-instruct'). Run tytus_models to see available models."
+                        "enum": ["ail-compound", "ail-image", "ail-embed", "minimax/ail-compound", "minimax/ail-image"],
+                        "description": "One of the fixed model ids on the pod gateway. Default chat = ail-compound."
                     },
                     "messages": {
                         "type": "array",
@@ -152,19 +159,19 @@ fn tool_definitions() -> Vec<ToolInfo> {
                             },
                             "required": ["role", "content"]
                         },
-                        "description": "Chat messages array"
+                        "description": "Chat messages array (OpenAI format)"
                     },
                     "max_tokens": {
                         "type": "integer",
-                        "description": "Max tokens to generate (default: 1024)"
+                        "description": "Max tokens to generate (default 1024). MiniMax M2.7 can spend most tokens on reasoning_content before producing visible text — bump this to 200+ if you see empty content."
                     },
                     "temperature": {
                         "type": "number",
-                        "description": "Sampling temperature (default: 0.7)"
+                        "description": "Sampling temperature (default 0.7)"
                     },
                     "pod_id": {
                         "type": "string",
-                        "description": "Pod ID. Omit for first available pod."
+                        "description": "Pod ID. Omit for first connected pod."
                     }
                 },
                 "required": ["model", "messages"]
@@ -172,13 +179,13 @@ fn tool_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "tytus_revoke".into(),
-            description: "Revoke (release) a specific pod, freeing its units for reallocation. The pod's tunnel must be disconnected first.".into(),
+            description: "DESTRUCTIVE. Revoke a pod allocation: frees its units in Scalesys AND wipes the pod's workspace state directory + container on the droplet. Cannot be undone. Always confirm with the user before calling this. The user can re-allocate later with tytus_status / tytus connect, but they will lose any sessions, skills, memories, and overlay config they had on the pod.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pod_id": {
                         "type": "string",
-                        "description": "Pod ID to revoke (e.g. '01')"
+                        "description": "Pod ID to revoke (e.g. '02')."
                     }
                 },
                 "required": ["pod_id"]
@@ -186,7 +193,7 @@ fn tool_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "tytus_setup_guide".into(),
-            description: "Get setup instructions for Tytus. Use when the user is not logged in or has no active tunnel. Returns step-by-step instructions.".into(),
+            description: "Return human-readable setup instructions to show the user when they are not logged in or have no active pod. Use this as the response body when tytus_status returns logged_in=false or pods=[] — it tells the user exactly which `tytus` commands to run and in what order. Do NOT make up instructions; always pull from this tool.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
