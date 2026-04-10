@@ -17,6 +17,12 @@ pub struct PodAllocation {
     pub agent_endpoint: Option<String>,
     pub agent_health_port: Option<u16>,
     pub agent_api_port: Option<u16>,
+    // Stable endpoint recommended for local tools — persists across pod
+    // revocations, agent swaps, and droplet migrations. The base URL is
+    // always http://10.42.42.1:18080 (dual-bound WG address), and the key
+    // is a per-user stable token maintained by the droplet's nginx map.
+    pub stable_ai_endpoint: Option<String>,
+    pub stable_user_key: Option<String>,
 }
 
 pub async fn request_pod(client: &TytusClient) -> atomek_core::Result<PodAllocation> {

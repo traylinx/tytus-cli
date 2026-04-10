@@ -76,6 +76,11 @@ enum Commands {
         /// Output as shell export statements
         #[arg(long)]
         export: bool,
+        /// Emit raw per-pod values (unstable, changes when pod rotates).
+        /// Default is the stable 10.42.42.1 endpoint + per-user stable key
+        /// that never changes unless you call `tytus rotate-key`.
+        #[arg(long)]
+        raw: bool,
     },
     /// Inject Tytus integration files into a project directory.
     /// Drops CLAUDE.md context, MCP config, custom commands, and AGENTS.md
@@ -147,7 +152,7 @@ async fn main() {
         Some(Commands::Disconnect { pod }) => cmd_disconnect(pod, cli.json).await,
         Some(Commands::Revoke { pod }) => cmd_revoke(&http, &pod, cli.json).await,
         Some(Commands::Logout) => cmd_logout(&http, cli.json).await,
-        Some(Commands::Env { pod, export }) => cmd_env(pod, export, cli.json),
+        Some(Commands::Env { pod, export, raw }) => cmd_env(pod, export, raw, cli.json, &http).await,
         Some(Commands::Infect { dir, only }) => cmd_infect(&dir, only, cli.json),
         Some(Commands::Mcp { format }) => cmd_mcp(&format, cli.json),
         Some(Commands::Restart { pod }) => cmd_restart(&http, pod, cli.json).await,
@@ -297,6 +302,8 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
                     agent_type: a.agent_type.clone(),
                     agent_endpoint: a.agent_endpoint.clone(),
                     tunnel_iface: None,
+                    stable_ai_endpoint: a.stable_ai_endpoint.clone(),
+                    stable_user_key: a.stable_user_key.clone(),
                 });
                 state.save();
                 if !json { eprintln!("✓ Pod {} allocated", a.pod_id); }
@@ -882,22 +889,40 @@ async fn cmd_logout(http: &atomek_core::HttpClient, json: bool) {
 
 // ── Env (export connection info) ─────────────────────────────
 
-fn cmd_env(pod_id: Option<String>, export: bool, json: bool) {
-    let state = CliState::load();
+async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, json: bool, http: &atomek_core::HttpClient) {
+    let mut state = CliState::load();
 
-    let pod = if let Some(ref pid) = pod_id {
-        state.pods.iter().find(|p| p.pod_id == *pid)
+    let pod_idx = if let Some(ref pid) = pod_id {
+        state.pods.iter().position(|p| p.pod_id == *pid)
     } else {
         // First connected pod, or first pod
-        state.pods.iter().find(|p| p.tunnel_iface.is_some())
-            .or_else(|| state.pods.first())
+        state.pods.iter().position(|p| p.tunnel_iface.is_some())
+            .or_else(|| if state.pods.is_empty() { None } else { Some(0) })
     };
 
-    let Some(pod) = pod else {
+    let Some(idx) = pod_idx else {
         if json { println!(r#"{{"error":"no_pods"}}"#); }
         else { eprintln!("No pods. Run: tytus connect"); }
         std::process::exit(1);
     };
+
+    // If we don't have a stable key cached yet (e.g. state from a pre-Phase-2
+    // CLI), try to fetch one from the Provider. Ignore errors — we'll fall
+    // back to raw per-pod values below.
+    if !raw && state.pods[idx].stable_user_key.is_none() {
+        if let (Some(ref st), Some(ref aid)) = (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
+            let client = atomek_pods::TytusClient::new(http, st, aid);
+            if let Ok((endpoint, key)) = atomek_pods::get_user_key(&client).await {
+                if let Some(p) = state.pods.get_mut(idx) {
+                    p.stable_ai_endpoint = Some(endpoint);
+                    p.stable_user_key = Some(key);
+                }
+                state.save();
+            }
+        }
+    }
+
+    let pod = &state.pods[idx];
 
     if json {
         println!("{}", serde_json::to_string_pretty(pod).unwrap_or_default());
@@ -906,15 +931,32 @@ fn cmd_env(pod_id: Option<String>, export: bool, json: bool) {
 
     let prefix = if export { "export " } else { "" };
 
-    if let Some(ref ep) = pod.ai_endpoint {
-        println!("{}TYTUS_AI_GATEWAY={}", prefix, ep);
-    }
-    if let Some(ref ep) = pod.agent_endpoint {
-        println!("{}TYTUS_AGENT_API={}", prefix, ep);
-    }
-    if let Some(ref key) = pod.pod_api_key {
+    if raw {
+        // Unstable per-pod values — changes on pod rotation.
+        if let Some(ref ep) = pod.ai_endpoint {
+            println!("{}OPENAI_BASE_URL={}/v1", prefix, ep);
+            println!("{}TYTUS_AI_GATEWAY={}", prefix, ep);
+        }
+        if let Some(ref ep) = pod.agent_endpoint {
+            println!("{}TYTUS_AGENT_API={}", prefix, ep);
+        }
+        if let Some(ref key) = pod.pod_api_key {
+            println!("{}OPENAI_API_KEY={}", prefix, key);
+            println!("{}TYTUS_API_KEY={}", prefix, key);
+        }
+    } else {
+        // Stable values — the pair to paste into Cursor / Claude Desktop / etc.
+        let endpoint = pod.stable_ai_endpoint.as_deref()
+            .unwrap_or("http://10.42.42.1:18080");
+        let key = pod.stable_user_key.as_deref()
+            .or(pod.pod_api_key.as_deref())
+            .unwrap_or("");
+        println!("{}OPENAI_BASE_URL={}/v1", prefix, endpoint);
+        println!("{}OPENAI_API_KEY={}", prefix, key);
+        println!("{}TYTUS_AI_GATEWAY={}", prefix, endpoint);
         println!("{}TYTUS_API_KEY={}", prefix, key);
     }
+
     if let Some(ref at) = pod.agent_type {
         println!("{}TYTUS_AGENT_TYPE={}", prefix, at);
     }
@@ -2023,6 +2065,8 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
                         agent_type: pod.agent_type.clone(),
                         agent_endpoint: None,
                         tunnel_iface: None,
+                        stable_ai_endpoint: None,
+                        stable_user_key: None,
                     });
                 }
             }
