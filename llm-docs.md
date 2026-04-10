@@ -97,7 +97,8 @@ revocation, plus a 60-second periodic reconcile. The user never sees or
 needs the real per-pod key.
 
 `tytus env --raw` will print the per-pod values for debugging (URL like
-`http://10.18.2.1:18080`, key like `<REDACTED_PER_POD_KEY_PREFIX>...`). These change.
+`http://10.X.Y.1:18080`, key like `sk-<48 hex>`). These change on every
+pod rotation, droplet migration, or octet reassignment.
 **Do not use `--raw` values in user-visible config files** — they break
 on the next pod rotation.
 
