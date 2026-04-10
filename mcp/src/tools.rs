@@ -9,6 +9,7 @@ use serde_json::Value;
 
 pub async fn call_tool(name: &str, args: Value) -> ToolResult {
     match name {
+        "tytus_docs" => tool_docs().await,
         "tytus_status" => tool_status().await,
         "tytus_env" => tool_env(&args).await,
         "tytus_models" => tool_models(&args).await,
@@ -17,6 +18,15 @@ pub async fn call_tool(name: &str, args: Value) -> ToolResult {
         "tytus_setup_guide" => tool_setup_guide().await,
         _ => ToolResult::error(format!("Unknown tool: {}", name)),
     }
+}
+
+/// LLM_DOCS — same content as `tytus llm-docs`. Sourced from the
+/// workspace-root llm-docs.md so both the cli and mcp binaries stay
+/// in sync without runtime coupling.
+const LLM_DOCS: &str = include_str!("../../llm-docs.md");
+
+async fn tool_docs() -> ToolResult {
+    ToolResult::text(LLM_DOCS.to_string())
 }
 
 async fn tool_status() -> ToolResult {
