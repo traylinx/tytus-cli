@@ -1,4 +1,6 @@
 mod state;
+#[allow(dead_code)]
+mod wizard;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use state::{CliState, PodEntry};
@@ -7,7 +9,7 @@ use state::{CliState, PodEntry};
 #[command(name = "tytus", about = "Tytus private AI pod — connect from any terminal", version)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 
     /// Output as JSON (for programmatic use by AI CLIs)
     #[arg(long, global = true)]
@@ -28,6 +30,18 @@ impl AgentType {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Full first-time setup wizard — login, allocate pod, configure, test
+    Setup,
+    /// Quick health test — runs a sample chat completion and verifies everything works
+    Test,
+    /// Interactive chat with your private AI pod
+    Chat {
+        /// Model to use (default: ail-compound)
+        #[arg(short, long, default_value = "ail-compound")]
+        model: String,
+    },
+    /// Configure your agent (OpenClaw / Hermes) interactively
+    Configure,
     /// Login to Traylinx (opens browser for device auth)
     Login,
     /// Show current status: plan, pods, tunnels
@@ -116,19 +130,24 @@ async fn main() {
     let http = atomek_core::HttpClient::new();
 
     match cli.command {
-        Commands::Login => cmd_login(&http, cli.json).await,
-        Commands::Status => cmd_status(&http, cli.json).await,
-        Commands::Connect { pod, agent } => cmd_connect(&http, pod, agent.as_str(), cli.json).await,
-        Commands::Disconnect { pod } => cmd_disconnect(pod, cli.json).await,
-        Commands::Revoke { pod } => cmd_revoke(&http, &pod, cli.json).await,
-        Commands::Logout => cmd_logout(&http, cli.json).await,
-        Commands::Env { pod, export } => cmd_env(pod, export, cli.json),
-        Commands::Infect { dir, only } => cmd_infect(&dir, only, cli.json),
-        Commands::Mcp { format } => cmd_mcp(&format, cli.json),
-        Commands::Exec { command, pod, timeout } => cmd_exec(&http, command, pod, timeout, cli.json).await,
-        Commands::Doctor => cmd_doctor(&http, cli.json).await,
+        None => cmd_default(&http, cli.json).await,
+        Some(Commands::Setup) => cmd_setup(&http, cli.json).await,
+        Some(Commands::Test) => cmd_test(&http, cli.json).await,
+        Some(Commands::Chat { model }) => cmd_chat(&http, &model, cli.json).await,
+        Some(Commands::Configure) => cmd_configure(&http, cli.json).await,
+        Some(Commands::Login) => cmd_login(&http, cli.json).await,
+        Some(Commands::Status) => cmd_status(&http, cli.json).await,
+        Some(Commands::Connect { pod, agent }) => cmd_connect(&http, pod, agent.as_str(), cli.json).await,
+        Some(Commands::Disconnect { pod }) => cmd_disconnect(pod, cli.json).await,
+        Some(Commands::Revoke { pod }) => cmd_revoke(&http, &pod, cli.json).await,
+        Some(Commands::Logout) => cmd_logout(&http, cli.json).await,
+        Some(Commands::Env { pod, export }) => cmd_env(pod, export, cli.json),
+        Some(Commands::Infect { dir, only }) => cmd_infect(&dir, only, cli.json),
+        Some(Commands::Mcp { format }) => cmd_mcp(&format, cli.json),
+        Some(Commands::Exec { command, pod, timeout }) => cmd_exec(&http, command, pod, timeout, cli.json).await,
+        Some(Commands::Doctor) => cmd_doctor(&http, cli.json).await,
         // Hidden subcommand: called by elevated helper to activate tunnel from a temp config file
-        Commands::TunnelUp { config_file } => cmd_tunnel_up(&config_file, cli.json).await,
+        Some(Commands::TunnelUp { config_file }) => cmd_tunnel_up(&config_file, cli.json).await,
     }
 }
 
@@ -1094,6 +1113,531 @@ fn which_tytus_mcp() -> String {
 }
 
 // ── Integration file templates ──────────────────────────────
+
+// ── Default view (first-run detection + dashboard) ──────────
+
+async fn cmd_default(http: &atomek_core::HttpClient, json: bool) {
+    let state = CliState::load();
+
+    // First run: not logged in
+    if !state.is_logged_in() {
+        wizard::clear();
+        wizard::print_logo();
+        wizard::type_out("   Welcome! Let's get you set up in 60 seconds.");
+        println!();
+        wizard::print_info("Tytus gives you a private, encrypted AI pod — your own OpenAI-compatible gateway.");
+        println!();
+
+        if wizard::is_interactive() {
+            match wizard::confirm("Ready to set up your Tytus pod?", true) {
+                Ok(true) => {
+                    cmd_setup(http, json).await;
+                    return;
+                }
+                _ => {
+                    println!();
+                    wizard::print_hint("When you're ready, run: tytus setup");
+                    return;
+                }
+            }
+        } else {
+            wizard::print_hint("Run: tytus setup");
+            return;
+        }
+    }
+
+    // Returning user: show dashboard
+    show_dashboard(http, &state, json).await;
+}
+
+async fn show_dashboard(http: &atomek_core::HttpClient, _state: &CliState, _json: bool) {
+    // Refresh state from server
+    let mut state = CliState::load();
+    ensure_token(&mut state, http).await;
+    sync_tytus(&mut state, http).await;
+    state.save();
+
+    wizard::print_logo();
+
+    let email = state.email.as_deref().unwrap_or("?");
+    let tier = state.tier.as_deref().unwrap_or("free");
+
+    println!("  {} Signed in as {}", wizard::icon_ok(), console::style(email).bold());
+    println!("  {} Plan: {}", wizard::icon_info(), console::style(tier).cyan().bold());
+    println!();
+
+    if state.pods.is_empty() {
+        wizard::print_warn("No pods allocated yet.");
+        println!();
+        wizard::print_hint("Start your pod:  tytus connect");
+        return;
+    }
+
+    wizard::print_header("Your Pods");
+    for pod in &state.pods {
+        let agent = pod.agent_type.as_deref().unwrap_or("?");
+        let tunnel_active = pod.tunnel_iface.is_some();
+        let status_label = if tunnel_active {
+            console::style("● CONNECTED").green().bold()
+        } else {
+            console::style("○ disconnected").dim()
+        };
+        println!("  Pod {} [{}]  {}", console::style(&pod.pod_id).bold(), agent, status_label);
+        if let Some(ref ep) = pod.ai_endpoint {
+            println!("    AI Gateway: {}", console::style(ep).cyan());
+        }
+        if let Some(ref ep) = pod.agent_endpoint {
+            println!("    Agent API:  {}", console::style(ep).cyan());
+        }
+        if let Some(ref iface) = pod.tunnel_iface {
+            println!("    Tunnel:     {}", console::style(iface).dim());
+        }
+        println!();
+    }
+
+    wizard::print_header("What would you like to do?");
+    let has_tunnel = state.pods.iter().any(|p| p.tunnel_iface.is_some());
+    if has_tunnel {
+        wizard::print_hint("tytus chat       — Chat with your AI");
+        wizard::print_hint("tytus test       — Run a quick health test");
+        wizard::print_hint("tytus disconnect — Stop the tunnel");
+    } else {
+        wizard::print_hint("tytus connect    — Start your tunnel");
+        wizard::print_hint("tytus doctor     — Diagnose issues");
+    }
+    wizard::print_hint("tytus configure  — Configure your agent");
+    wizard::print_hint("tytus --help     — See all commands");
+    println!();
+}
+
+// ── Setup wizard (full first-time setup) ────────────────────
+
+async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
+    if json {
+        eprintln!("Setup wizard is interactive. Use individual commands for scripting.");
+        std::process::exit(1);
+    }
+
+    wizard::clear();
+    wizard::print_logo();
+    wizard::type_out("  Let's set up your private AI pod. This takes about 1 minute.");
+    println!();
+
+    let total_steps = 5;
+
+    // ── Step 1: Login ──
+    wizard::print_step(1, total_steps, "Sign in to Traylinx");
+    let mut state = CliState::load();
+    if state.is_logged_in() {
+        ensure_token(&mut state, http).await;
+        wizard::print_ok(&format!("Already signed in as {}", state.email.as_deref().unwrap_or("?")));
+    } else {
+        println!();
+        wizard::print_info("We'll open your browser for a secure login.");
+        if !wizard::confirm("Continue?", true).unwrap_or(false) {
+            wizard::print_warn("Setup cancelled.");
+            return;
+        }
+        cmd_login(http, false).await;
+        state = CliState::load();
+        if !state.is_logged_in() {
+            wizard::print_fail("Login failed.");
+            return;
+        }
+    }
+    println!();
+
+    // ── Step 2: Choose agent type ──
+    wizard::print_step(2, total_steps, "Choose your AI agent");
+    println!();
+    wizard::print_info("NemoClaw — lightweight assistant (1 unit, good for most tasks)");
+    wizard::print_info("Hermes   — advanced reasoning agent (2 units, better for complex tasks)");
+    println!();
+
+    let agent = if state.pods.is_empty() {
+        match wizard::select("Which agent?", &["nemoclaw (recommended)", "hermes"]) {
+            Ok(s) if s.starts_with("hermes") => "hermes",
+            _ => "nemoclaw",
+        }
+    } else {
+        let first_agent = state.pods[0].agent_type.clone().unwrap_or_else(|| "nemoclaw".to_string());
+        wizard::print_ok(&format!("Using existing pod ({})", first_agent));
+        // Leak is fine here — agent is used as &str for a single call
+        Box::leak(first_agent.into_boxed_str())
+    };
+    println!();
+
+    // ── Step 3: Allocate pod + activate tunnel ──
+    wizard::print_step(3, total_steps, "Allocating your pod and starting tunnel");
+    println!();
+    cmd_connect(http, None, agent, false).await;
+    println!();
+
+    // Re-load state — connect updated it
+    let state = CliState::load();
+
+    // ── Step 4: Test the gateway ──
+    wizard::print_step(4, total_steps, "Testing the AI gateway");
+    println!();
+    let pb = wizard::spinner("Running test query...");
+
+    let test_result = if let Some(pod) = state.pods.first() {
+        if let (Some(ref endpoint), Some(ref key)) = (&pod.ai_endpoint, &pod.pod_api_key) {
+            test_chat_completion(endpoint, key, "ail-compound", "Say hello in 3 words").await
+        } else {
+            Err("Pod missing endpoint or API key".to_string())
+        }
+    } else {
+        Err("No pod allocated".to_string())
+    };
+
+    match test_result {
+        Ok(response) => {
+            wizard::finish_ok(&pb, "Gateway responded successfully!");
+            println!();
+            wizard::print_info(&format!("AI said: \"{}\"", response.trim()));
+        }
+        Err(e) => {
+            wizard::finish_fail(&pb, &format!("Test failed: {}", e));
+            wizard::print_hint("Run `tytus doctor` to diagnose");
+            return;
+        }
+    }
+    println!();
+
+    // ── Step 5: Show integration hints ──
+    wizard::print_step(5, total_steps, "Setup complete!");
+    println!();
+    wizard::print_success_banner("Your Tytus pod is ready to use!");
+
+    if let Some(pod) = state.pods.first() {
+        if let (Some(ref ep), Some(ref key)) = (&pod.ai_endpoint, &pod.pod_api_key) {
+            wizard::print_box("Your Connection Info", &[
+                &format!("API URL: {}", ep),
+                &format!("API Key: {}...{}", &key[..10.min(key.len())], &key[key.len().saturating_sub(4)..]),
+                "",
+                "Compatible with any OpenAI SDK.",
+            ]);
+        }
+    }
+
+    println!();
+    wizard::print_header("What's next?");
+    wizard::print_hint("tytus chat           — Try chatting with your AI");
+    wizard::print_hint("tytus test           — Run a quick health check");
+    wizard::print_hint("tytus infect .       — Add Tytus to this project");
+    wizard::print_hint("tytus env --export   — Get shell environment vars");
+    println!();
+}
+
+// ── Test command (quick health check) ───────────────────────
+
+async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
+    let mut state = CliState::load();
+
+    if !state.is_logged_in() {
+        if json {
+            println!(r#"{{"ok":false,"error":"not_logged_in"}}"#);
+        } else {
+            wizard::print_fail("Not logged in. Run: tytus setup");
+        }
+        std::process::exit(1);
+    }
+
+    ensure_token(&mut state, http).await;
+    sync_tytus(&mut state, http).await;
+
+    if !json { wizard::print_header("Running Tytus health test"); }
+
+    // Check 1: logged in
+    let pb = wizard::spinner("Checking authentication");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    wizard::finish_ok(&pb, &format!("Signed in as {}", state.email.as_deref().unwrap_or("?")));
+
+    // Check 2: has pod
+    let pb = wizard::spinner("Checking pod allocation");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    if state.pods.is_empty() {
+        wizard::finish_fail(&pb, "No pod allocated");
+        wizard::print_hint("Run: tytus connect");
+        std::process::exit(1);
+    }
+    let pod = &state.pods[0].clone();
+    wizard::finish_ok(&pb, &format!("Pod {} allocated", pod.pod_id));
+
+    // Check 3: tunnel active
+    let pb = wizard::spinner("Checking tunnel");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    if pod.tunnel_iface.is_none() {
+        wizard::finish_fail(&pb, "Tunnel not running");
+        wizard::print_hint("Run: tytus connect");
+        std::process::exit(1);
+    }
+    wizard::finish_ok(&pb, &format!("Tunnel active on {}", pod.tunnel_iface.as_deref().unwrap_or("?")));
+
+    // Check 4: gateway reachable
+    let pb = wizard::spinner("Testing AI gateway");
+    let endpoint = pod.ai_endpoint.as_deref().unwrap_or("");
+    let key = pod.pod_api_key.as_deref().unwrap_or("");
+
+    match test_chat_completion(endpoint, key, "ail-compound", "Say hello").await {
+        Ok(response) => {
+            wizard::finish_ok(&pb, "Gateway responded!");
+            println!();
+            wizard::print_info(&format!("AI said: \"{}\"", response.trim()));
+            println!();
+            if json {
+                println!(r#"{{"ok":true}}"#);
+            } else {
+                wizard::print_success_banner("Everything is working!");
+            }
+        }
+        Err(e) => {
+            wizard::finish_fail(&pb, &format!("Gateway failed: {}", e));
+            if json {
+                println!(r#"{{"ok":false,"error":"gateway_failed"}}"#);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Helper: send a chat completion and return the assistant's response text.
+async fn test_chat_completion(endpoint: &str, key: &str, model: &str, prompt: &str) -> Result<String, String> {
+    let url = format!("{}/v1/chat/completions", endpoint);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.post(&url)
+        .header("Authorization", format!("Bearer {}", key))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 30,
+        }))
+        .send().await
+        .map_err(|e| format!("network error: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("bad JSON: {}", e))?;
+
+    // Extract the content from choices[0].message.content OR reasoning_content (MiniMax style)
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    let reasoning = body["choices"][0]["message"]["reasoning_content"].as_str().unwrap_or("");
+
+    let text = if !content.is_empty() {
+        content.to_string()
+    } else if !reasoning.is_empty() {
+        reasoning.to_string()
+    } else {
+        "(empty response)".to_string()
+    };
+
+    Ok(text)
+}
+
+// ── Chat command (interactive REPL) ─────────────────────────
+
+async fn cmd_chat(http: &atomek_core::HttpClient, model: &str, json: bool) {
+    if json {
+        eprintln!("Chat is interactive. Use the API directly for scripting.");
+        std::process::exit(1);
+    }
+
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        wizard::print_fail("Not logged in. Run: tytus setup");
+        std::process::exit(1);
+    }
+    ensure_token(&mut state, http).await;
+    sync_tytus(&mut state, http).await;
+
+    let pod = match state.pods.first() {
+        Some(p) if p.tunnel_iface.is_some() => p.clone(),
+        Some(_) => {
+            wizard::print_fail("Tunnel not running. Run: tytus connect");
+            std::process::exit(1);
+        }
+        None => {
+            wizard::print_fail("No pod allocated. Run: tytus setup");
+            std::process::exit(1);
+        }
+    };
+
+    let endpoint = pod.ai_endpoint.as_deref().unwrap_or("");
+    let key = pod.pod_api_key.as_deref().unwrap_or("");
+
+    wizard::print_logo();
+    wizard::print_header(&format!("Chat — {} (pod {})", model, pod.pod_id));
+    wizard::print_info("Type your message and press Enter. Type /quit to exit, /help for commands.");
+    println!();
+
+    let mut history: Vec<serde_json::Value> = Vec::new();
+
+    loop {
+        let input = match inquire::Text::new(">").prompt() {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+
+        let trimmed = input.trim();
+        if trimmed.is_empty() { continue; }
+
+        match trimmed {
+            "/quit" | "/exit" | "/q" => break,
+            "/help" => {
+                wizard::print_info("/quit  — exit chat");
+                wizard::print_info("/clear — clear conversation history");
+                wizard::print_info("/help  — show this help");
+                continue;
+            }
+            "/clear" => {
+                history.clear();
+                wizard::print_ok("History cleared");
+                continue;
+            }
+            _ => {}
+        }
+
+        history.push(serde_json::json!({"role": "user", "content": trimmed}));
+
+        let pb = wizard::spinner("Thinking...");
+        let url = format!("{}/v1/chat/completions", endpoint);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        let resp = client.post(&url)
+            .header("Authorization", format!("Bearer {}", key))
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({
+                "model": model,
+                "messages": history,
+                "max_tokens": 500,
+            }))
+            .send().await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let body: serde_json::Value = match r.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        wizard::finish_fail(&pb, &format!("Bad response: {}", e));
+                        continue;
+                    }
+                };
+                let content = body["choices"][0]["message"]["content"].as_str().unwrap_or("");
+                let reasoning = body["choices"][0]["message"]["reasoning_content"].as_str().unwrap_or("");
+                let reply = if !content.is_empty() { content } else { reasoning };
+                pb.finish_and_clear();
+                println!("{} {}", console::style("ai:").green().bold(), reply);
+                println!();
+                history.push(serde_json::json!({"role": "assistant", "content": reply}));
+            }
+            Ok(r) => {
+                wizard::finish_fail(&pb, &format!("HTTP {}", r.status()));
+            }
+            Err(e) => {
+                wizard::finish_fail(&pb, &format!("Network: {}", e));
+            }
+        }
+    }
+
+    println!();
+    wizard::print_ok("Bye!");
+}
+
+// ── Configure command (agent setup wizard) ──────────────────
+
+async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
+    if json {
+        eprintln!("Configure is interactive. Use `tytus exec` for scripting.");
+        std::process::exit(1);
+    }
+
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        wizard::print_fail("Not logged in. Run: tytus setup");
+        std::process::exit(1);
+    }
+    ensure_token(&mut state, http).await;
+    sync_tytus(&mut state, http).await;
+
+    let pod = match state.pods.first() {
+        Some(p) => p.clone(),
+        None => {
+            wizard::print_fail("No pod allocated. Run: tytus setup");
+            std::process::exit(1);
+        }
+    };
+
+    wizard::print_header("Configure your agent");
+    wizard::print_info(&format!("Pod: {} — Agent: {}", pod.pod_id, pod.agent_type.as_deref().unwrap_or("?")));
+    println!();
+
+    let options = vec![
+        "Test agent is running",
+        "View agent logs",
+        "Restart agent",
+        "Advanced: run custom command",
+        "Cancel",
+    ];
+
+    match wizard::select("What would you like to do?", &options) {
+        Ok("Test agent is running") => {
+            let pb = wizard::spinner("Checking agent...");
+            let (sk, auid) = get_credentials(&mut state, http).await;
+            let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+            match atomek_pods::exec_in_agent(&client, &pod.pod_id, "openclaw --version 2>&1 || echo 'not installed'", 10).await {
+                Ok(result) => {
+                    let out = result.stdout.unwrap_or_default();
+                    wizard::finish_ok(&pb, "Agent responded");
+                    println!();
+                    wizard::print_info(&out.trim());
+                }
+                Err(e) => {
+                    wizard::finish_fail(&pb, &format!("Failed: {}", e));
+                }
+            }
+        }
+        Ok("View agent logs") => {
+            wizard::print_info("Use: tytus exec 'tail -50 /var/log/openclaw.log'");
+        }
+        Ok("Restart agent") => {
+            if wizard::confirm("Restart the agent container?", true).unwrap_or(false) {
+                wizard::print_info("Restart via DAM — use `tytus exec` for custom commands or contact support.");
+            }
+        }
+        Ok("Advanced: run custom command") => {
+            let cmd = wizard::text_input("Command to run:", None).unwrap_or_default();
+            if !cmd.is_empty() {
+                let (sk, auid) = get_credentials(&mut state, http).await;
+                let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+                match atomek_pods::exec_in_agent(&client, &pod.pod_id, &cmd, 30).await {
+                    Ok(result) => {
+                        if let Some(out) = result.stdout {
+                            if !out.is_empty() { println!("{}", out); }
+                        }
+                        if let Some(err) = result.stderr {
+                            if !err.is_empty() { eprintln!("{}", err); }
+                        }
+                    }
+                    Err(e) => wizard::print_fail(&e.to_string()),
+                }
+            }
+        }
+        _ => {
+            wizard::print_info("Cancelled");
+        }
+    }
+}
 
 // ── Doctor (diagnostics) ────────────────────────────────────
 
