@@ -84,14 +84,20 @@ enum Commands {
     },
     /// Print the full LLM-facing reference (for AI agents driving tytus-cli)
     LlmDocs,
-    /// Inject Tytus integration files into a project directory.
-    /// Drops CLAUDE.md context, MCP config, custom commands, and AGENTS.md
-    /// so any AI CLI can natively manage your private pod.
-    Infect {
+    /// Print a short setup prompt you can paste into any AI tool (Claude Code,
+    /// OpenCode, Cursor, etc.) to teach it how to drive Tytus natively.
+    BootstrapPrompt,
+    /// Link a project to Tytus — drops CLAUDE.md / AGENTS.md / .mcp.json /
+    /// slash commands into the target directory so any AI CLI (Claude Code,
+    /// OpenCode, KiloCode, Archon) natively knows how to drive your private
+    /// Tytus pod from that project.
+    #[command(alias = "infect")]
+    Link {
         /// Target project directory (defaults to current dir)
         #[arg(default_value = ".")]
         dir: String,
-        /// Which integrations to inject (default: all)
+        /// Which integrations to drop (default: all). Options:
+        /// claude, agents, kilocode, opencode, archon, shell
         #[arg(short, long, value_delimiter = ',')]
         only: Option<Vec<String>>,
     },
@@ -156,7 +162,8 @@ async fn main() {
         Some(Commands::Logout) => cmd_logout(&http, cli.json).await,
         Some(Commands::Env { pod, export, raw }) => cmd_env(pod, export, raw, cli.json, &http).await,
         Some(Commands::LlmDocs) => { print!("{}", LLM_DOCS); }
-        Some(Commands::Infect { dir, only }) => cmd_infect(&dir, only, cli.json),
+        Some(Commands::BootstrapPrompt) => { print!("{}", BOOTSTRAP_PROMPT); }
+        Some(Commands::Link { dir, only }) => cmd_link(&dir, only, cli.json),
         Some(Commands::Mcp { format }) => cmd_mcp(&format, cli.json),
         Some(Commands::Restart { pod }) => cmd_restart(&http, pod, cli.json).await,
         Some(Commands::Exec { command, pod, timeout }) => cmd_exec(&http, command, pod, timeout, cli.json).await,
@@ -968,7 +975,7 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, json: bool, ht
 
 // ── Infect (drop integration files) ─────────────────────────
 
-fn cmd_infect(dir: &str, only: Option<Vec<String>>, json: bool) {
+fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
     let base = std::path::Path::new(dir).canonicalize().unwrap_or_else(|_| {
         eprintln!("Directory not found: {}", dir);
         std::process::exit(1);
@@ -1102,16 +1109,16 @@ fn cmd_infect(dir: &str, only: Option<Vec<String>>, json: bool) {
 
     if json {
         println!("{}", serde_json::json!({
-            "status": "infected",
+            "status": "linked",
             "directory": base.display().to_string(),
             "files": injected,
         }));
     } else {
-        println!("Tytus integration injected into {}", base.display());
+        println!("Tytus linked into {}", base.display());
         for file in &injected {
             println!("  + {}", file);
         }
-        println!("\nAI CLIs in this directory now have native Tytus access.");
+        println!("\nAI CLIs in this directory now natively know how to drive Tytus.");
         println!("Run `tytus mcp` to see MCP server configuration.");
     }
 }
@@ -1425,7 +1432,7 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
     wizard::print_header("What's next?");
     wizard::print_hint("tytus chat           — Try chatting with your AI");
     wizard::print_hint("tytus test           — Run a quick health check");
-    wizard::print_hint("tytus infect .       — Add Tytus to this project");
+    wizard::print_hint("tytus link .         — Link Tytus into this project (AI CLI integration)");
     wizard::print_hint("tytus env --export   — Get shell environment vars");
     println!();
 }
@@ -1871,6 +1878,16 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
 // ─────────────────────────────────────────────────────────────────────────
 const LLM_DOCS: &str = include_str!("../../llm-docs.md");
 
+// Short "paste this into any AI tool" bootstrap prompt. Mirrors the 2md
+// pattern: a single URL + instruction that teaches any AI agent how to
+// drive the product natively. Printed by `tytus bootstrap-prompt`.
+const BOOTSTRAP_PROMPT: &str = r#"Read https://raw.githubusercontent.com/traylinx/tytus-cli/main/.agents/skills/tytus/SKILL.md and follow the instructions to drive Tytus natively. Tytus is my private AI pod on Traylinx — a WireGuard-tunneled, OpenAI-compatible LLM gateway managed by the `tytus` CLI. Check `command -v tytus` first; if missing, install with:
+
+curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh
+
+Then start with `tytus status` and walk me through anything that's not ready.
+"#;
+
 #[allow(dead_code)]
 
 const CLAUDE_MD_BLOCK: &str = r#"## Tytus Private AI Pod (driven via tytus-cli)
@@ -1937,8 +1954,9 @@ tytus exec [--pod NN] [--timeout N] "<shell command in agent container>"
 tytus configure              # interactive overlay editor for agent config
 
 # Integrations
-tytus infect [DIR] [--only claude|agents|kilocode|opencode|archon|shell]
+tytus link [DIR] [--only claude|agents|kilocode|opencode|archon|shell]
 tytus mcp [--format claude|kilocode|opencode|archon|json]
+tytus bootstrap-prompt       # paste this into any AI tool to enable Tytus
 tytus llm-docs               # the doc you should read before driving Tytus
 ```
 

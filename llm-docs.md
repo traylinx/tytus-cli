@@ -170,18 +170,26 @@ tytus configure                    Interactive overlay editor. Walks
                                    ~/.tytus or the agent's config.user.*
                                    overlay file.
 
-tytus infect [DIR] [--only ...]    Drop AI integration files into a
-                                   project directory: CLAUDE.md block,
-                                   AGENTS.md, .claude/commands/tytus.md,
-                                   .mcp.json, .kilo/, .archon/, shell hook.
-                                   Filter with --only claude|agents|kilocode|
-                                   opencode|archon|shell.
+tytus link [DIR] [--only ...]      Link a project to Tytus — drops AI
+                                   integration files into a project:
+                                   CLAUDE.md, AGENTS.md, .claude/commands/
+                                   tytus.md, .mcp.json, .kilo/, .archon/,
+                                   shell hook. Filter with --only claude|
+                                   agents|kilocode|opencode|archon|shell.
+                                   Aliased as `tytus infect` for backwards
+                                   compatibility.
 
 tytus mcp [--format claude|kilocode|opencode|archon|json]
                                    Print an MCP server config stanza for
                                    the chosen AI tool. Stick it into the
-                                   tool's mcp.json (or use `tytus infect`
+                                   tool's mcp.json (or use `tytus link`
                                    which does it for you).
+
+tytus bootstrap-prompt             Print a one-liner you can paste into
+                                   any AI tool (Claude Code, OpenCode,
+                                   Cursor, etc.) to teach it how to drive
+                                   Tytus natively — it references the
+                                   hosted SKILL.md on GitHub.
 
 tytus llm-docs                     Print THIS document.
 ```
