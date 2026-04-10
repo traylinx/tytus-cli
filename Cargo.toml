@@ -14,6 +14,14 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Traylinx <hello@traylinx.com>"]
 license = "MIT"
+description = "tytus — CLI for Tytus by Traylinx, your private AI pod driven from any terminal"
+homepage = "https://traylinx.com"
+repository = "https://github.com/traylinx/tytus-cli"
+documentation = "https://github.com/traylinx/tytus-cli#readme"
+readme = "README.md"
+keywords = ["tytus", "traylinx", "wireguard", "ai", "openai-compatible"]
+categories = ["command-line-utilities", "network-programming"]
+rust-version = "1.75"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -56,6 +56,7 @@ impl TytusClient {
     }
 
     /// Send a POST with retry logic from the shared HttpClient.
+    #[allow(dead_code)] // kept symmetric with get_with_retry; no current call site
     pub(crate) async fn post_with_retry(&self, path: &str) -> atomek_core::Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
         let st = self.secret_token.clone();

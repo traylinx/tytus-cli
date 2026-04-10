@@ -214,7 +214,13 @@ setup_sudoers() {
 
     SUDOERS_FILE="/etc/sudoers.d/tytus"
     CURRENT_USER="${SUDO_USER:-$(whoami)}"
-    ENTRY="${CURRENT_USER} ALL=(root) NOPASSWD: ${BIN_PATH} tunnel-up *, /bin/kill -TERM *"
+    # Tight sudoers entry: only the tytus binary itself, only the two
+    # subcommands needed for tunnel lifecycle. The `tunnel-down` helper
+    # internally validates the target PID against /tmp/tytus/tunnel-*.pid
+    # so it cannot be used to SIGTERM arbitrary system processes — that
+    # mistake from the previous design (`/bin/kill -TERM *`) was a real
+    # privilege escalation vector.
+    ENTRY="${CURRENT_USER} ALL=(root) NOPASSWD: ${BIN_PATH} tunnel-up *, ${BIN_PATH} tunnel-down *"
 
     msg "Configuring passwordless tunnel (optional)..."
     if [ -f "$SUDOERS_FILE" ] && grep -qF "$ENTRY" "$SUDOERS_FILE" 2>/dev/null; then

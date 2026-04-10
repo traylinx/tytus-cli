@@ -7,12 +7,12 @@ use atomek_core::AtomekError;
 #[derive(Debug, Clone)]
 pub struct TunnelConfig {
     pub private_key: String,
-    pub address: String,       // e.g. "10.17.8.2/24"
+    pub address: String,       // e.g. "10.X.Y.2/24" — peer address inside the tunnel
     pub dns: Option<String>,
     pub peer_public_key: String,
     pub preshared_key: Option<String>,
-    pub endpoint: String,      // e.g. "167.71.141.141:51808"
-    pub allowed_ips: String,   // e.g. "10.17.8.0/24"
+    pub endpoint: String,      // e.g. "<droplet-public-ip>:51800+podnum"
+    pub allowed_ips: String,   // e.g. "10.X.Y.0/24, 10.42.42.1/32" — destinations to route through this tunnel
     pub persistent_keepalive: Option<u16>,
 }
 
