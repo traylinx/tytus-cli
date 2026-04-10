@@ -94,6 +94,12 @@ enum Commands {
         #[arg(short, long, default_value = "claude")]
         format: String,
     },
+    /// Restart the agent container (applies config changes)
+    Restart {
+        /// Pod ID (defaults to first pod)
+        #[arg(short, long)]
+        pod: Option<String>,
+    },
     /// Run a command inside your pod's agent container
     Exec {
         /// Command to run (e.g. "openclaw config set gateway.port 3000")
@@ -144,6 +150,7 @@ async fn main() {
         Some(Commands::Env { pod, export }) => cmd_env(pod, export, cli.json),
         Some(Commands::Infect { dir, only }) => cmd_infect(&dir, only, cli.json),
         Some(Commands::Mcp { format }) => cmd_mcp(&format, cli.json),
+        Some(Commands::Restart { pod }) => cmd_restart(&http, pod, cli.json).await,
         Some(Commands::Exec { command, pod, timeout }) => cmd_exec(&http, command, pod, timeout, cli.json).await,
         Some(Commands::Doctor) => cmd_doctor(&http, cli.json).await,
         // Hidden subcommand: called by elevated helper to activate tunnel from a temp config file
@@ -754,6 +761,52 @@ async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
 }
 
 // ── Exec ────────────────────────────────────────────────────
+
+async fn cmd_restart(http: &atomek_core::HttpClient, pod_id: Option<String>, json: bool) {
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        wizard::print_fail("Not logged in. Run: tytus login");
+        std::process::exit(1);
+    }
+    ensure_token(&mut state, http).await;
+    let (sk, auid) = get_credentials(&mut state, http).await;
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+
+    let target_pod_id = pod_id.unwrap_or_else(|| {
+        state.pods.first().map(|p| p.pod_id.clone()).unwrap_or_else(|| {
+            wizard::print_fail("No pods. Run: tytus connect");
+            std::process::exit(1);
+        })
+    });
+
+    if !json { wizard::print_info(&format!("Restarting agent on pod {}...", target_pod_id)); }
+    let pb = wizard::spinner("Restarting container");
+
+    match atomek_pods::restart_agent(&client, &target_pod_id).await {
+        Ok(status) => {
+            wizard::finish_ok(&pb, "Agent restarted");
+            if json {
+                println!("{}", serde_json::json!({
+                    "pod_id": target_pod_id,
+                    "agent_type": status.agent_type,
+                    "container_status": status.container_status,
+                    "healthy": status.healthy,
+                }));
+            } else {
+                wizard::print_info(&format!("Container: {}", status.container_status.as_deref().unwrap_or("?")));
+                if let Some(healthy) = status.healthy {
+                    if healthy { wizard::print_ok("Agent is healthy"); }
+                    else { wizard::print_warn("Agent not yet healthy (may still be starting)"); }
+                }
+                wizard::print_hint("Config file changes are now applied.");
+            }
+        }
+        Err(e) => {
+            wizard::finish_fail(&pb, &format!("Restart failed: {}", e));
+            std::process::exit(1);
+        }
+    }
+}
 
 async fn cmd_exec(http: &atomek_core::HttpClient, command: Vec<String>, pod_id: Option<String>, timeout: u32, json: bool) {
     let mut state = CliState::load();
