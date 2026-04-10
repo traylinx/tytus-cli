@@ -27,6 +27,13 @@ pub struct PodEntry {
     pub agent_type: Option<String>,
     pub agent_endpoint: Option<String>,
     pub tunnel_iface: Option<String>,
+    // Stable endpoint + per-user stable API key for local tools.
+    // The endpoint is always http://10.42.42.1:18080 (dual-bound WG address)
+    // and the key persists across pod revoke/reallocate cycles.
+    #[serde(default)]
+    pub stable_ai_endpoint: Option<String>,
+    #[serde(default)]
+    pub stable_user_key: Option<String>,
 }
 
 impl CliState {
