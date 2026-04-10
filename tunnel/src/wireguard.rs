@@ -41,11 +41,30 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
         .and_then(|s| s.parse().ok())
         .unwrap_or(24);
 
+    // Compute peer WG IP (typically the .1 of the subnet) for point-to-point destination
+    // Parse the DNS field if available (it's set to the server's tunnel IP in our configs),
+    // otherwise derive from the subnet (first IP of allowed_ips).
+    let peer_wg_ip = config.dns.clone()
+        .or_else(|| {
+            config.allowed_ips.split(',').next().and_then(|cidr_str| {
+                let net = cidr_str.trim().split('/').next()?;
+                let parts: Vec<&str> = net.split('.').collect();
+                if parts.len() == 4 {
+                    // Replace last octet with .1 (server's tunnel IP)
+                    Some(format!("{}.{}.{}.1", parts[0], parts[1], parts[2]))
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| local_ip.clone());
+
     let endpoint: SocketAddr = config.endpoint.parse()
         .map_err(|e| AtomekError::Other(format!("Invalid endpoint '{}': {}", config.endpoint, e)))?;
 
     tracing::info!(
         local_ip = %local_ip,
+        peer_wg_ip = %peer_wg_ip,
         endpoint = %endpoint,
         "Creating WireGuard tunnel"
     );
@@ -54,9 +73,16 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
     let mut tun_config = tun::Configuration::default();
     tun_config.address(&local_ip)
         .netmask(cidr_to_netmask(cidr))
-        .destination(&local_ip) // point-to-point
+        .destination(&peer_wg_ip) // point-to-point peer (server's tunnel IP)
         .mtu(1420) // WireGuard standard MTU
         .up();
+
+    // Disable the tun crate's auto-route (it creates a conflicting host route on macOS).
+    // We add our own route manually below for the allowed IPs subnet.
+    #[cfg(target_os = "macos")]
+    tun_config.platform_config(|p| {
+        p.enable_routing(false);
+    });
 
     #[cfg(target_os = "linux")]
     tun_config.platform_config(|p| {
