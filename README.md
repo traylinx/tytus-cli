@@ -1,263 +1,323 @@
-# Tytus CLI
+# tytus-cli
 
-Connect to your **private AI pod** from any terminal. Tytus provides a WireGuard-encrypted tunnel to your own AI infrastructure with an OpenAI-compatible gateway running 383+ models.
+> CLI for **Tytus** by Traylinx — your private AI pod, driven from any terminal.
 
-```bash
-tytus login                    # One-time browser auth
-tytus connect             # Allocate pod + activate tunnel
-eval $(tytus env --export)     # Export connection vars
-curl $TYTUS_AI_GATEWAY/v1/models -H "Authorization: Bearer $TYTUS_API_KEY"
-```
-
-## Installation
-
-### Quick install (macOS / Linux)
+`tytus` is a Rust CLI that opens a userspace WireGuard tunnel from your laptop
+to your private Tytus pod and exposes its OpenAI-compatible LLM gateway through
+a stable URL + stable API key. The pair you paste into Cursor / Claude Desktop /
+OpenCode / any OpenAI-compatible tool **never changes** — even if your pod gets
+rotated, your droplet migrates, or you switch agent runtimes.
 
 ```bash
-curl -fsSL https://tytus.traylinx.com/install.sh | sh
+curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh
+tytus setup
 ```
 
-Installs two binaries:
-- `tytus` — CLI for pod management
-- `tytus-mcp` — MCP server for AI CLI integration
-
-### From GitHub Releases
-
-Download from [Releases](https://github.com/traylinx/tytus-cli/releases):
-
-| Platform | Asset |
-|----------|-------|
-| macOS (Apple Silicon) | `tytus-macos-aarch64.tar.gz` |
-| macOS (Intel) | `tytus-macos-x86_64.tar.gz` |
-| Linux (x86_64) | `tytus-linux-x86_64.tar.gz` |
+That's it. The wizard logs you in, allocates a pod, opens the tunnel, and
+runs a sample chat. After setup, your stable values for any AI tool are:
 
 ```bash
-tar xzf tytus-macos-aarch64.tar.gz
-sudo mv tytus tytus-mcp /usr/local/bin/
+eval "$(tytus env --export)"
+echo $OPENAI_BASE_URL    # http://10.42.42.1:18080/v1   (constant forever)
+echo $OPENAI_API_KEY     # sk-tytus-user-<32hex>          (per user, persistent)
 ```
+
+---
+
+## What is Tytus?
+
+Tytus is a **private AI pod** product. Each Traylinx subscriber gets their own
+isolated slice of a droplet — a WireGuard sidecar plus a containerised AI
+agent (OpenClaw or Hermes) — and an OpenAI-compatible LLM gateway
+(`SwitchAILocal`) that proxies to upstream providers.
+
+```
+your laptop ── WireGuard tunnel ── pod sidecar ── agent container
+                                       └── SwitchAILocal (OpenAI-compatible)
+                                             └── upstream LLM (MiniMax)
+```
+
+**No customer LLM traffic ever traverses Traylinx Cloud.** Prompts and
+responses go directly between your laptop and your pod over WireGuard. The
+Traylinx control plane (auth, billing, allocation) only sees that you have
+a pod — never the contents of your conversations.
+
+---
+
+## Install
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh
+```
+
+What the installer does:
+
+1. Detects your OS and architecture (macOS / Linux, x86_64 / aarch64)
+2. Tries to download a prebuilt binary from the latest GitHub release
+3. Falls back to `cargo install --git` if no release matches your platform
+   (installs Rust via rustup with your consent if it's missing)
+4. Sets up a tightly-scoped passwordless sudoers entry so `tytus connect`
+   never prompts you for a password (opt-out with `TYTUS_SKIP_SUDOERS=1`)
+5. Verifies and prints next steps
+
+Override the install location with `TYTUS_INSTALL_DIR=/opt/tytus/bin` if you
+want it somewhere other than the default.
 
 ### From source
 
 ```bash
 git clone https://github.com/traylinx/tytus-cli.git
 cd tytus-cli
-cargo build --release -p atomek-cli -p tytus-mcp
-sudo cp target/release/tytus target/release/tytus-mcp /usr/local/bin/
+cargo install --path cli --bin tytus --bin tytus-mcp
 ```
 
-## Quick Start
+---
+
+## Quick start
 
 ```bash
-# 1. Login (opens browser, one-time)
-tytus login
+# 1. Interactive first-run (recommended)
+tytus setup
 
-# 2. Connect (allocates pod + WireGuard tunnel)
-tytus connect
-
-# 3. Use your private AI
-eval $(tytus env --export)
-curl "$TYTUS_AI_GATEWAY/v1/chat/completions" \
-  -H "Authorization: Bearer $TYTUS_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3-8b","messages":[{"role":"user","content":"hello"}]}'
+# 2. Or manually
+tytus login                  # browser device-auth via Sentinel
+tytus connect                # allocate a pod + open WG tunnel
+tytus test                   # E2E health check
+tytus chat                   # REPL against your private pod
 ```
 
-## AI CLI Integration (The Zombie Fungus)
+After connecting, use the stable env in any tool:
 
-Tytus is designed to **parasitize any AI CLI** — Claude Code, Kilocode, OpenCode, Archon, Codex, Gemini CLI, or anything that speaks MCP or reads env vars. One command infects a project with all the integration files needed.
+```bash
+eval "$(tytus env --export)"
+curl -sS "$OPENAI_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"ail-compound","messages":[{"role":"user","content":"hello"}]}'
+```
 
-### One-command setup for any project
+---
+
+## Plans and agent types
+
+Each subscription tier has a fixed **unit budget**. Agents cost units when
+allocated:
+
+| Plan | Unit budget |
+|---|---|
+| Explorer | 1 |
+| Creator | 2 |
+| Operator | 4 |
+
+| Agent | Cost | Gateway port | Description |
+|---|---|---|---|
+| `nemoclaw` | 1 unit | 3000 | OpenClaw runtime with the NemoClaw sandboxing blueprint |
+| `hermes` | 2 units | 8642 | Nous Research Hermes gateway |
+
+You can mix and match within your budget. For example, an Operator user
+can run 4 nemoclaws, or 2 hermes, or 2 nemoclaw + 1 hermes.
+
+```bash
+tytus connect --agent nemoclaw    # default — 1 unit
+tytus connect --agent hermes      # 2 units
+```
+
+## Models on the pod gateway
+
+| Model id | Backed by | Capabilities |
+|---|---|---|
+| `ail-compound` | MiniMax M2.7 | text, vision, audio (default chat model) |
+| `minimax/ail-compound` | MiniMax M2.7 | text |
+| `ail-image` | MiniMax image-01 | image generation |
+| `minimax/ail-image` | MiniMax image-01 | image generation |
+| `ail-embed` | mistral-embed via SwitchAI | embeddings |
+
+Pass any of these as the `model` field in OpenAI-compatible requests. Other
+model ids (`gpt-4`, `claude-*`, etc.) are not available on this product.
+
+---
+
+## Command reference
+
+```text
+tytus login                          Browser device-auth via Sentinel
+tytus logout                         Revoke all pods + clear local state
+tytus status [--json]                Plan, pods, units, tunnel state
+tytus doctor                         Full diagnostic
+tytus setup                          Interactive first-run wizard
+
+tytus connect [--agent T] [--pod NN] Allocate pod + activate tunnel
+tytus disconnect [--pod NN]          Tear down tunnel, keep allocation
+tytus revoke <pod_id>                Free units (DESTRUCTIVE — wipes state)
+tytus restart [--pod NN]             Restart agent container
+
+tytus env [--export] [--raw]         Connection vars (stable by default)
+tytus test                           E2E health check
+tytus chat [--model ail-compound]    Interactive REPL
+tytus exec [--pod NN] "<command>"    Run shell command in agent container
+tytus configure                      Interactive overlay editor
+
+tytus link [DIR] [--only ...]        Link a project so AI CLIs in it know Tytus
+tytus mcp [--format ...]             Print MCP server config for an AI tool
+tytus bootstrap-prompt               Print the paste prompt for any AI tool
+tytus llm-docs                       Print the full LLM-facing reference
+```
+
+Run `tytus <command> --help` for per-command details.
+
+---
+
+## Native AI tool integration
+
+Tytus is designed so that **any AI CLI on your laptop** can drive it. Two
+patterns are supported.
+
+### Pattern A — Hosted skill file (zero config)
+
+Copy this prompt into Claude Code, OpenCode, Cursor, KiloCode, or any AI
+tool that can read URLs:
+
+```bash
+tytus bootstrap-prompt
+```
+
+Output:
+
+```
+Read https://raw.githubusercontent.com/traylinx/tytus-cli/main/.agents/skills/tytus/SKILL.md
+and follow the instructions to drive Tytus natively. ...
+```
+
+Paste it once. The agent fetches the hosted skill file and learns the full
+command surface, the model catalog, the stable URL/key model, the recipes,
+and the error catalog. Then it can drive Tytus end-to-end on its own.
+
+### Pattern B — Per-project linking
+
+If you want the integration files dropped directly into a project (so the
+AI tool sees them without a URL fetch), run:
 
 ```bash
 cd your-project
-tytus infect
+tytus link .
 ```
 
-This drops integration files for **every major AI CLI**:
+This drops:
 
-| File | Purpose | Used by |
-|------|---------|---------|
-| `.mcp.json` | MCP server config (native tool access) | Claude Code, Kilocode |
-| `CLAUDE.md` (appended) | Context + instructions | Claude Code |
-| `AGENTS.md` (appended) | Context + instructions | Codex, Gemini CLI, generic agents |
-| `.claude/commands/tytus.md` | `/tytus` slash command | Claude Code |
-| `.kilo/command/tytus.md` | `/tytus` command | Kilocode, OpenCode |
-| `.kilo/mcp.json` | MCP config | Kilocode |
-| `.archon/commands/tytus.md` | Tytus command | Archon |
-| `.tytus-env.sh` | Shell env loader | Any terminal |
+| File | Used by |
+|---|---|
+| `CLAUDE.md` (appended) | Claude Code |
+| `AGENTS.md` (appended) | OpenCode, Codex, Gemini CLI, generic agents |
+| `.claude/commands/tytus.md` | Claude Code `/tytus` slash command |
+| `.kilo/command/tytus.md` | KiloCode / OpenCode `/tytus` command |
+| `.kilo/mcp.json` | KiloCode MCP config |
+| `.archon/commands/tytus.md` | Archon `/tytus` command |
+| `.mcp.json` | Claude Code MCP config (auto-allows safe tools) |
+| `.tytus-env.sh` | Shell hook (`source .tytus-env.sh`) |
 
-Selective injection:
-```bash
-tytus infect --only claude         # Only Claude Code files
-tytus infect --only agents,shell   # AGENTS.md + shell hook
-tytus infect --only kilocode       # Kilocode/OpenCode files
-```
-
-### MCP Server (deepest integration)
-
-The `tytus-mcp` binary is a stdio-based [MCP](https://modelcontextprotocol.io/) server. Any MCP-compatible AI CLI gets **native tool access** to your pod:
-
-| Tool | Description |
-|------|-------------|
-| `tytus_status` | Login state, plan tier, active pods |
-| `tytus_env` | Connection URLs, API keys, OpenAI-compat aliases |
-| `tytus_models` | List 383+ models on the pod |
-| `tytus_chat` | Chat completions through the private gateway |
-| `tytus_revoke` | Release a pod and free units |
-| `tytus_setup_guide` | Step-by-step setup instructions |
-
-Print MCP config for your CLI:
-```bash
-tytus mcp                      # Claude Code format
-tytus mcp --format kilocode    # Kilocode format
-tytus mcp --format archon      # Archon format
-tytus mcp --format json        # Generic JSON
-```
-
-Manual config (Claude Code `~/.claude/settings.json`):
-```json
-{
-  "mcpServers": {
-    "tytus": {
-      "command": "/usr/local/bin/tytus-mcp",
-      "args": [],
-      "alwaysAllow": ["tytus_status", "tytus_env", "tytus_models", "tytus_setup_guide"]
-    }
-  }
-}
-```
-
-### Environment Variables (universal)
-
-Works with anything that reads `OPENAI_API_KEY`:
+Filter what gets dropped:
 
 ```bash
-eval $(tytus env --export)
-export OPENAI_API_KEY=$TYTUS_API_KEY
-export OPENAI_BASE_URL=${TYTUS_AI_GATEWAY}/v1
+tytus link . --only claude          # only Claude Code files
+tytus link . --only kilocode,shell  # KiloCode + shell hook
 ```
 
-Or source the hook file:
-```bash
-source .tytus-env.sh
-```
+### MCP server (deepest integration)
 
-### Programmatic (JSON mode)
+`tytus-mcp` is a stdio-based [MCP](https://modelcontextprotocol.io/) server
+that exposes Tytus to any MCP-compatible AI tool as native tools:
 
-Every command supports `--json`:
+| Tool | Purpose |
+|---|---|
+| `tytus_docs` | Returns the full LLM-facing reference (call this first) |
+| `tytus_status` | Login state, plan, pods, tunnel — call this second |
+| `tytus_env` | Stable + raw connection details |
+| `tytus_models` | Live model list from the pod gateway |
+| `tytus_chat` | Send chat completions through the user's pod |
+| `tytus_revoke` | Free a pod's units (destructive) |
+| `tytus_setup_guide` | What to tell the user when nothing is connected |
 
-```bash
-tytus status --json | jq .tier
-tytus env --json | jq -r .ai_endpoint
-tytus connect --json 2>/dev/null | jq .pod_id
-```
-
-## Commands
-
-| Command | Description | Sudo |
-|---------|-------------|------|
-| `tytus login` | Browser-based device auth | No |
-| `tytus status` | Plan, pods, tunnel state | No |
-| `tytus connect` | Allocate pod + tunnel (blocks until Ctrl+C) | Yes |
-| `tytus disconnect` | Clear stale tunnel state | No |
-| `tytus revoke <pod>` | Release pod, free units | No |
-| `tytus logout` | Revoke all + clear auth | No |
-| `tytus env` | Connection info (shell vars) | No |
-| `tytus infect [dir]` | Inject integration files | No |
-| `tytus mcp` | Print MCP server config | No |
-
-### `tytus connect` options
+Print the MCP config block for your tool:
 
 ```bash
-tytus connect                     # OpenClaw agent (1 unit)
-tytus connect --agent hermes      # Hermes agent (2 units)
-tytus connect --pod 02            # Reconnect existing pod
-tytus connect --json              # JSON output
+tytus mcp                       # Claude Code format
+tytus mcp --format kilocode     # KiloCode / OpenCode
+tytus mcp --format archon       # Archon
+tytus mcp --format json         # generic JSON
 ```
 
-### `tytus env` options
-
-```bash
-tytus env                # KEY=VALUE
-tytus env --export       # export KEY=VALUE (source-able)
-tytus env --json         # Full JSON
-tytus env --pod 02       # Specific pod
-```
-
-| Variable | Example | Description |
-|----------|---------|-------------|
-| `TYTUS_AI_GATEWAY` | `http://10.18.1.1:18080` | OpenAI-compatible gateway |
-| `TYTUS_AGENT_API` | `http://10.18.1.1:3000` | Agent API endpoint |
-| `TYTUS_API_KEY` | `sk-566cecd...09a0` | Bearer token |
-| `TYTUS_AGENT_TYPE` | `nemoclaw` | Agent type |
-| `TYTUS_POD_ID` | `01` | Pod identifier |
-
-## Agent Types
-
-| Agent | Units | Port | Use Case |
-|-------|-------|------|----------|
-| **OpenClaw** (`nemoclaw`) | 1 | 3000 | Lightweight sandboxed agent. Fast startup. |
-| **Hermes** (`hermes`) | 2 | 8642 | Full-featured. 60+ tools, self-improving. |
-
-Plan budgets: Explorer=1, Creator=2, Operator=4 units.
+---
 
 ## Architecture
 
 ```
-Your Terminal ──> tytus CLI ──> WireGuard Tunnel ──> Private Droplet
-                                (boringtun)              |
-                                                   +-----+-----+
-                                                   | SwitchAI   | <-- 383 models
-                                                   | Local      |   (Qwen, Llama, etc.)
-                                                   | :18080     |
-                                                   +------------+
-                                                   | Agent      | <-- OpenClaw or Hermes
-                                                   | Container  |
-                                                   | :3000/8642 |
-                                                   +------------+
-
-AI CLIs ──> tytus-mcp ──> reads state.json ──> exposes MCP tools
-            (stdio)       (no network needed)    to the AI agent
+crates/
+├── cli      Binary: `tytus` command
+├── mcp      Binary: `tytus-mcp` MCP server
+├── core     HTTP client (retry/backoff), error types, device fingerprint
+├── auth     Sentinel device auth, OS keychain, token refresh
+├── pods     Provider API: allocation, status, config, agent control
+└── tunnel   WireGuard via boringtun (userspace, cross-platform)
 ```
 
-Crate structure:
+The tunnel uses [`boringtun`](https://github.com/cloudflare/boringtun) for
+the Noise protocol and the [`tun`](https://crates.io/crates/tun) crate for
+the OS-level TUN device. No `wg-quick`, no kernel module. Privilege
+escalation for opening the TUN device is handled transparently via a
+three-strategy chain: `sudo -n` (passwordless via the sudoers entry the
+installer adds) → `osascript` (macOS GUI dialog) → interactive `sudo`.
 
-| Crate | Purpose |
-|-------|---------|
-| `cli` | Binary: `tytus` command |
-| `mcp` | Binary: `tytus-mcp` MCP server |
-| `core` | HTTP client (retry/backoff), error types |
-| `auth` | Device auth (Sentinel), keychain, token refresh |
-| `pods` | Provider API: allocate, status, config, revoke |
-| `tunnel` | WireGuard tunnel via boringtun |
+---
 
 ## Security
 
-- State file: `~/.config/tytus/state.json` (owner-only, 0600)
-- Refresh tokens: OS keychain (`com.traylinx.atomek`)
-- WireGuard keys: zeroed on drop (Zeroize trait), never on disk
-- Config: parsed in memory, never written to disk
-- Pod isolation: separate subnet per pod, iptables blocks cross-pod
+| Surface | How it's handled |
+|---|---|
+| State file | `~/.config/tytus/state.json` (Linux) or `~/Library/Application Support/tytus/state.json` (macOS), mode `0o600` |
+| Refresh tokens | OS keychain (`com.traylinx.atomek` service) — never in plain files |
+| WireGuard private keys | Parsed in memory only, never written to disk; `WireGuardConfig` implements `Zeroize` and zeroes on drop |
+| Sentinel pass | `WannolotPassResponse` is `Zeroize` + `ZeroizeOnDrop` |
+| TUN privilege | Tightly-scoped sudoers: only `tytus tunnel-up *` and `tytus tunnel-down *` (the `tunnel-down` helper internally validates the target PID against `/tmp/tytus/tunnel-*.pid` so it cannot be abused to SIGTERM other processes) |
+| Tunnel daemon | Runs as root only for the lifetime of the WG socket; deletes its temp config file before opening the tunnel; auto-cleans PID + iface files on shutdown |
+| HTTP client | `reqwest` with rustls + WebPKI roots + HTTP/2 + macOS SystemConfiguration; no `native-tls`, no plaintext fallback |
+
+A full pre-public-release security audit is in
+[`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md).
+
+---
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| "TUN device requires root" | Re-run install script to set up passwordless tunnel |
-| "No Tytus subscription" | Upgrade at traylinx.com |
-| "Config download failed" | Pod provisioning. Wait, then `tytus connect --pod XX` |
-| "Token refresh failed" | `tytus logout && tytus login` |
-| Debug logging | `RUST_LOG=debug tytus connect` |
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `No pods. Run: tytus connect` | No allocation | `tytus setup` (or `tytus connect`) |
+| `Tunnel daemon already running` | Stale PID file | `tytus disconnect` then retry |
+| `401 Invalid API key` from gateway | Stable key map sync race during first connect | Wait 2s and retry; `tytus restart` if persistent |
+| `403 plan_limit_reached` | Unit budget would be exceeded | Revoke an existing pod or upgrade your plan |
+| `503 no_capacity` | All droplets full | Wait or contact support |
+| Tunnel up but `curl` times out | Routing collision with another VPN on macOS | Disconnect other VPNs, then `tytus connect` |
+| Anything weird | — | Run `tytus doctor` first |
+
+For deep AI-agent troubleshooting, run `tytus llm-docs` and feed the output
+to your assistant.
+
+---
 
 ## Development
 
 ```bash
-cargo build -p atomek-cli -p tytus-mcp   # Debug build
-cargo build --release -p atomek-cli       # Release CLI only
-cargo test --all                          # Tests
-cargo clippy --all                        # Lint
+cargo build -p atomek-cli -p tytus-mcp     # debug build
+cargo build --release                       # release build
+cargo test --workspace                      # run all tests
+cargo clippy --workspace --all-targets      # lint
+cargo audit                                 # vulnerability scan
 ```
+
+Workspace dependencies are pinned in `Cargo.toml`. The `Cargo.lock` is
+checked in.
+
+---
 
 ## License
 
-MIT - Traylinx
+MIT — Traylinx

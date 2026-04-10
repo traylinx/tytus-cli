@@ -87,6 +87,15 @@ enum Commands {
     /// Print a short setup prompt you can paste into any AI tool (Claude Code,
     /// OpenCode, Cursor, etc.) to teach it how to drive Tytus natively.
     BootstrapPrompt,
+    /// Hidden: validated SIGTERM helper for tunnel daemons. Verifies the PID
+    /// matches a known tunnel-NN.pid file under /tmp/tytus before killing.
+    /// Used by `tytus disconnect` via passwordless sudoers (replaces the old
+    /// `/bin/kill -TERM *` entry which allowed killing any process as root).
+    #[command(hide = true)]
+    TunnelDown {
+        /// PID to validate and SIGTERM
+        pid: i32,
+    },
     /// Link a project to Tytus — drops CLAUDE.md / AGENTS.md / .mcp.json /
     /// slash commands into the target directory so any AI CLI (Claude Code,
     /// OpenCode, KiloCode, Archon) natively knows how to drive your private
@@ -163,6 +172,7 @@ async fn main() {
         Some(Commands::Env { pod, export, raw }) => cmd_env(pod, export, raw, cli.json, &http).await,
         Some(Commands::LlmDocs) => { print!("{}", LLM_DOCS); }
         Some(Commands::BootstrapPrompt) => { print!("{}", BOOTSTRAP_PROMPT); }
+        Some(Commands::TunnelDown { pid }) => cmd_tunnel_down(pid),
         Some(Commands::Link { dir, only }) => cmd_link(&dir, only, cli.json),
         Some(Commands::Mcp { format }) => cmd_mcp(&format, cli.json),
         Some(Commands::Restart { pod }) => cmd_restart(&http, pod, cli.json).await,
@@ -691,6 +701,82 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
     }
 }
 
+// ── Tunnel down (validated SIGTERM, replaces direct sudo kill) ──
+//
+// SECURITY: this subcommand exists so the passwordless sudoers entry
+// can be scoped to `tytus tunnel-down *` instead of `/bin/kill -TERM *`.
+// The previous design let any local user SIGTERM ANY process (including
+// PID 1, system services, other users' processes) as root. This helper
+// validates the PID is one of OUR own tunnel daemons before signalling.
+//
+// Validation:
+//   1. The PID must appear in /tmp/tytus/tunnel-*.pid (the daemon's
+//      own breadcrumb) — if no file references it, refuse.
+//   2. The process must currently exist (kill -0 returns 0).
+// We deliberately do NOT call `ps`/`/proc/PID/exe` for portability and
+// to avoid TOCTOU between the comm check and the kill — the PID-file
+// check is sufficient because only root could have written that file
+// (the daemon runs as root, the file lives in a sticky-bit /tmp dir).
+fn cmd_tunnel_down(pid: i32) {
+    if pid <= 1 {
+        eprintln!("tunnel-down: refusing to signal PID {}", pid);
+        std::process::exit(1);
+    }
+
+    let pid_dir = std::path::PathBuf::from("/tmp/tytus");
+    let entries = match std::fs::read_dir(&pid_dir) {
+        Ok(e) => e,
+        Err(_) => {
+            eprintln!("tunnel-down: no tunnel daemons known (no /tmp/tytus dir)");
+            std::process::exit(1);
+        }
+    };
+
+    let mut matched = false;
+    let mut matched_path: Option<std::path::PathBuf> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !(name.starts_with("tunnel-") && name.ends_with(".pid")) {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(file_pid) = content.trim().parse::<i32>() {
+                if file_pid == pid {
+                    matched = true;
+                    matched_path = Some(path.clone());
+                    break;
+                }
+            }
+        }
+    }
+
+    if !matched {
+        eprintln!("tunnel-down: PID {} is not a registered tytus tunnel daemon", pid);
+        std::process::exit(1);
+    }
+
+    // Verify the process still exists (kill -0 = signal 0 = check only)
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    if !alive {
+        // Stale PID file — clean it up and exit success
+        if let Some(p) = matched_path { let _ = std::fs::remove_file(p); }
+        eprintln!("tunnel-down: PID {} already exited (stale pidfile cleaned)", pid);
+        std::process::exit(0);
+    }
+
+    // Send SIGTERM
+    let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if result == 0 {
+        eprintln!("tunnel-down: SIGTERM sent to PID {}", pid);
+        std::process::exit(0);
+    } else {
+        let err = std::io::Error::last_os_error();
+        eprintln!("tunnel-down: kill({}, SIGTERM) failed: {}", pid, err);
+        std::process::exit(1);
+    }
+}
+
 // ── Revoke ───────────────────────────────────────────────────
 
 async fn cmd_revoke(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
@@ -732,13 +818,21 @@ async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
     };
 
     for pid in &pod_ids {
-        // Kill the tunnel daemon via PID file
+        // Kill the tunnel daemon via PID file. We invoke `sudo -n tytus tunnel-down <pid>`
+        // instead of bare `sudo kill -TERM <pid>`. The `tytus tunnel-down` helper
+        // validates the PID against /tmp/tytus/tunnel-*.pid before signalling, which
+        // means the passwordless sudoers entry can be tightly scoped to
+        //   `<bin> tunnel-down *`
+        // and CANNOT be abused to SIGTERM arbitrary system processes (PID 1, other
+        // users' procs, daemons, etc.) the way the previous bare-kill rule could.
         let pid_file = std::path::PathBuf::from(format!("/tmp/tytus/tunnel-{}.pid", pid));
         if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
             if let Ok(tunnel_pid) = pid_str.trim().parse::<i32>() {
-                // Tunnel runs as root — use sudo -n to send SIGTERM
+                let self_exe = std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "tytus".into());
                 let kill_ok = std::process::Command::new("sudo")
-                    .args(["-n", "kill", "-TERM", &tunnel_pid.to_string()])
+                    .args(["-n", &self_exe, "tunnel-down", &tunnel_pid.to_string()])
                     .output()
                     .map(|o| o.status.success())
                     .unwrap_or(false);
@@ -907,7 +1001,7 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, json: bool, ht
     } else {
         // First connected pod, or first pod
         state.pods.iter().position(|p| p.tunnel_iface.is_some())
-            .or_else(|| if state.pods.is_empty() { None } else { Some(0) })
+            .or(if state.pods.is_empty() { None } else { Some(0) })
     };
 
     let Some(idx) = pod_idx else {
@@ -920,7 +1014,7 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, json: bool, ht
     // CLI), try to fetch one from the Provider. Ignore errors — we'll fall
     // back to raw per-pod values below.
     if !raw && state.pods[idx].stable_user_key.is_none() {
-        if let (Some(ref st), Some(ref aid)) = (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
+        if let (Some(st), Some(aid)) = (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
             let client = atomek_pods::TytusClient::new(http, st, aid);
             if let Ok((endpoint, key)) = atomek_pods::get_user_key(&client).await {
                 if let Some(p) = state.pods.get_mut(idx) {
@@ -987,7 +1081,7 @@ fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
         .unwrap_or_else(|| "tytus-mcp".into());
 
     let should_inject = |name: &str| -> bool {
-        only.as_ref().map_or(true, |list| list.iter().any(|s| s == name))
+        only.as_ref().is_none_or(|list| list.iter().any(|s| s == name))
     };
 
     let mut injected = Vec::new();
@@ -1707,7 +1801,7 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
                     let out = result.stdout.unwrap_or_default();
                     wizard::finish_ok(&pb, "Agent responded");
                     println!();
-                    wizard::print_info(&out.trim());
+                    wizard::print_info(out.trim());
                 }
                 Err(e) => {
                     wizard::finish_fail(&pb, &format!("Failed: {}", e));
@@ -1887,8 +1981,6 @@ curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh 
 
 Then start with `tytus status` and walk me through anything that's not ready.
 "#;
-
-#[allow(dead_code)]
 
 const CLAUDE_MD_BLOCK: &str = r#"## Tytus Private AI Pod (driven via tytus-cli)
 

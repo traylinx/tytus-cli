@@ -1,3 +1,30 @@
+# Build output
 target/
 *.swp
 .DS_Store
+
+# Editor / IDE
+.idea/
+.vscode/
+*.iml
+
+# Secrets — never commit any of these even by accident
+.env
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+state.json
+**/state.json
+
+# Logs
+*.log
+logs/
+
+# Local cache
+.cache/

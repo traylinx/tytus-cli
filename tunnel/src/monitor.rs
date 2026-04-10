@@ -14,17 +14,17 @@ pub async fn check_tunnel_health(gateway_ip: &str) -> bool {
 
     // Try connecting to switchAILocal on port 18080
     let socket_addr = std::net::SocketAddr::new(addr, 18080);
-    match tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::net::TcpStream::connect(socket_addr),
-    ).await {
-        Ok(Ok(_)) => true,
-        _ => false,
-    }
+    matches!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect(socket_addr),
+        ).await,
+        Ok(Ok(_))
+    )
 }
 
 /// Extract the gateway IP from a subnet string.
-/// "10.17.8.0/24" → "10.17.8.1"
+/// "10.X.Y.0/24" → "10.X.Y.1"
 pub fn gateway_from_subnet(subnet: &str) -> Option<String> {
     let base = subnet.split('/').next()?;
     let parts: Vec<&str> = base.split('.').collect();

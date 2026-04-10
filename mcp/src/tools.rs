@@ -265,7 +265,7 @@ async fn tool_setup_guide() -> ToolResult {
     let mut step_num = 1;
 
     // Check if tytus binary exists
-    steps.push(format!("{}. Install tytus CLI (if not already installed):\n   curl -fsSL https://tytus.traylinx.com/install.sh | sh\n   OR: cargo install --git https://github.com/traylinx/tytus-cli atomek-cli", step_num));
+    steps.push(format!("{}. Install tytus CLI (if not already installed):\n   curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh", step_num));
     step_num += 1;
 
     if !state.is_logged_in() {
@@ -278,7 +278,7 @@ async fn tool_setup_guide() -> ToolResult {
 
     let has_tunnel = state.pods.iter().any(|p| p.tunnel_iface.is_some());
     if !has_tunnel {
-        steps.push(format!("{}. Allocate pod and activate tunnel (requires sudo for TUN device):\n   sudo tytus connect\n   # Or with Hermes agent (2 units): sudo tytus connect --agent hermes\n   # Keep this running — it blocks until Ctrl+C", step_num));
+        steps.push(format!("{}. Allocate a pod and activate the tunnel:\n   tytus connect\n   # Or with Hermes agent (2 units): tytus connect --agent hermes\n   # Elevation is handled internally — no manual sudo needed.", step_num));
         step_num += 1;
     } else {
         steps.push(format!("{}. Tunnel is active!", step_num));

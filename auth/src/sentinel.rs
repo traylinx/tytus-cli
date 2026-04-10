@@ -42,6 +42,7 @@ pub struct PlanStatus {
 // ── Response types ──
 
 #[derive(Deserialize)]
+#[allow(dead_code)] // serde struct: keep all upstream fields even if currently unused
 struct WannolotPassResponse {
     has_pass: bool,
     #[serde(default)]

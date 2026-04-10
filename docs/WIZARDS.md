@@ -98,7 +98,7 @@ Goal: anyone can install, set up, and use Tytus without reading docs or touching
 ```
 1. tytus                       ← shows dashboard
    [Status] Pod 01 nemoclaw — Connected
-   AI Gateway: http://10.18.1.1:18080
+   AI Gateway: http://10.42.42.1:18080  (stable, never changes)
    [? for help, q to quit]
 2. tytus chat                  ← immediate chat
 ```
