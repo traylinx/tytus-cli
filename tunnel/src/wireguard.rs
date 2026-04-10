@@ -130,7 +130,7 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
     }
 
     // 3b. Add route for allowed IPs through the TUN interface
-    // allowed_ips is a single string like "10.18.1.0/24" — may contain commas for multiple
+    // allowed_ips is a single string like "10.X.Y.0/24" — may contain commas for multiple
     let allowed_ip_list: Vec<&str> = config.allowed_ips.split(',').map(|s| s.trim()).collect();
     for allowed_ip in &allowed_ip_list {
         let network = allowed_ip.split('/').next().unwrap_or(allowed_ip);
