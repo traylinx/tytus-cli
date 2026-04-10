@@ -107,6 +107,28 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
 
     tracing::info!(interface = %interface_name, "TUN device created");
 
+    // macOS: force re-register the interface with scutil via explicit ifconfig.
+    // The `tun` crate creates the utun device via socket syscall but doesn't
+    // always notify macOS SystemConfiguration, causing packets to bypass it.
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("/sbin/ifconfig")
+            .args([&interface_name, "inet", &local_ip, &peer_wg_ip, "netmask", "255.255.255.255", "up"])
+            .output();
+        match status {
+            Ok(o) if o.status.success() => {
+                tracing::info!("Re-registered {} with ifconfig", interface_name);
+            }
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!("ifconfig re-register failed: {}", err.trim());
+            }
+            Err(e) => {
+                tracing::warn!("ifconfig command failed: {}", e);
+            }
+        }
+    }
+
     // 3b. Add route for allowed IPs through the TUN interface
     // allowed_ips is a single string like "10.18.1.0/24" — may contain commas for multiple
     let allowed_ip_list: Vec<&str> = config.allowed_ips.split(',').map(|s| s.trim()).collect();
@@ -219,6 +241,10 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
 
 /// Main packet forwarding loop.
 /// Multiplexes: TUN reads ↔ UDP socket ↔ timer ticks.
+///
+/// Uses tun::AsyncDevice::recv/send directly (not tokio::io::split) because
+/// split uses AsyncRead which goes through Read::read, while recv() uses the
+/// tun crate's native recv() path that handles macOS utun PI prefix correctly.
 async fn packet_loop(
     tun_device: tun::AsyncDevice,
     udp_socket: UdpSocket,
@@ -226,9 +252,7 @@ async fn packet_loop(
     endpoint: SocketAddr,
     cancel: CancellationToken,
 ) -> Result<(), AtomekError> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let (mut tun_reader, mut tun_writer) = tokio::io::split(tun_device);
+    let tun_device = Arc::new(tun_device);
     let mut tun_buf = vec![0u8; MAX_PACKET];
     let mut udp_buf = vec![0u8; MAX_PACKET];
     let mut out_buf = vec![0u8; MAX_PACKET];
@@ -239,6 +263,8 @@ async fn packet_loop(
 
     let mut handshake_complete = false;
 
+    tracing::info!("Packet loop starting");
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -247,9 +273,10 @@ async fn packet_loop(
             }
 
             // TUN → encrypt → UDP (outgoing traffic)
-            result = tun_reader.read(&mut tun_buf) => {
+            result = tun_device.recv(&mut tun_buf) => {
                 match result {
                     Ok(n) if n > 0 => {
+                        tracing::debug!("TUN read {} bytes", n);
                         let send_data = {
                             let mut t = tunn.lock().unwrap_or_else(|e| e.into_inner());
                             match t.encapsulate(&tun_buf[..n], &mut out_buf) {
@@ -276,6 +303,7 @@ async fn packet_loop(
             result = udp_socket.recv_from(&mut udp_buf) => {
                 match result {
                     Ok((n, _src)) => {
+                        tracing::debug!("UDP recv {} bytes", n);
                         // Process decapsulation chain — collect actions then execute
                         let actions = {
                             let mut t = tunn.lock().unwrap_or_else(|e| e.into_inner());
@@ -308,7 +336,7 @@ async fn packet_loop(
                                         handshake_complete = true;
                                         tracing::info!("WireGuard handshake complete — tunnel active");
                                     }
-                                    if let Err(e) = tun_writer.write_all(&data).await {
+                                    if let Err(e) = tun_device.send(&data).await {
                                         tracing::debug!("TUN write error: {}", e);
                                     }
                                 }
