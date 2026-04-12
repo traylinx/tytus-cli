@@ -1,0 +1,21 @@
+# Cloudflare Pages / Workers Static Assets headers
+#
+# /install.sh and /install.ps1 are symlinks to the canonical files at the
+# repo root. We set explicit Content-Type here so `curl -I` reports
+# text/x-shellscript instead of octet-stream, and so browsers render them
+# as text instead of triggering a download.
+
+/install.sh
+  Content-Type: text/x-shellscript; charset=utf-8
+  Cache-Control: public, max-age=300
+  X-Content-Type-Options: nosniff
+
+/install.ps1
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=300
+  X-Content-Type-Options: nosniff
+
+/*
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
