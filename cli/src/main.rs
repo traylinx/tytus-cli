@@ -586,15 +586,12 @@ async fn activate_tunnel_inline(
             } else {
                 eprintln!("✓ Tunnel active on {}", iface);
                 if !wizard::is_interactive() { append_autostart_log(&format!("cmd_connect OK: tunnel active on {}", iface)); }
+                // SECURITY: Only print stable endpoint, never internal IPs or raw keys
                 if let Some(pod) = state.pods.iter().find(|p| p.pod_id == target_pod_id) {
-                    if let Some(ref ep) = pod.ai_endpoint {
-                        println!("AI_GATEWAY={}", ep);
-                    }
-                    if let Some(ref ep) = pod.agent_endpoint {
-                        println!("AGENT_API={}", ep);
-                    }
-                    if let Some(ref key) = pod.pod_api_key {
-                        println!("API_KEY={}", key);
+                    if let Some(ref ep) = pod.stable_ai_endpoint {
+                        println!("ENDPOINT={}", ep);
+                    } else if let Some(ref ep) = pod.ai_endpoint {
+                        println!("ENDPOINT={}", ep);
                     }
                 }
                 eprintln!("Tunnel daemon running (pid {}). Stop with: tytus disconnect", std::process::id());
@@ -720,15 +717,12 @@ async fn activate_tunnel_elevated(
         } else {
             eprintln!("✓ Tunnel active on {}", iface);
             if !wizard::is_interactive() { append_autostart_log(&format!("cmd_connect OK: tunnel active on {} (elevated)", iface)); }
+            // SECURITY: Only print stable endpoint, never internal IPs or raw keys
             if let Some(pod) = state.pods.iter().find(|p| p.pod_id == target_pod_id) {
-                if let Some(ref ep) = pod.ai_endpoint {
-                    println!("AI_GATEWAY={}", ep);
-                }
-                if let Some(ref ep) = pod.agent_endpoint {
-                    println!("AGENT_API={}", ep);
-                }
-                if let Some(ref key) = pod.pod_api_key {
-                    println!("API_KEY={}", key);
+                if let Some(ref ep) = pod.stable_ai_endpoint {
+                    println!("ENDPOINT={}", ep);
+                } else if let Some(ref ep) = pod.ai_endpoint {
+                    println!("ENDPOINT={}", ep);
                 }
             }
             if let Some(pid) = tunnel_pid {
@@ -3409,19 +3403,25 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
 }
 
 fn print_json_status(state: &CliState) {
-    // Redact sensitive fields for JSON output
-    let mut out = serde_json::json!({
+    // SECURITY: Only expose user-facing fields. Never leak infrastructure details
+    // (droplet_id, droplet_ip, internal pod IPs, raw per-pod keys).
+    // Use `tytus env --raw` for debugging (explicit opt-in).
+    let pods: Vec<_> = state.pods.iter().map(|p| {
+        serde_json::json!({
+            "pod_id": p.pod_id,
+            "agent_type": p.agent_type,
+            "tunnel_iface": p.tunnel_iface,
+            "stable_ai_endpoint": p.stable_ai_endpoint,
+            "stable_user_key": p.stable_user_key,
+        })
+    }).collect();
+
+    let out = serde_json::json!({
         "logged_in": state.is_logged_in(),
         "email": state.email,
         "tier": state.tier,
-        "pods": state.pods,
+        "pods": pods,
     });
-    // Don't leak tokens in JSON output
-    if let Some(obj) = out.as_object_mut() {
-        obj.remove("refresh_token");
-        obj.remove("access_token");
-        obj.remove("secret_key");
-    }
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
 }
 
@@ -3438,14 +3438,12 @@ fn print_human_status(state: &CliState) {
             let agent = pod.agent_type.as_deref().unwrap_or("?");
             let status = if pod.tunnel_iface.is_some() { "connected" } else { "disconnected" };
             println!("\nPod {} [{}] {}", pod.pod_id, agent, status);
-            if let Some(ref ep) = pod.ai_endpoint {
-                println!("  AI Gateway:    {}", ep);
+            // SECURITY: Only show stable endpoint (never internal IPs or raw keys)
+            if let Some(ref ep) = pod.stable_ai_endpoint {
+                println!("  Endpoint:      {}", ep);
             }
-            if let Some(ref ep) = pod.agent_endpoint {
-                println!("  Agent API:     {}", ep);
-            }
-            if let Some(ref key) = pod.pod_api_key {
-                println!("  API Key:       {}...{}", &key[..10.min(key.len())], &key[key.len().saturating_sub(4)..]);
+            if let Some(ref key) = pod.stable_user_key {
+                println!("  API Key:       {}...{}", &key[..15.min(key.len())], &key[key.len().saturating_sub(4)..]);
             }
             if let Some(ref iface) = pod.tunnel_iface {
                 println!("  Tunnel:        {}", iface);
