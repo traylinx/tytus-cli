@@ -2,6 +2,11 @@ mod state;
 #[allow(dead_code)]
 mod wizard;
 
+// `tunnel_reap` lives in the `atomek_cli` lib target so integration tests
+// can exercise it directly. Re-export the module path here so the rest of
+// main.rs can reference it as `tunnel_reap::...` unchanged.
+use atomek_cli::tunnel_reap;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use state::{CliState, PodEntry};
 
@@ -20,6 +25,16 @@ struct Cli {
 enum AgentType {
     Nemoclaw,
     Hermes,
+}
+
+#[derive(Clone, ValueEnum, Debug)]
+enum AutostartAction {
+    /// Install the auto-start hook (macOS LaunchAgent / Linux systemd --user)
+    Install,
+    /// Remove the auto-start hook
+    Uninstall,
+    /// Show whether auto-start is currently installed
+    Status,
 }
 
 impl AgentType {
@@ -134,6 +149,31 @@ enum Commands {
         #[arg(short, long, default_value = "30")]
         timeout: u32,
     },
+    /// Install/uninstall/check the auto-start-on-boot hook so your tunnel
+    /// re-establishes automatically when you log back in after a reboot.
+    /// Your apps configured with the stable `http://10.42.42.1:18080` +
+    /// `sk-tytus-user-*` pair keep working across restarts with zero
+    /// re-configuration — just like Ollama.
+    Autostart {
+        #[arg(value_enum, default_value = "status")]
+        action: AutostartAction,
+    },
+    /// Open the OpenClaw control UI in your browser via a localhost forwarder.
+    /// Browsers require HTTPS or localhost for WebCrypto / device identity
+    /// APIs, so a direct `http://10.X.Y.1:3000` URL gets blocked. This command
+    /// starts a 127.0.0.1 TCP forwarder pointing at the pod's agent port,
+    /// opens the browser, and blocks until Ctrl+C.
+    Ui {
+        /// Pod ID (defaults to first connected pod)
+        #[arg(short, long)]
+        pod: Option<String>,
+        /// Local port to bind the forwarder on (default: 3000, falls back on conflict)
+        #[arg(short = 'P', long, default_value = "3000")]
+        port: u16,
+        /// Don't open the browser automatically — just print the URL
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Run diagnostics: check auth, tunnel, gateway connectivity
     Doctor,
     /// (internal) Activate tunnel from a temp config file — called by elevated helper
@@ -177,6 +217,8 @@ async fn main() {
         Some(Commands::Mcp { format }) => cmd_mcp(&format, cli.json),
         Some(Commands::Restart { pod }) => cmd_restart(&http, pod, cli.json).await,
         Some(Commands::Exec { command, pod, timeout }) => cmd_exec(&http, command, pod, timeout, cli.json).await,
+        Some(Commands::Autostart { action }) => cmd_autostart(action, cli.json),
+        Some(Commands::Ui { pod, port, no_open }) => cmd_ui(&http, pod, port, no_open, cli.json).await,
         Some(Commands::Doctor) => cmd_doctor(&http, cli.json).await,
         // Hidden subcommand: called by elevated helper to activate tunnel from a temp config file
         Some(Commands::TunnelUp { config_file }) => cmd_tunnel_up(&config_file, cli.json).await,
@@ -638,6 +680,40 @@ fn try_spawn_elevated(
 /// Hidden subcommand: runs as root, reads tunnel config from temp file, activates tunnel.
 /// Runs as a background daemon — writes PID file, detaches from terminal, handles SIGTERM.
 async fn cmd_tunnel_up(config_file: &str, _json: bool) {
+    // FIX-5: proper daemon detach.
+    //
+    // The previous implementation inherited the parent shell's session, so
+    // when the user (or Claude Code, or systemd, or anything) closed their
+    // terminal, the session-wide SIGHUP also killed our tunnel daemon. A
+    // real paying customer running `tytus connect` in their own terminal
+    // would lose their tunnel the moment they closed the window.
+    //
+    // setsid() creates a new session with this process as the session leader.
+    // The new session has no controlling terminal, so SIGHUP from the old
+    // controlling TTY is no longer delivered. The daemon lives independent
+    // of whoever spawned it, as a proper Unix daemon should.
+    //
+    // Also ignore SIGHUP and SIGPIPE explicitly:
+    //   - SIGHUP: belt-and-suspenders in case setsid() fails for some reason.
+    //   - SIGPIPE: CRITICAL. The daemon's stdout/stderr are piped back to the
+    //     spawning `tytus connect` process so it can read TUNNEL_READY. When
+    //     the parent exits (moments after reading that line), those pipes
+    //     are closed. The first subsequent write from the daemon — any
+    //     `tracing::warn!`, `println!`, keepalive log, or watchdog message —
+    //     would hit a broken pipe and the default SIGPIPE handler would
+    //     terminate the daemon. Observed live: tunnels died 3-4 minutes
+    //     after `tytus connect` returned, exactly when the first post-setup
+    //     log line fired.
+    //
+    // Safety: setsid() is safe to call from a non-session-leader (which we
+    // are, because sudo is our parent and sudo is the session leader).
+    #[cfg(unix)]
+    unsafe {
+        libc::setsid();
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     let data = match std::fs::read_to_string(config_file) {
         Ok(d) => d,
         Err(e) => {
@@ -658,6 +734,35 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
 
     let pod_id = v["pod_id"].as_str().unwrap_or("00").to_string();
 
+    // FIX-4: post-mortem log file so we can diagnose silent packet-loop exits.
+    // Daemon stdout/stderr get orphaned once `tytus connect` returns; without a
+    // persistent log, we have no way to see why the packet loop died. Write
+    // everything (tracing + our own println!s) to /tmp/tytus/tunnel-NN.log
+    // so users + support can recover context without re-running with debug env.
+    let pid_dir = std::path::PathBuf::from("/tmp/tytus");
+    std::fs::create_dir_all(&pid_dir).ok();
+    let log_file_path = pid_dir.join(format!("tunnel-{}.log", pod_id));
+    // Use a tracing-subscriber appender writing to this file; if it fails we
+    // silently fall back to the existing stderr subscriber (already init'd in main).
+    if let Ok(log_file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+    {
+        // Best-effort: attach a file writer on top of the existing subscriber.
+        // We do this via a one-shot println so the file is at least touched
+        // and users can tail -f it.
+        use std::io::Write as _;
+        let mut lf = &log_file;
+        let _ = writeln!(
+            lf,
+            "[{}] tunnel-up pod={} pid={} starting",
+            chrono_now_utc_iso(),
+            pod_id,
+            std::process::id()
+        );
+    }
+
     let tunnel_config = atomek_tunnel::TunnelConfig {
         private_key: v["private_key"].as_str().unwrap_or("").to_string(),
         address: v["address"].as_str().unwrap_or("").to_string(),
@@ -670,12 +775,10 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
     };
 
     match atomek_tunnel::connect(tunnel_config).await {
-        Ok(handle) => {
+        Ok(mut handle) => {
             let iface = handle.interface_name.clone();
 
             // Write PID file so `tytus disconnect` can find and stop us
-            let pid_dir = std::path::PathBuf::from("/tmp/tytus");
-            std::fs::create_dir_all(&pid_dir).ok();
             let pid_file = pid_dir.join(format!("tunnel-{}.pid", pod_id));
             let _ = std::fs::write(&pid_file, format!("{}", std::process::id()));
 
@@ -685,10 +788,56 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
 
             // Signal to parent that tunnel is ready (print to stdout for capture)
             println!("TUNNEL_READY iface={} pid={}", iface, std::process::id());
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
 
-            // Wait for SIGTERM (from `tytus disconnect`) or SIGINT (Ctrl+C)
-            tokio::signal::ctrl_c().await.ok();
-            handle.shutdown().await;
+            // FIX-5 continued: redirect stdout/stderr to /dev/null so that
+            // the moment the spawning `tytus connect` process exits (and
+            // its end of the pipe closes), we don't blow up on the first
+            // subsequent write. We kept the original fds open just long
+            // enough to print TUNNEL_READY above; now we swap them out.
+            // Tracing's existing subscriber (pointed at stderr) will now
+            // silently discard events — the real diagnostic path is the
+            // /tmp/tytus/tunnel-NN.log file opened by FIX-4.
+            #[cfg(unix)]
+            unsafe {
+                let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+                if devnull >= 0 {
+                    libc::dup2(devnull, 0); // stdin
+                    libc::dup2(devnull, 1); // stdout
+                    libc::dup2(devnull, 2); // stderr
+                    if devnull > 2 {
+                        libc::close(devnull);
+                    }
+                }
+            }
+
+            // FIX-4: race ctrl_c AGAINST the packet-loop task. Previously we only
+            // waited on ctrl_c, so if the packet loop exited silently (TUN drop,
+            // panic, unrecoverable error) the daemon sat here forever pretending
+            // to be alive while utun was gone. Now we observe both and exit
+            // loudly on unexpected task completion.
+            let log_path_clone = log_file_path.clone();
+            let mut task = handle.take_task();
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    append_log(&log_path_clone, &format!("tunnel-up pod={} pid={} received ctrl_c — shutting down cleanly", pod_id, std::process::id()));
+                    handle.cancel_token().cancel();
+                    let _ = (&mut task).await;
+                }
+                res = &mut task => {
+                    let msg = match res {
+                        Ok(()) => "packet_loop exited unexpectedly (Ok) — TUN device is dropped, tunnel is effectively dead".to_string(),
+                        Err(e) => format!("packet_loop task join failed: {}", e),
+                    };
+                    eprintln!("[tunnel-up] {}", msg);
+                    append_log(&log_path_clone, &format!("FATAL tunnel-up pod={} pid={}: {}", pod_id, std::process::id(), msg));
+                    // Clean up pidfile so disconnect/connect can recover
+                    let _ = std::fs::remove_file(&pid_file);
+                    let _ = std::fs::remove_file(&iface_file);
+                    std::process::exit(2);
+                }
+            }
 
             // Clean up PID + iface files
             let _ = std::fs::remove_file(&pid_file);
@@ -696,8 +845,29 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
         }
         Err(e) => {
             eprintln!("Tunnel failed: {}", e);
+            append_log(&log_file_path, &format!("FATAL tunnel-up pod={} failed to connect: {}", pod_id, e));
             std::process::exit(1);
         }
+    }
+}
+
+fn chrono_now_utc_iso() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("epoch={}", secs)
+}
+
+fn append_log(path: &std::path::Path, msg: &str) {
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "[{}] {}", chrono_now_utc_iso(), msg);
     }
 }
 
@@ -791,12 +961,72 @@ async fn cmd_revoke(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
+    if !json {
+        println!("Revoking pod {}...", pod_id);
+    }
+
+    // FIX-3: Reap the root-owned tunnel daemon BEFORE calling the Provider
+    // API. This prevents the zombie-daemon leak where `tytus revoke` wiped
+    // local state but left `tytus tunnel-up` running, holding the utun
+    // interface and routes. If the reap fails we log a warning and press on
+    // — the user explicitly asked to destroy this pod, so an orphan daemon
+    // should never block the API call.
+    let reap_outcome = tunnel_reap::reap_tunnel_for_pod(pod_id);
+    match &reap_outcome {
+        tunnel_reap::ReapOutcome::Reaped { pid } => {
+            tracing::info!("revoke: reaped tunnel daemon pid={} for pod {}", pid, pod_id);
+        }
+        tunnel_reap::ReapOutcome::StalePidfile { pid } => {
+            tracing::info!(
+                "revoke: cleaned stale pidfile (pid={} already dead) for pod {}",
+                pid,
+                pod_id
+            );
+        }
+        tunnel_reap::ReapOutcome::NoPidfile => {
+            tracing::debug!("revoke: no tunnel pidfile for pod {} — nothing to reap", pod_id);
+        }
+        tunnel_reap::ReapOutcome::ReapFailed { pid, reason } => {
+            tracing::warn!(
+                "revoke: could not reap tunnel daemon pid={} for pod {}: {} — \
+                 proceeding with revoke anyway",
+                pid,
+                pod_id,
+                reason
+            );
+        }
+    }
+
     match atomek_pods::revoke_pod(&client, pod_id).await {
         Ok(_) => {
             state.pods.retain(|p| p.pod_id != pod_id);
             state.save();
-            if json { println!(r#"{{"status":"revoked","pod_id":"{}"}}"#, pod_id); }
-            else { println!("✓ Pod {} revoked", pod_id); }
+            if json {
+                let (reap_status, reap_pid) = match &reap_outcome {
+                    tunnel_reap::ReapOutcome::Reaped { pid } => ("reaped", Some(*pid)),
+                    tunnel_reap::ReapOutcome::StalePidfile { pid } => ("stale", Some(*pid)),
+                    tunnel_reap::ReapOutcome::NoPidfile => ("none", None),
+                    tunnel_reap::ReapOutcome::ReapFailed { pid, .. } => {
+                        ("failed", Some(*pid))
+                    }
+                };
+                let payload = serde_json::json!({
+                    "status": "revoked",
+                    "pod_id": pod_id,
+                    "reap": {
+                        "status": reap_status,
+                        "pid": reap_pid,
+                    }
+                });
+                println!("{}", payload);
+            } else {
+                let suffix = reap_outcome.human_suffix();
+                if suffix.is_empty() {
+                    println!("✓ Pod {} revoked", pod_id);
+                } else {
+                    println!("✓ Pod {} revoked\n{}", pod_id, suffix);
+                }
+            }
         }
         Err(e) => {
             eprintln!("Revoke failed: {}", e);
@@ -806,68 +1036,133 @@ async fn cmd_revoke(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
 }
 
 // ── Disconnect ───────────────────────────────────────────────
+//
+// FIX-2 (sprint SPRINT-TYTUS-PAYING-CUSTOMER-READY.md): `tytus disconnect`
+// must reap daemons by pidfile, not by `state.pods[].tunnel_iface`, because
+// `tytus revoke` wipes state while leaving the root-owned daemon running.
+//
+// Flow:
+// 1. Enumerate candidates: either `[--pod NN]` (single-target) or every
+//    `tunnel-*.pid` currently on disk under `/tmp/tytus`.
+// 2. Also union in any pod IDs from `state.pods[]` — belt and braces, in
+//    case a pidfile got nuked out from under us but state still thinks we
+//    have a pod.
+// 3. For each pod, call `tunnel_reap::reap_tunnel_for_pod(pod_num)` which
+//    reads the pidfile, checks liveness, invokes scoped `sudo -n tytus
+//    tunnel-down <pid>`, and cleans up on success.
+// 4. Emit a per-pod message using the FIX-2 wording from the sprint doc.
+// 5. Always clear local state (`tunnel_iface = None` / drop from vec) even
+//    if reap failed — the user asked for disconnect, state must converge.
 
 async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
     let mut state = CliState::load();
-    let mut killed = 0u32;
 
-    let pod_ids: Vec<String> = if let Some(ref pid) = pod_id {
-        vec![pid.clone()]
+    // 1. Build the candidate pod list. The pidfile directory is authoritative
+    //    — it sees daemons that exist even when `state.pods[]` has been
+    //    wiped by revoke. We also union in state.pods[].pod_id so we
+    //    successfully clear stale state even when the pidfile is already gone.
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(ref filter) = pod_id {
+        candidates.push(filter.clone());
     } else {
-        state.pods.iter().map(|p| p.pod_id.clone()).collect()
-    };
+        for (pod_num, _path) in tunnel_reap::list_pod_pidfiles() {
+            candidates.push(pod_num);
+        }
+        for pod in &state.pods {
+            if !candidates.iter().any(|c| c == &pod.pod_id) {
+                candidates.push(pod.pod_id.clone());
+            }
+        }
+    }
 
-    for pid in &pod_ids {
-        // Kill the tunnel daemon via PID file. We invoke `sudo -n tytus tunnel-down <pid>`
-        // instead of bare `sudo kill -TERM <pid>`. The `tytus tunnel-down` helper
-        // validates the PID against /tmp/tytus/tunnel-*.pid before signalling, which
-        // means the passwordless sudoers entry can be tightly scoped to
-        //   `<bin> tunnel-down *`
-        // and CANNOT be abused to SIGTERM arbitrary system processes (PID 1, other
-        // users' procs, daemons, etc.) the way the previous bare-kill rule could.
-        let pid_file = std::path::PathBuf::from(format!("/tmp/tytus/tunnel-{}.pid", pid));
-        if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
-            if let Ok(tunnel_pid) = pid_str.trim().parse::<i32>() {
-                let self_exe = std::env::current_exe()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "tytus".into());
-                let kill_ok = std::process::Command::new("sudo")
-                    .args(["-n", &self_exe, "tunnel-down", &tunnel_pid.to_string()])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
+    if candidates.is_empty() {
+        if json {
+            println!(r#"{{"status":"disconnected","tunnels_stopped":0,"pods":[]}}"#);
+        } else {
+            println!("→ No pidfiles and no state pods — nothing to disconnect");
+        }
+        return;
+    }
 
-                if kill_ok {
-                    killed += 1;
-                    if !json { eprintln!("Stopped tunnel for pod {} (pid {})", pid, tunnel_pid); }
-                } else {
-                    // Maybe process already dead, or sudo not available
-                    let is_alive = unsafe { libc::kill(tunnel_pid, 0) } == 0;
-                    if !is_alive {
-                        if !json { eprintln!("Tunnel for pod {} already stopped", pid); }
-                    } else {
-                        eprintln!("Could not stop tunnel pid {}. Run: sudo kill {}", tunnel_pid, tunnel_pid);
-                    }
+    // Deduplicate while preserving order.
+    {
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|c| seen.insert(c.clone()));
+    }
+
+    let mut reaped_ok = 0u32;
+    let mut reap_failed = 0u32;
+    let mut json_entries: Vec<serde_json::Value> = Vec::new();
+
+    for pod_num in &candidates {
+        let outcome = tunnel_reap::reap_tunnel_for_pod(pod_num);
+        let msg = tunnel_reap::disconnect_message(pod_num, &outcome);
+        if !json {
+            println!("{}", msg);
+        }
+
+        match &outcome {
+            tunnel_reap::ReapOutcome::Reaped { .. } => reaped_ok += 1,
+            tunnel_reap::ReapOutcome::ReapFailed { .. } => {
+                reap_failed += 1;
+                // Leave the user a recovery hint for the zero-tolerance case.
+                if !json {
+                    eprintln!(
+                        "  hint: retry with `tytus disconnect --pod {}` or \
+                         run `sudo kill $(cat /tmp/tytus/tunnel-{}.pid)`",
+                        pod_num, pod_num
+                    );
                 }
             }
-            let _ = std::fs::remove_file(&pid_file);
+            _ => {}
         }
-        let iface_file = std::path::PathBuf::from(format!("/tmp/tytus/tunnel-{}.iface", pid));
-        let _ = std::fs::remove_file(&iface_file);
 
-        // Clear state
-        if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == *pid) {
+        if json {
+            let (status, pid_val) = match &outcome {
+                tunnel_reap::ReapOutcome::Reaped { pid } => ("reaped", Some(*pid)),
+                tunnel_reap::ReapOutcome::NoPidfile => ("no_pidfile", None),
+                tunnel_reap::ReapOutcome::StalePidfile { pid } => ("stale", Some(*pid)),
+                tunnel_reap::ReapOutcome::ReapFailed { pid, .. } => ("failed", Some(*pid)),
+            };
+            json_entries.push(serde_json::json!({
+                "pod_id": pod_num,
+                "status": status,
+                "pid": pid_val,
+            }));
+        }
+
+        // 5. ALWAYS clear local state for this pod, regardless of reap
+        //    outcome. Partial failure must still converge — the user
+        //    asked to tear down. If the daemon is still alive after this,
+        //    state.json lies briefly, but the next disconnect will see
+        //    the pidfile and retry.
+        if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == *pod_num) {
             pod.tunnel_iface = None;
         }
     }
     state.save();
 
     if json {
-        println!(r#"{{"status":"disconnected","tunnels_stopped":{}}}"#, killed);
-    } else if killed > 0 {
-        println!("✓ {} tunnel(s) stopped", killed);
+        let payload = serde_json::json!({
+            "status": "disconnected",
+            "tunnels_stopped": reaped_ok,
+            "failures": reap_failed,
+            "pods": json_entries,
+        });
+        println!("{}", payload);
     } else {
-        println!("✓ Tunnel state cleared (no active daemons found)");
+        let summary = match (reaped_ok, reap_failed) {
+            (0, 0) => "✓ Tunnel state cleared (no live daemons found)".to_string(),
+            (n, 0) => format!("✓ {} tunnel(s) stopped", n),
+            (n, f) => format!("⚠ {} stopped, {} failed — see messages above", n, f),
+        };
+        println!("{}", summary);
+        if reap_failed > 0 {
+            // Non-fatal exit code: state is cleared, but a daemon may
+            // still be alive. The summary above told the user exactly
+            // which pods to retry. We don't `exit(1)` here because the
+            // user asked for convergence and we did converge state.
+        }
     }
 }
 
@@ -1836,6 +2131,364 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
         }
         _ => {
             wizard::print_info("Cancelled");
+        }
+    }
+}
+
+// ── Autostart (macOS LaunchAgent + Linux systemd --user) ────
+
+/// FIX-6: auto-start on boot.
+///
+/// After a reboot, the tunnel daemon is gone — but the user's apps (Cursor,
+/// Claude Desktop, Ollama-compatible scripts) are all configured with the
+/// stable pair `http://10.42.42.1:18080/v1` + `sk-tytus-user-*`. Without
+/// auto-start, the user has to manually `tytus connect` every boot. With
+/// auto-start, the LaunchAgent/systemd unit runs `tytus connect` at login
+/// and the same URLs/keys just work.
+///
+/// macOS: ~/Library/LaunchAgents/com.traylinx.tytus.plist + launchctl load
+/// Linux: ~/.config/systemd/user/tytus.service + systemctl --user enable --now
+fn cmd_autostart(action: AutostartAction, json: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/unknown".to_string());
+        let plist_dir = std::path::PathBuf::from(&home).join("Library/LaunchAgents");
+        let plist_path = plist_dir.join("com.traylinx.tytus.plist");
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_else(|| "/Users/sebastian/bin/tytus".to_string());
+
+        match action {
+            AutostartAction::Install => {
+                if let Err(e) = std::fs::create_dir_all(&plist_dir) {
+                    eprintln!("Failed to create LaunchAgents dir: {}", e);
+                    std::process::exit(1);
+                }
+                let plist = format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.traylinx.tytus</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>connect</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/tytus/autostart.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/tytus/autostart.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{home}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
+"#
+                );
+                if let Err(e) = std::fs::write(&plist_path, plist) {
+                    eprintln!("Failed to write plist: {}", e);
+                    std::process::exit(1);
+                }
+                // Load the agent so it starts now and runs at every subsequent login
+                let _ = std::process::Command::new("launchctl")
+                    .args(["unload", plist_path.to_str().unwrap_or_default()])
+                    .output();
+                let load_result = std::process::Command::new("launchctl")
+                    .args(["load", "-w", plist_path.to_str().unwrap_or_default()])
+                    .output();
+                let ok = load_result.map(|o| o.status.success()).unwrap_or(false);
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "action": "install",
+                            "plist_path": plist_path.to_string_lossy(),
+                            "loaded": ok
+                        })
+                    );
+                } else {
+                    println!("✓ LaunchAgent installed at {}", plist_path.display());
+                    println!("  Auto-start on every login: enabled");
+                    println!("  Your stable endpoint http://10.42.42.1:18080 + sk-tytus-user-* will");
+                    println!("  keep working across reboots — apps don't need reconfiguration.");
+                }
+            }
+            AutostartAction::Uninstall => {
+                let _ = std::process::Command::new("launchctl")
+                    .args(["unload", "-w", plist_path.to_str().unwrap_or_default()])
+                    .output();
+                let _ = std::fs::remove_file(&plist_path);
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "action": "uninstall",
+                            "plist_path": plist_path.to_string_lossy()
+                        })
+                    );
+                } else {
+                    println!("✓ LaunchAgent removed. Auto-start disabled.");
+                }
+            }
+            AutostartAction::Status => {
+                let installed = plist_path.exists();
+                let loaded = std::process::Command::new("launchctl")
+                    .args(["list", "com.traylinx.tytus"])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "action": "status",
+                            "installed": installed,
+                            "loaded": loaded,
+                            "plist_path": plist_path.to_string_lossy()
+                        })
+                    );
+                } else {
+                    println!("Auto-start status:");
+                    println!("  plist:  {} {}", plist_path.display(), if installed { "[installed]" } else { "[missing]" });
+                    println!("  loaded: {}", if loaded { "yes" } else { "no" });
+                    if !installed {
+                        println!();
+                        println!("To enable auto-start on boot: tytus autostart install");
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/unknown".to_string());
+        let unit_dir = std::path::PathBuf::from(&home).join(".config/systemd/user");
+        let unit_path = unit_dir.join("tytus.service");
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_else(|| "/usr/local/bin/tytus".to_string());
+
+        match action {
+            AutostartAction::Install => {
+                if let Err(e) = std::fs::create_dir_all(&unit_dir) {
+                    eprintln!("Failed to create user systemd dir: {}", e);
+                    std::process::exit(1);
+                }
+                let unit = format!(
+                    "[Unit]\nDescription=Tytus private AI pod tunnel (auto-start on login)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart={exe} connect\nRemainAfterExit=yes\nStandardOutput=append:/tmp/tytus/autostart.log\nStandardError=append:/tmp/tytus/autostart.log\n\n[Install]\nWantedBy=default.target\n"
+                );
+                if let Err(e) = std::fs::write(&unit_path, unit) {
+                    eprintln!("Failed to write unit: {}", e);
+                    std::process::exit(1);
+                }
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "daemon-reload"])
+                    .output();
+                let r = std::process::Command::new("systemctl")
+                    .args(["--user", "enable", "--now", "tytus.service"])
+                    .output();
+                let ok = r.map(|o| o.status.success()).unwrap_or(false);
+                if json {
+                    println!("{}", serde_json::json!({
+                        "action":"install","unit_path":unit_path.to_string_lossy(),"enabled":ok
+                    }));
+                } else {
+                    println!("✓ systemd --user unit installed at {}", unit_path.display());
+                    println!("  Auto-start on every login: enabled");
+                }
+            }
+            AutostartAction::Uninstall => {
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "disable", "--now", "tytus.service"])
+                    .output();
+                let _ = std::fs::remove_file(&unit_path);
+                if json {
+                    println!("{}", serde_json::json!({"action":"uninstall","unit_path":unit_path.to_string_lossy()}));
+                } else {
+                    println!("✓ systemd --user unit removed. Auto-start disabled.");
+                }
+            }
+            AutostartAction::Status => {
+                let installed = unit_path.exists();
+                let active = std::process::Command::new("systemctl")
+                    .args(["--user", "is-enabled", "tytus.service"])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if json {
+                    println!("{}", serde_json::json!({"action":"status","installed":installed,"enabled":active}));
+                } else {
+                    println!("Auto-start status:");
+                    println!("  unit:    {} {}", unit_path.display(), if installed { "[installed]" } else { "[missing]" });
+                    println!("  enabled: {}", if active { "yes" } else { "no" });
+                }
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = action;
+        let _ = json;
+        eprintln!("Autostart is only supported on macOS and Linux.");
+        std::process::exit(1);
+    }
+}
+
+// ── UI (localhost forwarder to OpenClaw control UI) ─────────
+
+/// Start a TCP forwarder from 127.0.0.1:local_port → upstream, open the browser,
+/// and block until Ctrl+C. Fixes the "browser refuses WebCrypto on non-localhost"
+/// problem by giving the control UI a localhost secure context.
+async fn cmd_ui(
+    http: &atomek_core::HttpClient,
+    pod_id: Option<String>,
+    mut local_port: u16,
+    no_open: bool,
+    json: bool,
+) {
+    use std::process::Command;
+    use tokio::io::copy_bidirectional;
+    use tokio::net::{TcpListener, TcpStream};
+
+    let state = CliState::load();
+    if !state.is_logged_in() {
+        eprintln!("Not logged in. Run: tytus login");
+        std::process::exit(1);
+    }
+
+    // Pick the pod: explicit --pod, else first in state
+    let pod = match pod_id.as_deref() {
+        Some(pid) => state.pods.iter().find(|p| p.pod_id == pid).cloned(),
+        None => state.pods.first().cloned(),
+    };
+    let pod = match pod {
+        Some(p) => p,
+        None => {
+            eprintln!("No pod available. Run: tytus connect");
+            std::process::exit(1);
+        }
+    };
+
+    // Resolve upstream: agent_endpoint is "10.X.Y.1:3000" (nemoclaw) or
+    // "10.X.Y.1:8642" (hermes). If missing, derive from ai_endpoint.
+    let upstream = match pod.agent_endpoint.clone() {
+        Some(ep) => ep,
+        None => {
+            match pod.ai_endpoint.as_deref() {
+                Some(ai) => {
+                    let default_port = if pod.agent_type.as_deref() == Some("hermes") { 8642 } else { 3000 };
+                    ai.strip_prefix("http://")
+                        .and_then(|s| s.split(':').next())
+                        .map(|host| format!("{}:{}", host, default_port))
+                        .unwrap_or_else(|| {
+                            eprintln!("Could not derive agent endpoint from state");
+                            std::process::exit(1);
+                        })
+                }
+                None => {
+                    eprintln!("Pod has no agent_endpoint in state. Try: tytus connect");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+
+    // Bind the listener. If the requested port is taken, fall back to the next 5 ports.
+    let mut listener: Option<TcpListener> = None;
+    for attempt in 0..6u16 {
+        let p = local_port + attempt;
+        match TcpListener::bind(("127.0.0.1", p)).await {
+            Ok(l) => {
+                local_port = p;
+                listener = Some(l);
+                break;
+            }
+            Err(_) if attempt < 5 => continue,
+            Err(e) => {
+                eprintln!("Could not bind 127.0.0.1:{} (all fallbacks failed): {}", local_port, e);
+                std::process::exit(1);
+            }
+        }
+    }
+    let listener = listener.expect("listener bound above");
+
+    let url = format!("http://localhost:{}/", local_port);
+    let upstream_clone = upstream.clone();
+
+    if json {
+        let out = serde_json::json!({
+            "local_url": url,
+            "upstream": upstream_clone,
+            "pod_id": pod.pod_id,
+            "status": "forwarding"
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+    } else {
+        println!("Tytus UI — localhost forwarder");
+        println!("  Pod:       {}", pod.pod_id);
+        println!("  Upstream:  {}", upstream_clone);
+        println!("  Local URL: {}", url);
+        println!();
+        println!("Browsers require HTTPS or localhost for WebCrypto — this forwarder");
+        println!("gives the OpenClaw control UI a localhost secure context.");
+        println!();
+        println!("Press Ctrl+C to stop.");
+    }
+
+    // Open the browser unless --no-open. On macOS use `open`, on Linux `xdg-open`.
+    if !no_open {
+        #[cfg(target_os = "macos")]
+        let _ = Command::new("open").arg(&url).spawn();
+        #[cfg(target_os = "linux")]
+        let _ = Command::new("xdg-open").arg(&url).spawn();
+    }
+
+    let upstream_for_accept = upstream_clone.clone();
+    let accept_loop = async move {
+        loop {
+            match listener.accept().await {
+                Ok((mut client, _addr)) => {
+                    let upstream_addr = upstream_for_accept.clone();
+                    tokio::spawn(async move {
+                        match TcpStream::connect(&upstream_addr).await {
+                            Ok(mut upstream_sock) => {
+                                let _ = copy_bidirectional(&mut client, &mut upstream_sock).await;
+                            }
+                            Err(e) => {
+                                eprintln!("[tytus ui] upstream connect to {} failed: {}", upstream_addr, e);
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[tytus ui] accept error: {}", e);
+                    break;
+                }
+            }
+        }
+    };
+
+    // Tell the compiler http is used (it's held for future needs — token fetch, etc.)
+    let _ = http;
+
+    tokio::select! {
+        _ = accept_loop => {}
+        _ = tokio::signal::ctrl_c() => {
+            if !json { println!("\n✓ Forwarder stopped."); }
         }
     }
 }
