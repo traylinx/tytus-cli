@@ -570,10 +570,13 @@ async fn activate_tunnel_inline(
             let iface = handle.interface_name.clone();
 
             // Write PID + iface files (same as tunnel-up daemon path)
-            let pid_dir = std::path::PathBuf::from("/tmp/tytus");
-            std::fs::create_dir_all(&pid_dir).ok();
-            let _ = std::fs::write(pid_dir.join(format!("tunnel-{}.pid", target_pod_id)), format!("{}", std::process::id()));
-            let _ = std::fs::write(pid_dir.join(format!("tunnel-{}.iface", target_pod_id)), &iface);
+            let pid_dir = secure_tytus_tmp_dir();
+            let pid_f = pid_dir.join(format!("tunnel-{}.pid", target_pod_id));
+            let iface_f = pid_dir.join(format!("tunnel-{}.iface", target_pod_id));
+            let _ = std::fs::write(&pid_f, format!("{}", std::process::id()));
+            secure_chmod_600(&pid_f);
+            let _ = std::fs::write(&iface_f, &iface);
+            secure_chmod_600(&iface_f);
 
             if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
                 pod.tunnel_iface = Some(iface.clone());
@@ -858,8 +861,7 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
     // persistent log, we have no way to see why the packet loop died. Write
     // everything (tracing + our own println!s) to /tmp/tytus/tunnel-NN.log
     // so users + support can recover context without re-running with debug env.
-    let pid_dir = std::path::PathBuf::from("/tmp/tytus");
-    std::fs::create_dir_all(&pid_dir).ok();
+    let pid_dir = secure_tytus_tmp_dir();
     let log_file_path = pid_dir.join(format!("tunnel-{}.log", pod_id));
     // Use a tracing-subscriber appender writing to this file; if it fails we
     // silently fall back to the existing stderr subscriber (already init'd in main).
@@ -880,6 +882,7 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
             pod_id,
             std::process::id()
         );
+        secure_chmod_600(&log_file_path);
     }
 
     let tunnel_config = atomek_tunnel::TunnelConfig {
@@ -900,10 +903,12 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
             // Write PID file so `tytus disconnect` can find and stop us
             let pid_file = pid_dir.join(format!("tunnel-{}.pid", pod_id));
             let _ = std::fs::write(&pid_file, format!("{}", std::process::id()));
+            secure_chmod_600(&pid_file);
 
             // Write interface name so parent process can read it
             let iface_file = pid_dir.join(format!("tunnel-{}.iface", pod_id));
             let _ = std::fs::write(&iface_file, &iface);
+            secure_chmod_600(&iface_file);
 
             // Signal to parent that tunnel is ready (print to stdout for capture)
             println!("TUNNEL_READY iface={} pid={}", iface, std::process::id());
@@ -1002,7 +1007,42 @@ fn append_log(path: &std::path::Path, msg: &str) {
         .open(path)
     {
         let _ = writeln!(f, "[{}] {}", chrono_now_utc_iso(), msg);
+        secure_chmod_600(path);
     }
+}
+
+/// Ensure `/tmp/tytus/` (or caller-supplied equivalent) exists with mode 0700.
+///
+/// Security: files under this directory include tunnel PID/iface/log files,
+/// autostart diagnostic logs, and the daemon socket. World-readable defaults
+/// would let any local user list tunnel state and read diagnostic output
+/// (pod IDs, timestamps, error messages). See PENTEST finding E5.
+///
+/// This is best-effort: if the directory already exists and is owned by a
+/// different uid (e.g. root created it during an earlier tunnel-up run), the
+/// chmod may silently fail. That is acceptable — the per-file 0600 chmod
+/// below is the actual enforcement layer.
+pub(crate) fn secure_tytus_tmp_dir() -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from("/tmp/tytus");
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    dir
+}
+
+/// Best-effort chmod to 0600 on a just-created file. Call after every write
+/// into `/tmp/tytus/` so pod metadata never becomes world-readable.
+pub(crate) fn secure_chmod_600(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    { let _ = path; }
 }
 
 // ── Tunnel down (validated SIGTERM, replaces direct sudo kill) ──
@@ -3329,15 +3369,16 @@ fn reap_dead_tunnels(state: &mut CliState) {
 /// Append a timestamped line to /tmp/tytus/autostart.log for headless diagnostics.
 fn append_autostart_log(msg: &str) {
     use std::io::Write;
-    let dir = std::path::Path::new("/tmp/tytus");
-    let _ = std::fs::create_dir_all(dir);
+    let dir = secure_tytus_tmp_dir();
+    let log_path = dir.join("autostart.log");
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("autostart.log"))
+        .open(&log_path)
     {
         let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let _ = writeln!(f, "[{}] {}", ts, msg);
+        secure_chmod_600(&log_path);
     }
 }
 

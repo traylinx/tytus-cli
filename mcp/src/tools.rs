@@ -39,12 +39,16 @@ async fn tool_status() -> ToolResult {
         }).to_string());
     }
 
+    // Security: surface only stable values to agents. Internal pod IPs,
+    // per-pod keys, droplet identifiers, and agent_endpoint are considered
+    // debug-only and must be fetched explicitly via `tytus env --raw`.
+    // See docs/PENTEST-RESULTS-2026-04-12.md findings E3/H5.
     let pods: Vec<Value> = state.pods.iter().map(|p| {
         serde_json::json!({
             "pod_id": p.pod_id,
             "agent_type": p.agent_type,
-            "ai_endpoint": p.ai_endpoint,
-            "agent_endpoint": p.agent_endpoint,
+            "stable_ai_endpoint": p.stable_ai_endpoint,
+            "stable_user_key": p.stable_user_key,
             "tunnel_active": p.tunnel_iface.is_some(),
             "tunnel_interface": p.tunnel_iface,
         })
@@ -63,6 +67,10 @@ async fn tool_status() -> ToolResult {
 async fn tool_env(args: &Value) -> ToolResult {
     let state = CliState::load();
     let pod_id = args.get("pod_id").and_then(|v| v.as_str());
+    // `raw=true` returns the legacy per-pod values (internal 10.18.X.Y
+    // endpoint + per-pod key) for debugging. Default is stable values only.
+    // See docs/PENTEST-RESULTS-2026-04-12.md finding E3/H5.
+    let raw = args.get("raw").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let pod = match state.find_pod(pod_id) {
         Some(p) => p,
@@ -72,18 +80,34 @@ async fn tool_env(args: &Value) -> ToolResult {
     };
 
     let mut env = serde_json::Map::new();
-    if let Some(ref ep) = pod.ai_endpoint {
-        env.insert("TYTUS_AI_GATEWAY".into(), Value::String(ep.clone()));
-        // Also provide OpenAI-compatible aliases
-        env.insert("OPENAI_BASE_URL".into(), Value::String(format!("{}/v1", ep)));
+
+    if raw {
+        // DEBUG MODE — per-pod, internal, rotatable on every reconnect.
+        if let Some(ref ep) = pod.ai_endpoint {
+            env.insert("TYTUS_AI_GATEWAY".into(), Value::String(ep.clone()));
+            env.insert("OPENAI_BASE_URL".into(), Value::String(format!("{}/v1", ep)));
+        }
+        if let Some(ref key) = pod.pod_api_key {
+            env.insert("TYTUS_API_KEY".into(), Value::String(key.clone()));
+            env.insert("OPENAI_API_KEY".into(), Value::String(key.clone()));
+        }
+        if let Some(ref ep) = pod.agent_endpoint {
+            env.insert("TYTUS_AGENT_API".into(), Value::String(ep.clone()));
+        }
+    } else {
+        // STABLE MODE (default) — dual-bound address + stable user key.
+        // These persist across pod revoke/reallocate cycles and do not leak
+        // internal infrastructure topology to AI agents.
+        if let Some(ref ep) = pod.stable_ai_endpoint {
+            env.insert("TYTUS_AI_GATEWAY".into(), Value::String(ep.clone()));
+            env.insert("OPENAI_BASE_URL".into(), Value::String(format!("{}/v1", ep)));
+        }
+        if let Some(ref key) = pod.stable_user_key {
+            env.insert("TYTUS_API_KEY".into(), Value::String(key.clone()));
+            env.insert("OPENAI_API_KEY".into(), Value::String(key.clone()));
+        }
     }
-    if let Some(ref key) = pod.pod_api_key {
-        env.insert("TYTUS_API_KEY".into(), Value::String(key.clone()));
-        env.insert("OPENAI_API_KEY".into(), Value::String(key.clone()));
-    }
-    if let Some(ref ep) = pod.agent_endpoint {
-        env.insert("TYTUS_AGENT_API".into(), Value::String(ep.clone()));
-    }
+
     if let Some(ref at) = pod.agent_type {
         env.insert("TYTUS_AGENT_TYPE".into(), Value::String(at.clone()));
     }
@@ -93,6 +117,12 @@ async fn tool_env(args: &Value) -> ToolResult {
     if pod.tunnel_iface.is_none() {
         env.insert("warning".into(), Value::String(
             "Tunnel not active. Endpoints are allocated but not reachable. User needs: sudo tytus connect --pod ".to_string() + &pod.pod_id
+        ));
+    }
+
+    if !raw && pod.stable_ai_endpoint.is_none() {
+        env.insert("note".into(), Value::String(
+            "Stable endpoint not yet synced for this pod. Pass raw=true for debug values, or run `tytus status` to force a sync.".into()
         ));
     }
 
@@ -115,9 +145,14 @@ async fn tool_models(args: &Value) -> ToolResult {
         ));
     }
 
-    let (gateway, api_key) = match (&pod.ai_endpoint, &pod.pod_api_key) {
+    // Use stable values when available (default) and fall back to per-pod
+    // values for older state files or during the sync race window.
+    let (gateway, api_key) = match (&pod.stable_ai_endpoint, &pod.stable_user_key) {
         (Some(ep), Some(key)) => (ep.clone(), key.clone()),
-        _ => return ToolResult::error("Pod missing endpoint or API key.".into()),
+        _ => match (&pod.ai_endpoint, &pod.pod_api_key) {
+            (Some(ep), Some(key)) => (ep.clone(), key.clone()),
+            _ => return ToolResult::error("Pod missing endpoint or API key.".into()),
+        },
     };
 
     let url = format!("{}/v1/models", gateway);
@@ -176,9 +211,13 @@ async fn tool_chat(args: &Value) -> ToolResult {
         ));
     }
 
-    let (gateway, api_key) = match (&pod.ai_endpoint, &pod.pod_api_key) {
+    // Prefer stable values; fall back to per-pod for robustness.
+    let (gateway, api_key) = match (&pod.stable_ai_endpoint, &pod.stable_user_key) {
         (Some(ep), Some(key)) => (ep.clone(), key.clone()),
-        _ => return ToolResult::error("Pod missing endpoint or API key.".into()),
+        _ => match (&pod.ai_endpoint, &pod.pod_api_key) {
+            (Some(ep), Some(key)) => (ep.clone(), key.clone()),
+            _ => return ToolResult::error("Pod missing endpoint or API key.".into()),
+        },
     };
 
     let model = match args.get("model").and_then(|v| v.as_str()) {

@@ -7,6 +7,14 @@ const STATE_FILE: &str = "state.json";
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CliState {
     pub email: Option<String>,
+    /// Refresh token is loaded from the OS keychain at `load()` time and is
+    /// **never serialized back to disk**. Legacy state.json files that still
+    /// contain a refresh_token are migrated on first load (see `load()`).
+    ///
+    /// See docs/PENTEST-RESULTS-2026-04-12.md finding E2/H2: keeping the RT
+    /// in state.json let any same-user process read it and own the session
+    /// permanently. Keychain requires explicit per-call access.
+    #[serde(default, skip_serializing)]
     pub refresh_token: Option<String>,
     pub access_token: Option<String>,
     pub expires_at_ms: Option<i64>,
@@ -64,10 +72,43 @@ impl CliState {
 
     pub fn load() -> Self {
         let path = Self::state_path();
-        match std::fs::read_to_string(&path) {
-            Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-            Err(_) => Self::default(),
+        let raw = std::fs::read_to_string(&path).ok();
+        let mut state: Self = raw.as_deref()
+            .and_then(|data| serde_json::from_str(data).ok())
+            .unwrap_or_default();
+
+        // refresh_token is keychain-only — see field comment.
+        //
+        // Migration: if state.json still contains a refresh_token field (legacy
+        // file from before this commit), copy it into the OS keychain and
+        // rewrite the file immediately without the token. We do this eagerly
+        // in load() rather than waiting for a natural save() call because
+        // command paths that fail early (e.g. `tytus status` on an expired
+        // session) never reach a save(), and we must not leave plaintext
+        // tokens on disk one millisecond longer than necessary.
+        //
+        // If the keychain write fails — e.g. on a newly signed binary the user
+        // hasn't approved yet — we leave the file alone so the user is not
+        // locked out. Next successful run retries.
+        let file_had_rt = raw
+            .as_deref()
+            .map(|s| s.contains("\"refresh_token\""))
+            .unwrap_or(false);
+
+        if let Some(ref email) = state.email.clone() {
+            if let Some(ref rt) = state.refresh_token.clone() {
+                let stored = atomek_auth::KeychainStore::store_refresh_token(email, rt).is_ok();
+                if stored && file_had_rt {
+                    // Strip refresh_token from disk right now. `skip_serializing`
+                    // on the field guarantees the rewritten file won't contain it.
+                    let _ = state.save_critical();
+                }
+            } else if let Ok(rt) = atomek_auth::KeychainStore::get_refresh_token(email) {
+                state.refresh_token = Some(rt);
+            }
         }
+
+        state
     }
 
     pub fn save(&self) {
