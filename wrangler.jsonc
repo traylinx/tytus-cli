@@ -1,0 +1,22 @@
+// Cloudflare Workers configuration — see https://developers.cloudflare.com/workers/wrangler/configuration/
+//
+// This project is a pure static-asset Worker: no server-side code, no build
+// step, no framework. Cloudflare serves everything under ./web directly from
+// the edge. The install scripts at ./web/install.sh and ./web/install.ps1
+// are git symlinks pointing at the canonical files at the repo root, so
+// they stay in lockstep with any changes we make.
+//
+// Live at: https://tytus-cli.<REDACTED_CF_ACCOUNT>.workers.dev/
+//          https://<custom-domain>/install.sh
+{
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+  "name": "tytus-cli",
+  "compatibility_date": "2026-04-13",
+  "assets": {
+    "directory": "./web",
+    "not_found_handling": "404-page"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
