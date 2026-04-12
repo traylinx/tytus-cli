@@ -30,8 +30,8 @@ pub enum TunnelState {
 
 /// Handle to a running tunnel. Call `.shutdown()` to gracefully stop it.
 pub struct TunnelHandle {
-    cancel: tokio_util::sync::CancellationToken,
-    task: tokio::task::JoinHandle<()>,
+    pub(crate) cancel: tokio_util::sync::CancellationToken,
+    pub(crate) task: tokio::task::JoinHandle<()>,
     pub state: TunnelState,
     pub interface_name: String,
 }
@@ -43,6 +43,21 @@ impl TunnelHandle {
         self.cancel.cancel();
         let _ = self.task.await;
         tracing::info!("Tunnel shut down");
+    }
+
+    /// Borrow the cancel token so the caller can trigger shutdown without
+    /// consuming the handle. Used by FIX-4 in tytus-cli where cmd_tunnel_up
+    /// needs to race ctrl_c vs. the packet-loop task finishing.
+    pub fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// Take ownership of the spawned packet-loop task. After calling this,
+    /// `shutdown()` will still work (it's a no-op on the already-taken task
+    /// but will still fire the cancel token). Intended for callers that
+    /// want to `select!` on the task alongside other futures.
+    pub fn take_task(&mut self) -> tokio::task::JoinHandle<()> {
+        std::mem::replace(&mut self.task, tokio::spawn(async {}))
     }
 }
 

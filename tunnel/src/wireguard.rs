@@ -184,7 +184,16 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
     );
 
     // 5. Create boringtun Tunn
-    let keepalive = config.persistent_keepalive;
+    // Force persistent keepalive regardless of what the server sent.
+    // Without this, the session expires after 180s of silence and the
+    // client silently drops packets until the user reconnects. 25s is the
+    // WG-recommended default for NAT traversal and session liveness, and
+    // is cheap on the wire (one empty packet every 25s per peer).
+    // See sprint doc: docs/sprints/SPRINT-TYTUS-PAYING-CUSTOMER-READY.md FIX-1.
+    if let Some(k) = config.persistent_keepalive {
+        tracing::debug!("Server-provided PersistentKeepalive={}s overridden to 25s", k);
+    }
+    let keepalive: Option<u16> = Some(25);
 
     let tunn = Tunn::new(
         private_key,
@@ -263,6 +272,17 @@ async fn packet_loop(
 
     let mut handshake_complete = false;
 
+    // Handshake watchdog: if the session goes quiet for >WATCHDOG_RX_IDLE_SECS,
+    // force a fresh handshake initiation. Covers the case where boringtun's
+    // update_timers() fails to recover a dead session (observed in live debug
+    // session 2026-04-11 — tunnel silently dies after ~20min idle).
+    // See FIX-1 in docs/sprints/SPRINT-TYTUS-PAYING-CUSTOMER-READY.md.
+    const WATCHDOG_RX_IDLE_SECS: u64 = 90;
+    // Throttle: don't spam fresh handshakes faster than once per 15s.
+    const WATCHDOG_MIN_INTERVAL_SECS: u64 = 15;
+    let mut last_rx = std::time::Instant::now();
+    let mut last_forced_handshake: Option<std::time::Instant> = None;
+
     tracing::info!("Packet loop starting");
 
     loop {
@@ -282,14 +302,16 @@ async fn packet_loop(
                             match t.encapsulate(&tun_buf[..n], &mut out_buf) {
                                 TunnResult::WriteToNetwork(data) => Some(data.to_vec()),
                                 TunnResult::Err(e) => {
-                                    tracing::debug!("Encapsulate error: {:?}", e);
+                                    tracing::warn!("Encapsulate error: {:?}", e);
                                     None
                                 }
                                 _ => None,
                             }
                         }; // lock released here
                         if let Some(data) = send_data {
-                            let _ = udp_socket.send_to(&data, endpoint).await;
+                            if let Err(e) = udp_socket.send_to(&data, endpoint).await {
+                                tracing::warn!("UDP send error (tun->udp): {}", e);
+                            }
                         }
                     }
                     Ok(_) => {}
@@ -321,7 +343,7 @@ async fn packet_loop(
                                     }
                                     TunnResult::Done => break,
                                     TunnResult::Err(e) => {
-                                        tracing::debug!("Decapsulate error: {:?}", e);
+                                        tracing::warn!("Decapsulate error: {:?}", e);
                                         break;
                                     }
                                 }
@@ -336,13 +358,17 @@ async fn packet_loop(
                                         handshake_complete = true;
                                         tracing::info!("WireGuard handshake complete — tunnel active");
                                     }
+                                    // Successful decap delivered a tunneled payload — reset
+                                    // the watchdog clock. This is our only positive signal
+                                    // that the peer is still talking to us.
+                                    last_rx = std::time::Instant::now();
                                     if let Err(e) = tun_device.send(&data).await {
-                                        tracing::debug!("TUN write error: {}", e);
+                                        tracing::warn!("TUN write error: {}", e);
                                     }
                                 }
                                 LoopAction::SendUdp(data) => {
                                     if let Err(e) = udp_socket.send_to(&data, endpoint).await {
-                                        tracing::debug!("UDP send error: {}", e);
+                                        tracing::warn!("UDP send error: {}", e);
                                     }
                                 }
                             }
@@ -367,7 +393,48 @@ async fn packet_loop(
                     packets
                 }; // lock released
                 for pkt in packets {
-                    let _ = udp_socket.send_to(&pkt, endpoint).await;
+                    if let Err(e) = udp_socket.send_to(&pkt, endpoint).await {
+                        tracing::warn!("UDP send error (timer): {}", e);
+                    }
+                }
+
+                // Handshake watchdog: if we've had a successful handshake at
+                // least once AND haven't seen inbound traffic in WATCHDOG_RX_IDLE_SECS,
+                // force a fresh handshake initiation. This rescues the tunnel from
+                // the dead-session-split-brain state observed in live debug.
+                if handshake_complete {
+                    let idle = last_rx.elapsed();
+                    if idle.as_secs() >= WATCHDOG_RX_IDLE_SECS {
+                        let throttled = last_forced_handshake
+                            .map(|t| t.elapsed().as_secs() < WATCHDOG_MIN_INTERVAL_SECS)
+                            .unwrap_or(false);
+                        if !throttled {
+                            tracing::info!(
+                                idle_secs = idle.as_secs(),
+                                "No inbound traffic for {}s — forcing fresh WG handshake",
+                                WATCHDOG_RX_IDLE_SECS
+                            );
+                            let handshake_bytes = {
+                                let mut t = tunn.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut buf = vec![0u8; MAX_PACKET];
+                                match t.format_handshake_initiation(&mut buf, true) {
+                                    TunnResult::WriteToNetwork(data) => Some(data.to_vec()),
+                                    TunnResult::Err(e) => {
+                                        tracing::warn!("Watchdog format_handshake_initiation error: {:?}", e);
+                                        None
+                                    }
+                                    _ => None,
+                                }
+                            };
+                            if let Some(data) = handshake_bytes {
+                                if let Err(e) = udp_socket.send_to(&data, endpoint).await {
+                                    tracing::warn!("UDP send error (watchdog handshake): {}", e);
+                                } else {
+                                    last_forced_handshake = Some(std::time::Instant::now());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
