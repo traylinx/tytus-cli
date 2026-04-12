@@ -25,34 +25,34 @@ jobs:
             os: ubuntu-latest
             name: tytus-linux-x86_64
             archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            name: tytus-linux-aarch64
-            archive: tar.gz
-            cross: true
+          # aarch64-linux via cross needs libdbus-1-dev inside the container
+          # which requires a Cross.toml pre-install step. Deferred until v0.3.1
+          # to avoid blocking the initial launch — install.sh falls back to
+          # cargo install --git on unsupported architectures.
 
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      # The Linux keyring backend (keyring crate with
+      # linux-native-sync-persistent + sync-secret-service) links libdbus-1
+      # via libdbus-sys's build.rs. The dev header package is not in the
+      # default ubuntu-latest image, so add it.
+      - name: Install libdbus-1-dev (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross (Linux aarch64)
-        if: matrix.cross
-        run: cargo install cross --locked
-
       - name: Build CLI
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release -p atomek-cli --target ${{ matrix.target }}
-            cross build --release -p tytus-mcp --target ${{ matrix.target }}
-          else
-            cargo build --release -p atomek-cli --target ${{ matrix.target }}
-            cargo build --release -p tytus-mcp --target ${{ matrix.target }}
-          fi
+          cargo build --release -p atomek-cli --target ${{ matrix.target }}
+          cargo build --release -p tytus-mcp --target ${{ matrix.target }}
         shell: bash
 
       - name: Package (tar.gz)
