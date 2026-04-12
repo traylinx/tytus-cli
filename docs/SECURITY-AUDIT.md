@@ -137,8 +137,8 @@ matches the validation.
 
 **Finding.** A 6.7KB file under `docs/` containing:
 
-- Production droplet IP: `<REDACTED_DROPLET_IPV4>`
-- Droplet ID: `<REDACTED_DROPLET_NAME>`
+- Production droplet IP: `<redacted — production droplet IPv4>`
+- Droplet ID: `<redacted — droplet short-name>`
 - Droplet resource specs: "8 cores, 29GB free RAM, 439GB free disk"
 - Internal architecture details: K8s deployment names, DAM port, nginx LB
   port, sidecar count, exact subnet schema

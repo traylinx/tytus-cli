@@ -60,7 +60,7 @@ through the WireGuard tunnel, CLI information leakage, API endpoint exposure.
 **Cross-pod isolation:**
 - Pods 1,3,4,5,6,7,8 all unreachable — PASS
 
-**Droplet public IP (<REDACTED_DROPLET_IPV4>):**
+**Droplet public IP (redacted for public repo):**
 - Port 22 (SSH) → **OPEN from public internet** — CRITICAL
 - This IP was previously exposed in `tytus status --json` output
 

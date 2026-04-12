@@ -6,8 +6,7 @@
 // are git symlinks pointing at the canonical files at the repo root, so
 // they stay in lockstep with any changes we make.
 //
-// Live at: https://tytus-cli.<REDACTED_CF_ACCOUNT>.workers.dev/
-//          https://<custom-domain>/install.sh
+// Live at: https://get.traylinx.com/
 {
   "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
   "name": "tytus-cli",
