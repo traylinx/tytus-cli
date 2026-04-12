@@ -59,8 +59,11 @@ tytus chat / configure / exec        # interactive REPL / overlay editor / shell
 tytus link [DIR]                     # drop AI integration files into a project
 tytus mcp [--format ...]             # print MCP server config for an AI tool
 tytus bootstrap-prompt               # the paste prompt that points at the hosted SKILL.md
+tytus autostart install|uninstall|status  # LaunchAgent / systemd autostart
 tytus llm-docs                       # full LLM-facing reference
 ```
+
+**Global flags:** `--json` (machine output), `--headless` (force non-interactive mode, also set via `TYTUS_HEADLESS=1` env var).
 
 Hidden subcommands (used internally):
 - `tytus tunnel-up <config_file>` — runs the tunnel daemon as root
@@ -71,6 +74,7 @@ Hidden subcommands (used internally):
 - `~/Library/Application Support/tytus/state.json` (macOS) or `~/.config/tytus/state.json` (Linux), mode `0o600`
 - OS keychain entry: service `com.traylinx.atomek` (legacy name; do not change without migration)
 - Tunnel daemon PID files: `/tmp/tytus/tunnel-NN.pid` (cleaned up on exit)
+- Diagnostic log: `/tmp/tytus/autostart.log` (headless mode: timestamped token refresh results, startup state, tunnel success/failure)
 
 ## Security invariants
 

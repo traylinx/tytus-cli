@@ -6,6 +6,7 @@ pub mod keychain;
 // Device auth flow (primary — no password)
 pub use device_auth::{
     create_device_session, poll_for_authorization, refresh_access_token,
+    validate_token, TokenValidation,
     DeviceAuthSession, DeviceAuthResult, DeviceAuthUser,
 };
 
