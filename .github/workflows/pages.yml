@@ -1,0 +1,58 @@
+name: Deploy landing page to GitHub Pages
+
+# Serves the static landing page + install.sh + install.ps1 at
+# https://get.traylinx.com/ (custom domain) or https://traylinx.github.io/tytus-cli/
+# (fallback). GitHub Pages was chosen over Cloudflare because traylinx.com's DNS
+# lives on AWS Route 53 and Cloudflare's Custom Domain feature requires the
+# domain to be managed by Cloudflare DNS — which we explicitly do not want to
+# transfer.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The install scripts inside web/ are git symlinks pointing at the
+      # canonical files at the repo root (web/install.sh -> ../install.sh).
+      # GitHub Pages does not follow symlinks at serve time, so we materialize
+      # them into real files via `cp -rL` before uploading.
+      - name: Materialize symlinks + add .nojekyll
+        run: |
+          mkdir -p _site
+          cp -rL web/. _site/
+          touch _site/.nojekyll
+          echo "── _site contents ──"
+          ls -la _site/
+          echo "── install.sh first bytes ──"
+          head -3 _site/install.sh || echo "MISSING"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
