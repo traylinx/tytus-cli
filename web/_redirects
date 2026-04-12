@@ -1,0 +1,11 @@
+# Cloudflare Pages / Netlify redirect table
+#
+# Install scripts are mastered in the repo root; we serve them as static files
+# from the build output rather than redirecting, so `curl | bash` does not leak
+# the final github URL back to users and the file is fetched from Cloudflare's
+# edge cache instead of raw.githubusercontent.com (GitHub rate-limits).
+#
+# Build command copies them into place — see build.sh.
+#
+# Nothing else needs redirecting right now. Keep this file for the day we add
+# /docs → github wiki, /releases → github releases, etc.

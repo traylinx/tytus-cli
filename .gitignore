@@ -1,5 +1,6 @@
 # Build output
 target/
+web/dist/
 *.swp
 .DS_Store
 

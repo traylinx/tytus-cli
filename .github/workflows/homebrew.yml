@@ -1,0 +1,63 @@
+name: Update Homebrew Tap
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download SHA256SUMS from release
+        id: sums
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/SHA256SUMS" -o SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "sha_macos_aarch64=$(grep tytus-macos-aarch64.tar.gz SHA256SUMS | awk '{print $1}')"
+            echo "sha_macos_x86_64=$(grep tytus-macos-x86_64.tar.gz SHA256SUMS | awk '{print $1}')"
+            echo "sha_linux_aarch64=$(grep tytus-linux-aarch64.tar.gz SHA256SUMS | awk '{print $1}')"
+            echo "sha_linux_x86_64=$(grep tytus-linux-x86_64.tar.gz SHA256SUMS | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render formula
+        run: |
+          mkdir -p out
+          sed \
+            -e "s|{{VERSION}}|${{ steps.sums.outputs.version }}|g" \
+            -e "s|{{SHA_MACOS_AARCH64}}|${{ steps.sums.outputs.sha_macos_aarch64 }}|g" \
+            -e "s|{{SHA_MACOS_X86_64}}|${{ steps.sums.outputs.sha_macos_x86_64 }}|g" \
+            -e "s|{{SHA_LINUX_AARCH64}}|${{ steps.sums.outputs.sha_linux_aarch64 }}|g" \
+            -e "s|{{SHA_LINUX_X86_64}}|${{ steps.sums.outputs.sha_linux_x86_64 }}|g" \
+            contrib/homebrew/tytus.rb > out/tytus.rb
+          cat out/tytus.rb
+
+      - name: Push to traylinx/homebrew-tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN secret not configured — skipping push."
+            echo "To enable: create a PAT with repo scope on traylinx/homebrew-tap and add as repo secret HOMEBREW_TAP_TOKEN"
+            exit 0
+          fi
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/traylinx/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp out/tytus.rb tap/Formula/tytus.rb
+          cd tap
+          git config user.name  "tytus-release-bot"
+          git config user.email "release-bot@traylinx.com"
+          git add Formula/tytus.rb
+          if git diff --cached --quiet; then
+            echo "No changes to formula"
+            exit 0
+          fi
+          git commit -m "tytus ${{ steps.sums.outputs.version }}"
+          git push origin HEAD:main

@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tytus — your private AI pod, one terminal command away</title>
+  <meta name="description" content="Tytus gives you a private, isolated AI pod on a dedicated droplet, reachable from any AI tool via an OpenAI-compatible endpoint. Install in one line.">
+  <meta property="og:title" content="Tytus — private AI pod, one terminal command away">
+  <meta property="og:description" content="Install Tytus in one line. Connect any AI CLI (Claude Code, OpenCode, Gemini, Cursor) to your private pod. OpenAI-compatible, WireGuard-tunneled, yours alone.">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23111'/%3E%3Ctext x='32' y='44' font-family='ui-monospace,Menlo,monospace' font-size='36' font-weight='900' text-anchor='middle' fill='%23f7b500'%3ET%3C/text%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --fg: #f5f5f5;
+      --dim: #999;
+      --accent: #f7b500;
+      --card: #141414;
+      --border: #262626;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 64px 24px 96px;
+    }
+    .logo {
+      font-family: var(--mono);
+      font-weight: 900;
+      font-size: 28px;
+      letter-spacing: -0.02em;
+      color: var(--fg);
+    }
+    .logo .t { color: var(--accent); }
+    h1 {
+      margin: 56px 0 16px;
+      font-size: 44px;
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+      font-weight: 800;
+    }
+    h1 .accent { color: var(--accent); }
+    .tagline {
+      font-size: 20px;
+      color: var(--dim);
+      margin: 0 0 48px;
+      max-width: 620px;
+    }
+    h2 {
+      margin: 64px 0 16px;
+      font-size: 14px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--dim);
+      font-weight: 600;
+    }
+    .cmd {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      font-family: var(--mono);
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      overflow-x: auto;
+      position: relative;
+    }
+    .cmd::before {
+      content: '$';
+      color: var(--accent);
+      font-weight: 700;
+      user-select: none;
+    }
+    .cmd code {
+      color: var(--fg);
+      white-space: nowrap;
+    }
+    .cmd button {
+      margin-left: auto;
+      padding: 6px 12px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--dim);
+      cursor: pointer;
+      font-size: 12px;
+      font-family: var(--mono);
+      flex-shrink: 0;
+    }
+    .cmd button:hover { color: var(--accent); border-color: var(--accent); }
+    .cmd button.ok { color: var(--accent); border-color: var(--accent); }
+    .cmd + .cmd { margin-top: 12px; }
+    .small {
+      color: var(--dim);
+      font-size: 13px;
+      margin-top: 8px;
+    }
+    .features {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 24px;
+    }
+    .feat {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .feat h3 {
+      margin: 0 0 6px;
+      font-size: 15px;
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .feat p {
+      margin: 0;
+      color: var(--dim);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    footer {
+      margin-top: 96px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      color: var(--dim);
+      font-size: 13px;
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+    footer a {
+      color: var(--dim);
+      text-decoration: none;
+      border-bottom: 1px dotted var(--border);
+    }
+    footer a:hover { color: var(--accent); border-color: var(--accent); }
+    @media (max-width: 640px) {
+      h1 { font-size: 32px; }
+      .tagline { font-size: 17px; }
+      .features { grid-template-columns: 1fr; }
+      .cmd { font-size: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="logo"><span class="t">T</span>ytus</div>
+
+    <h1>Your <span class="accent">private AI pod</span>, one terminal command away.</h1>
+    <p class="tagline">
+      Isolated. WireGuard-tunneled. OpenAI-compatible. Drives every AI CLI you
+      already use — Claude Code, OpenCode, Gemini, Cursor. Yours alone.
+    </p>
+
+    <h2>Install</h2>
+
+    <div class="cmd" id="cmd-unix">
+      <code>curl -fsSL https://tytus.traylinx.com/install.sh | bash</code>
+      <button onclick="copyCmd('cmd-unix', this)">copy</button>
+    </div>
+    <div class="small">macOS &middot; Linux</div>
+
+    <div class="cmd" id="cmd-win" style="margin-top: 20px;">
+      <code>powershell -c "irm https://tytus.traylinx.com/install.ps1 | iex"</code>
+      <button onclick="copyCmd('cmd-win', this)">copy</button>
+    </div>
+    <div class="small">Windows (tunnel support experimental)</div>
+
+    <div class="cmd" id="cmd-brew" style="margin-top: 20px;">
+      <code>brew install traylinx/tap/tytus</code>
+      <button onclick="copyCmd('cmd-brew', this)">copy</button>
+    </div>
+    <div class="small">Homebrew (macOS &middot; Linuxbrew)</div>
+
+    <h2>Then</h2>
+    <div class="cmd" id="cmd-setup">
+      <code>tytus setup</code>
+      <button onclick="copyCmd('cmd-setup', this)">copy</button>
+    </div>
+    <div class="small">Logs you in, picks a pod, opens the tunnel, verifies end-to-end.</div>
+
+    <h2>What you get</h2>
+    <div class="features">
+      <div class="feat">
+        <h3>One stable URL + key</h3>
+        <p>Set <code>OPENAI_BASE_URL</code> + <code>OPENAI_API_KEY</code> once. Works forever across pod reallocations.</p>
+      </div>
+      <div class="feat">
+        <h3>Every AI tool, instantly</h3>
+        <p><code>tytus link</code> drops CLAUDE.md, AGENTS.md, .mcp.json and slash commands so Claude Code, OpenCode, Gemini and Cursor drive Tytus natively.</p>
+      </div>
+      <div class="feat">
+        <h3>Private by construction</h3>
+        <p>Userspace WireGuard. No shared keys. Cross-pod traffic blocked at the firewall. Your conversations never leave your pod.</p>
+      </div>
+      <div class="feat">
+        <h3>MCP server built in</h3>
+        <p><code>tytus-mcp</code> ships alongside the CLI. Point Claude Code or any MCP client at it and your model can drive Tytus on your behalf.</p>
+      </div>
+    </div>
+
+    <footer>
+      <a href="https://github.com/traylinx/tytus-cli">GitHub</a>
+      <a href="https://github.com/traylinx/tytus-cli#readme">Docs</a>
+      <a href="https://github.com/traylinx/tytus-cli/releases">Releases</a>
+      <a href="https://traylinx.com">Traylinx</a>
+      <span style="margin-left: auto;">MIT licensed</span>
+    </footer>
+  </div>
+
+  <script>
+    function copyCmd(id, btn) {
+      const code = document.querySelector('#' + id + ' code').innerText;
+      navigator.clipboard.writeText(code).then(() => {
+        const prev = btn.innerText;
+        btn.innerText = 'copied';
+        btn.classList.add('ok');
+        setTimeout(() => {
+          btn.innerText = prev;
+          btn.classList.remove('ok');
+        }, 1500);
+      });
+    }
+  </script>
+</body>
+</html>

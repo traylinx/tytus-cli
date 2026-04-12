@@ -8,19 +8,20 @@
 #
 # What it does:
 #   1. Detects your OS + arch
-#   2. Tries to download a prebuilt release from GitHub (future)
+#   2. Downloads a prebuilt release from GitHub + verifies SHA256SUMS
 #   3. Falls back to building from source via `cargo install --git`
 #      (installs rust via rustup if needed, with consent)
-#   4. Sets up a passwordless sudoers entry so `tytus connect` never
+#   4. Sets up a tightly-scoped sudoers entry so `tytus connect` never
 #      prompts for a password when opening the WireGuard tunnel
 #   5. Prints clear next steps
 #
 # Env:
-#     TYTUS_INSTALL_DIR   Override the install directory (default: /usr/local/bin
-#                         for releases, $HOME/.cargo/bin for source builds)
-#     TYTUS_SKIP_SUDOERS  Set to "1" to skip sudoers configuration
-#     TYTUS_FORCE_SOURCE  Set to "1" to skip the release download and go
-#                         straight to cargo install --git
+#     TYTUS_INSTALL_DIR    Override the install directory (default: /usr/local/bin
+#                          for releases, $HOME/.cargo/bin for source builds)
+#     TYTUS_SKIP_SUDOERS   Set to "1" to skip sudoers configuration
+#     TYTUS_FORCE_SOURCE   Set to "1" to skip the release download and go
+#                          straight to cargo install --git
+#     TYTUS_SKIP_CHECKSUM  Set to "1" to skip SHA256 verification (NOT RECOMMENDED)
 # ============================================================
 
 set -eu
@@ -117,8 +118,12 @@ try_release_download() {
     esac
 
     msg "Looking for prebuilt release (${RELEASE_ASSET})..."
-    RELEASE_URL=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+    RELEASES_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null)
+    RELEASE_URL=$(printf "%s" "$RELEASES_JSON" \
         | grep "browser_download_url.*${RELEASE_ASSET}" \
+        | cut -d'"' -f4 | head -1)
+    SUMS_URL=$(printf "%s" "$RELEASES_JSON" \
+        | grep "browser_download_url.*SHA256SUMS" \
         | cut -d'"' -f4 | head -1)
 
     if [ -z "$RELEASE_URL" ]; then
@@ -134,6 +139,46 @@ try_release_download() {
 
     msg "Downloading..."
     curl -fsSL "$RELEASE_URL" -o "${TMP}/${RELEASE_ASSET}"
+
+    # ── SHA256 verification ────────────────────────────────
+    # Guards against GitHub release tampering, CDN cache poisoning, and MITM.
+    # See docs/PENTEST-RESULTS-2026-04-12.md finding C1.
+    if [ "${TYTUS_SKIP_CHECKSUM:-}" = "1" ]; then
+        warn "TYTUS_SKIP_CHECKSUM=1 — SKIPPING checksum verification. NOT RECOMMENDED."
+    elif [ -z "$SUMS_URL" ]; then
+        err "No SHA256SUMS found on this release — refusing to install unverified binary."
+        err "If you're installing a pre-release and know what you're doing, set TYTUS_SKIP_CHECKSUM=1."
+        err "Otherwise, report this at ${REPO_URL}/issues."
+        exit 1
+    else
+        msg "Verifying SHA256..."
+        curl -fsSL "$SUMS_URL" -o "${TMP}/SHA256SUMS"
+        if command -v sha256sum >/dev/null 2>&1; then
+            SHA_TOOL="sha256sum"
+        elif command -v shasum >/dev/null 2>&1; then
+            SHA_TOOL="shasum -a 256"
+        else
+            err "Neither sha256sum nor shasum found — cannot verify checksum."
+            err "Install coreutils (Linux) or use macOS built-in shasum."
+            exit 1
+        fi
+        EXPECTED=$(grep " ${RELEASE_ASSET}\$" "${TMP}/SHA256SUMS" | awk '{print $1}' | head -1)
+        if [ -z "$EXPECTED" ]; then
+            err "SHA256SUMS does not contain entry for ${RELEASE_ASSET}."
+            exit 1
+        fi
+        ACTUAL=$(cd "${TMP}" && $SHA_TOOL "${RELEASE_ASSET}" | awk '{print $1}')
+        if [ "$EXPECTED" != "$ACTUAL" ]; then
+            err "CHECKSUM MISMATCH — refusing to install tampered binary."
+            err "  expected: $EXPECTED"
+            err "  got:      $ACTUAL"
+            err "This is either a GitHub release tampering incident or a bug."
+            err "Please report: ${REPO_URL}/issues"
+            exit 1
+        fi
+        ok "Checksum verified"
+    fi
+
     tar xzf "${TMP}/${RELEASE_ASSET}" -C "${TMP}"
 
     install_one() {
@@ -214,13 +259,14 @@ setup_sudoers() {
 
     SUDOERS_FILE="/etc/sudoers.d/tytus"
     CURRENT_USER="${SUDO_USER:-$(whoami)}"
-    # Tight sudoers entry: only the tytus binary itself, only the two
-    # subcommands needed for tunnel lifecycle. The `tunnel-down` helper
-    # internally validates the target PID against /tmp/tytus/tunnel-*.pid
-    # so it cannot be used to SIGTERM arbitrary system processes — that
-    # mistake from the previous design (`/bin/kill -TERM *`) was a real
-    # privilege escalation vector.
-    ENTRY="${CURRENT_USER} ALL=(root) NOPASSWD: ${BIN_PATH} tunnel-up *, ${BIN_PATH} tunnel-down *"
+    # Tight sudoers entry: only the tytus binary, only the two subcommands
+    # needed for tunnel lifecycle, and tunnel-up is restricted to config files
+    # under /tmp/tytus/tunnel-*.json so attackers can't point it at arbitrary
+    # files like /etc/shadow. The `tunnel-down` helper internally validates
+    # the target PID against /tmp/tytus/tunnel-*.pid so it cannot be used to
+    # SIGTERM arbitrary system processes — that mistake from the previous
+    # design (`/bin/kill -TERM *`) was a real privilege escalation vector.
+    ENTRY="${CURRENT_USER} ALL=(root) NOPASSWD: ${BIN_PATH} tunnel-up /tmp/tytus/tunnel-*.json, ${BIN_PATH} tunnel-down *"
 
     msg "Configuring passwordless tunnel (optional)..."
     if [ -f "$SUDOERS_FILE" ] && grep -qF "$ENTRY" "$SUDOERS_FILE" 2>/dev/null; then
