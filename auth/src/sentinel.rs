@@ -13,11 +13,15 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const METRICS_API_URL: &str = "https://api.makakoo.com/ma-metrics-wsp-ms/v1/api";
 
+// See docs/SECURITY.md and the long comment in `login.rs::PUBLIC_CLIENT_API_KEY`
+// for why this value is intentionally hardcoded. TL;DR: public client identifier,
+// not a secret. Every endpoint that consumes it also requires user credentials.
+const PUBLIC_CLIENT_API_KEY: &str = "2qQaEiyjeqd0F141C6cFeqpJ353Y7USl";
+
 fn api_key() -> String {
-    // Env var override for development; embedded default for production builds
     std::env::var("ATOMEK_API_KEY")
         .or_else(|_| std::env::var("MAKAKOO_API_KEY"))
-        .unwrap_or_else(|_| "2qQaEiyjeqd0F141C6cFeqpJ353Y7USl".to_string())
+        .unwrap_or_else(|_| PUBLIC_CLIENT_API_KEY.to_string())
 }
 
 /// Credentials for calling the Tytus Provider API.

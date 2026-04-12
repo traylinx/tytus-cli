@@ -34,7 +34,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 zeroize = { version = "1", features = ["derive"] }
-keyring = "3"
+keyring = { version = "3", features = ["apple-native", "linux-native-sync-persistent", "sync-secret-service", "windows-native"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"

@@ -138,6 +138,15 @@ pub fn launch_terminal(conn: &PodConnection) {
 #[cfg(target_os = "macos")]
 fn open_in_terminal(shell_command: &str) {
     let _ = std::fs::create_dir_all("/tmp/tytus");
+    // Security: tighten /tmp/tytus/ to owner-only. See PENTEST finding E5.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            "/tmp/tytus",
+            std::fs::Permissions::from_mode(0o700),
+        );
+    }
     let script_path = "/tmp/tytus/_launch.sh";
     // Write script that: (1) runs the command, (2) deletes itself after execution
     let script = format!(

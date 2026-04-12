@@ -9,6 +9,8 @@ const STATE_FILE: &str = "state.json";
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CliState {
     pub email: Option<String>,
+    /// Keychain-only; see PENTEST E2/H2. Read at load() time, never persisted.
+    #[serde(default, skip_serializing)]
     pub refresh_token: Option<String>,
     pub access_token: Option<String>,
     pub expires_at_ms: Option<i64>,
@@ -29,16 +31,31 @@ pub struct PodEntry {
     pub agent_type: Option<String>,
     pub agent_endpoint: Option<String>,
     pub tunnel_iface: Option<String>,
+    #[serde(default)]
+    pub stable_ai_endpoint: Option<String>,
+    #[serde(default)]
+    pub stable_user_key: Option<String>,
 }
 
 impl CliState {
     pub fn load() -> Self {
         let config = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
         let path = config.join(STATE_DIR).join(STATE_FILE);
-        match std::fs::read_to_string(&path) {
+        let mut state: Self = match std::fs::read_to_string(&path) {
             Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
             Err(_) => Self::default(),
+        };
+        // refresh_token is keychain-only. If state.json still has it (legacy),
+        // leave it in-memory so is_logged_in() works; otherwise hydrate from
+        // the keychain so MCP tools can reason about login state. See E2/H2.
+        if state.refresh_token.is_none() {
+            if let Some(ref email) = state.email {
+                if let Ok(rt) = atomek_auth::KeychainStore::get_refresh_token(email) {
+                    state.refresh_token = Some(rt);
+                }
+            }
         }
+        state
     }
 
     pub fn is_logged_in(&self) -> bool {

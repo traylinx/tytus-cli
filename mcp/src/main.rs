@@ -115,13 +115,18 @@ fn tool_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "tytus_env".into(),
-            description: "Return the connection environment variables for a pod. Default output is the STABLE pair: OPENAI_BASE_URL=http://10.42.42.1:18080/v1 and OPENAI_API_KEY=sk-tytus-user-<32hex>. These values are constant across pod revoke/reallocate cycles. Use these in any user-visible config file. The legacy per-pod values (10.18.X.Y + sk-<pod>) are available via tytus env --raw and should only be used for debugging.".into(),
+            description: "Return the connection environment variables for a pod. Default output is the STABLE pair: OPENAI_BASE_URL=http://10.42.42.1:18080/v1 and OPENAI_API_KEY=sk-tytus-user-<32hex>. These values are constant across pod revoke/reallocate cycles. Use these in any user-visible config file. The legacy per-pod values (10.18.X.Y + sk-<pod>) are available by passing raw=true and should only be used for debugging.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pod_id": {
                         "type": "string",
                         "description": "Pod ID (e.g. '02'). Omit for first connected pod."
+                    },
+                    "raw": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Return per-pod debug values (internal 10.18.X.Y endpoint + per-pod key) instead of the stable user-facing pair. Only set this if explicitly debugging routing or key propagation."
                     }
                 },
                 "required": []

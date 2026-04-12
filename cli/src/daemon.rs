@@ -103,6 +103,12 @@ pub async fn is_daemon_running() -> bool {
 pub async fn run_daemon() {
     let sock_dir = Path::new(SOCKET_DIR);
     let _ = std::fs::create_dir_all(sock_dir);
+    // Security: tighten /tmp/tytus/ to owner-only. See PENTEST finding E5.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(sock_dir, std::fs::Permissions::from_mode(0o700));
+    }
     let sock = socket_path();
 
     // Clean up stale socket
@@ -130,6 +136,11 @@ pub async fn run_daemon() {
 
     let pid_file = pid_path();
     let _ = std::fs::write(&pid_file, format!("{}", std::process::id()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&pid_file, std::fs::Permissions::from_mode(0o600));
+    }
 
     let state = CliState::load();
     let http = atomek_core::HttpClient::new();
@@ -266,12 +277,16 @@ async fn dispatch_command(
             let uptime = ds.started_at.elapsed().as_secs();
             let token_valid = ds.cli_state.has_valid_token();
             let logged_in = ds.cli_state.is_logged_in();
+            // Security: emit only stable values over the daemon socket.
+            // No internal pod IPs (ai_endpoint), no raw per-pod keys (pod_api_key),
+            // no droplet identifiers. The CLI already redacts the same way in
+            // print_*_status; the daemon must not leak more than the CLI does.
+            // See docs/PENTEST-RESULTS-2026-04-12.md finding E4.
             let pods: Vec<_> = ds.cli_state.pods.iter().map(|p| {
                 serde_json::json!({
                     "pod_id": p.pod_id,
                     "agent_type": p.agent_type,
                     "tunnel_iface": p.tunnel_iface,
-                    "ai_endpoint": p.ai_endpoint,
                     "stable_ai_endpoint": p.stable_ai_endpoint,
                     "stable_user_key": p.stable_user_key,
                 })
