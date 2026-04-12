@@ -3,7 +3,7 @@
 # ============================================================
 #
 # Usage:
-#     powershell -c "irm https://tytus.traylinx.com/install.ps1 | iex"
+#     powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
 #
 # What it does:
 #   1. Detects architecture (x86_64 or arm64)

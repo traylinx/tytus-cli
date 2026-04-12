@@ -115,7 +115,7 @@ post-launch work.
 
 ## Install security
 
-The one-liner install flow (`curl -fsSL https://tytus.traylinx.com/install.sh | bash`)
+The one-liner install flow (`curl -fsSL https://get.traylinx.com/install.sh | bash`)
 is safe to post publicly because:
 
 - **SHA256 verification is mandatory.** The installer downloads `SHA256SUMS`

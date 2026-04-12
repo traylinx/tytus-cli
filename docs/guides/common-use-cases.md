@@ -167,7 +167,7 @@ You can't share pods (each user gets their own key). But you can share the setup
 
 ```bash
 # They run:
-curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh
+curl -fsSL https://get.traylinx.com/install.sh | bash
 tytus setup
 ```
 

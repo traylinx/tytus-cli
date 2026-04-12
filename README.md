@@ -9,7 +9,7 @@ OpenCode / any OpenAI-compatible tool **never changes** — even if your pod get
 rotated, your droplet migrates, or you switch agent runtimes.
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh
+curl -fsSL https://get.traylinx.com/install.sh | bash
 tytus setup
 ```
 
@@ -47,7 +47,7 @@ a pod — never the contents of your conversations.
 ## Install
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh
+curl -fsSL https://get.traylinx.com/install.sh | bash
 ```
 
 What the installer does:

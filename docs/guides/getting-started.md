@@ -20,7 +20,7 @@ Paste these into any OpenAI-compatible tool — Claude Code, Cursor, Aider, Open
 ## Step 1: Install
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh
+curl -fsSL https://get.traylinx.com/install.sh | bash
 ```
 
 This installs `tytus` and `tytus-mcp` into `~/.local/bin` (or `$TYTUS_INSTALL_DIR`).

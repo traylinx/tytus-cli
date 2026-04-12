@@ -304,7 +304,7 @@ async fn tool_setup_guide() -> ToolResult {
     let mut step_num = 1;
 
     // Check if tytus binary exists
-    steps.push(format!("{}. Install tytus CLI (if not already installed):\n   curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh", step_num));
+    steps.push(format!("{}. Install tytus CLI (if not already installed):\n   curl -fsSL https://get.traylinx.com/install.sh | bash", step_num));
     step_num += 1;
 
     if !state.is_logged_in() {

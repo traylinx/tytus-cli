@@ -2830,9 +2830,9 @@ const LLM_DOCS: &str = include_str!("../../llm-docs.md");
 // Short "paste this into any AI tool" bootstrap prompt. Mirrors the 2md
 // pattern: a single URL + instruction that teaches any AI agent how to
 // drive the product natively. Printed by `tytus bootstrap-prompt`.
-const BOOTSTRAP_PROMPT: &str = r#"Read https://raw.githubusercontent.com/traylinx/tytus-cli/main/.agents/skills/tytus/SKILL.md and follow the instructions to drive Tytus natively. Tytus is my private AI pod on Traylinx — a WireGuard-tunneled, OpenAI-compatible LLM gateway managed by the `tytus` CLI. Check `command -v tytus` first; if missing, install with:
+const BOOTSTRAP_PROMPT: &str = r#"Read https://get.traylinx.com/SKILL.md and follow the instructions to drive Tytus natively. Tytus is my private AI pod on Traylinx — a WireGuard-tunneled, OpenAI-compatible LLM gateway managed by the `tytus` CLI. Check `command -v tytus` first; if missing, install with:
 
-curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh
+curl -fsSL https://get.traylinx.com/install.sh | bash
 
 Then start with `tytus status` and walk me through anything that's not ready.
 "#;

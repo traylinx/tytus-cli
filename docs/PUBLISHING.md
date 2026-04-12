@@ -5,9 +5,9 @@ How the one-liner install flow works end-to-end, and what to do for each release
 ## The public surface
 
 ```
-https://tytus.traylinx.com/                  ← landing page (web/index.html)
-https://tytus.traylinx.com/install.sh        ← macOS + Linux installer
-https://tytus.traylinx.com/install.ps1       ← Windows installer (experimental)
+https://get.traylinx.com/                  ← landing page (web/index.html)
+https://get.traylinx.com/install.sh        ← macOS + Linux installer
+https://get.traylinx.com/install.ps1       ← Windows installer (experimental)
 https://github.com/traylinx/tytus-cli        ← source + issues
 https://github.com/traylinx/tytus-cli/releases ← prebuilt binaries + SHA256SUMS
 https://github.com/traylinx/homebrew-tap     ← brew install traylinx/tap/tytus
@@ -17,10 +17,10 @@ https://github.com/traylinx/homebrew-tap     ← brew install traylinx/tap/tytus
 
 ```bash
 # macOS / Linux
-curl -fsSL https://tytus.traylinx.com/install.sh | bash
+curl -fsSL https://get.traylinx.com/install.sh | bash
 
 # Windows
-powershell -c "irm https://tytus.traylinx.com/install.ps1 | iex"
+powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
 
 # Homebrew
 brew install traylinx/tap/tytus

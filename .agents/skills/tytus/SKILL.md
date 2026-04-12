@@ -20,7 +20,7 @@ command -v tytus >/dev/null && tytus --version
 If the command is missing, install it:
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | bash
+curl -fsSL https://get.traylinx.com/install.sh | bash
 ```
 
 The installer detects the OS, installs `tytus` + `tytus-mcp` to `~/.local/bin` (or `/usr/local/bin` with `sudo`), and verifies the install. After it finishes, **tell the user** to run `tytus setup` for the interactive first-run wizard (browser login, pod allocation, tunnel, sample chat) — or you can drive those steps yourself with the commands below.

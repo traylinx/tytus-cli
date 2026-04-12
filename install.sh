@@ -4,7 +4,8 @@
 # ============================================================
 #
 # Usage:
-#     curl -sSfL https://raw.githubusercontent.com/traylinx/tytus-cli/main/install.sh | sh
+#     curl -fsSL https://get.traylinx.com/install.sh | bash
+# (legacy direct-from-github URL also works as a fallback)
 #
 # What it does:
 #   1. Detects your OS + arch

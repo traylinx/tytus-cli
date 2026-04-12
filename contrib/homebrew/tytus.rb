@@ -17,7 +17,7 @@
 
 class Tytus < Formula
   desc "Private AI pod CLI — connect any terminal to your isolated LLM gateway"
-  homepage "https://tytus.traylinx.com"
+  homepage "https://get.traylinx.com"
   version "{{VERSION}}"
   license "MIT"
 
