@@ -83,6 +83,22 @@ impl CliState {
         }
     }
 
+    /// Save state to disk, returning an error on failure.
+    /// Use this after token rotation — the old refresh token is dead server-side,
+    /// so failure to persist the new one means the user is locked out on next launch.
+    pub fn save_critical(&self) -> Result<(), std::io::Error> {
+        let path = Self::state_path();
+        let data = serde_json::to_string_pretty(self)
+            .map_err(std::io::Error::other)?;
+        std::fs::write(&path, &data)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
+
     pub fn clear(&mut self) {
         *self = Self::default();
         self.save();

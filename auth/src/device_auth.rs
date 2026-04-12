@@ -232,3 +232,39 @@ pub async fn refresh_access_token(
         },
     })
 }
+
+/// Server-side token validation result.
+pub struct TokenValidation {
+    /// Seconds until the token expires, as reported by the server.
+    pub expires_in: u64,
+}
+
+/// Validate an access token against Sentinel's server-side check.
+/// Returns Ok(TokenValidation) if valid, Err if expired/revoked/unreachable.
+/// Uses GET /oauth/token/info — response includes expiresIn for clock-skew correction.
+pub async fn validate_token(
+    http: &HttpClient,
+    access_token: &str,
+) -> atomek_core::Result<TokenValidation> {
+    let url = format!("{}/oauth/token/info", SENTINEL_URL);
+    let resp = http.get(&url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(|e| AtomekError::Network(e.to_string()))?;
+
+    if !resp.status().is_success() {
+        return Err(AtomekError::AuthExpired);
+    }
+
+    // Parse expiresIn from the nested response: { "data": { "attributes": { "expiresIn": N } } }
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| AtomekError::Other(format!("Failed to parse token info: {}", e)))?;
+
+    let expires_in = body
+        .pointer("/data/attributes/expiresIn")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(900); // Conservative fallback: 15 minutes
+
+    Ok(TokenValidation { expires_in })
+}

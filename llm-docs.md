@@ -192,8 +192,24 @@ tytus bootstrap-prompt             Print a one-liner you can paste into
                                    Tytus natively — it references the
                                    hosted SKILL.md on GitHub.
 
+tytus autostart install             Install a macOS LaunchAgent (or Linux
+                                   systemd unit) that runs `tytus connect`
+                                   at every login. Sets TYTUS_HEADLESS=1
+                                   so the daemon never opens a browser.
+
+tytus autostart uninstall          Remove the LaunchAgent / systemd unit.
+
+tytus autostart status             Check if autostart is installed and loaded.
+
 tytus llm-docs                     Print THIS document.
 ```
+
+**Global flags:**
+
+| Flag | Env var | Effect |
+|---|---|---|
+| `--json` | — | Machine-readable JSON output on all commands |
+| `--headless` | `TYTUS_HEADLESS=1` | Force non-interactive mode. Disables browser device-auth, logs diagnostics to `/tmp/tytus/autostart.log`. Use in LaunchAgents, cron, CI. |
 
 ## 7. MCP tools (when the MCP server is wired up)
 
@@ -283,6 +299,9 @@ tytus restart                                # triggers DAM sync as a side effec
 | `401 Invalid API key` from gateway | Stable map sync race; or wrong key; or revoked pod | Wait 2s and retry; check `tytus env`; check `tytus status` |
 | `503 no_capacity` from Provider | All droplets full | Backend issue — Scalesys will auto-provision or escalate |
 | `Allocation failed` (unspecific) | Network or auth | `tytus doctor` first |
+| `Token refresh failed: AuthExpired` | Refresh token expired or revoked | `tytus login` from an interactive terminal |
+| `Cannot open browser for login in non-interactive context` | Headless mode blocked device auth | `tytus login` interactively, then `tytus autostart install` |
+| `No refresh token available` | Fresh state or state was cleared | `tytus login` from an interactive terminal |
 
 ## 10. Hard rules for AI agents
 
@@ -309,6 +328,8 @@ tytus restart                                # triggers DAM sync as a side effec
   email, refresh_token, access_token, secret_key, agent_user_id,
   organization_id, tier, and the pods array (with stable_user_key).
 - Tunnel daemon PIDs: `/tmp/tytus/tunnel-NN.pid`
+- Diagnostic log: `/tmp/tytus/autostart.log` (timestamped entries from
+  headless mode — token refresh results, startup state, tunnel success/failure)
 - OS keychain: refresh_token (cross-tool compatibility)
 
 ## 12. What's deliberately NOT exposed

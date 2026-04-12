@@ -22,7 +22,13 @@ pub const LOGO: &str = r#"
 pub const MINI_LOGO: &str = "🦞 Tytus";
 
 /// Check if we're running in an interactive terminal (TTY).
+/// Returns false if --headless flag is set, TYTUS_HEADLESS=1 env var is present,
+/// or stdout is not a TTY. LaunchAgents can allocate a pseudo-TTY, so the env
+/// var / flag is the reliable override for automated contexts.
 pub fn is_interactive() -> bool {
+    if std::env::var("TYTUS_HEADLESS").is_ok_and(|v| v == "1") {
+        return false;
+    }
     Term::stdout().features().is_attended()
 }
 

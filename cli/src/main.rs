@@ -1,3 +1,4 @@
+mod daemon;
 mod state;
 #[allow(dead_code)]
 mod wizard;
@@ -19,6 +20,11 @@ struct Cli {
     /// Output as JSON (for programmatic use by AI CLIs)
     #[arg(long, global = true)]
     json: bool,
+
+    /// Force non-interactive mode (skip browser auth, log to /tmp/tytus/autostart.log).
+    /// Also triggered by TYTUS_HEADLESS=1 env var. Use in LaunchAgents and cron.
+    #[arg(long, global = true)]
+    headless: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -41,6 +47,16 @@ impl AgentType {
     fn as_str(&self) -> &str {
         match self { AgentType::Nemoclaw => "nemoclaw", AgentType::Hermes => "hermes" }
     }
+}
+
+#[derive(Clone, ValueEnum, Debug)]
+enum DaemonAction {
+    /// Start the daemon in foreground (for launchd/systemd)
+    Run,
+    /// Stop a running daemon
+    Stop,
+    /// Check daemon status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -176,6 +192,12 @@ enum Commands {
     },
     /// Run diagnostics: check auth, tunnel, gateway connectivity
     Doctor,
+    /// Manage the tytus background daemon (token refresh, health monitoring).
+    /// Use 'run' for foreground (launchd/systemd), 'stop' to send shutdown.
+    Daemon {
+        #[arg(value_enum, default_value = "status")]
+        action: DaemonAction,
+    },
     /// (internal) Activate tunnel from a temp config file — called by elevated helper
     #[command(hide = true)]
     TunnelUp {
@@ -195,6 +217,14 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
+
+    // Propagate --headless to env so wizard::is_interactive() picks it up
+    // everywhere (including library code that can't see CLI args).
+    // LaunchAgent plists can also set TYTUS_HEADLESS=1 directly.
+    if cli.headless {
+        std::env::set_var("TYTUS_HEADLESS", "1");
+    }
+
     let http = atomek_core::HttpClient::new();
 
     match cli.command {
@@ -220,8 +250,60 @@ async fn main() {
         Some(Commands::Autostart { action }) => cmd_autostart(action, cli.json),
         Some(Commands::Ui { pod, port, no_open }) => cmd_ui(&http, pod, port, no_open, cli.json).await,
         Some(Commands::Doctor) => cmd_doctor(&http, cli.json).await,
+        Some(Commands::Daemon { action }) => cmd_daemon(action, cli.json).await,
         // Hidden subcommand: called by elevated helper to activate tunnel from a temp config file
         Some(Commands::TunnelUp { config_file }) => cmd_tunnel_up(&config_file, cli.json).await,
+    }
+}
+
+async fn cmd_daemon(action: DaemonAction, json: bool) {
+    match action {
+        DaemonAction::Run => {
+            daemon::run_daemon().await;
+        }
+        DaemonAction::Stop => {
+            match daemon::send_command("shutdown", serde_json::Value::Null).await {
+                Some(resp) if resp.status == "ok" => {
+                    if json { println!(r#"{{"daemon":"stopped"}}"#); }
+                    else { println!("Daemon stopped."); }
+                }
+                Some(resp) => {
+                    eprintln!("Daemon error: {}", resp.error.unwrap_or_default());
+                    std::process::exit(1);
+                }
+                None => {
+                    if json { println!(r#"{{"daemon":"not_running"}}"#); }
+                    else { println!("Daemon is not running."); }
+                }
+            }
+        }
+        DaemonAction::Status => {
+            match daemon::send_command("status", serde_json::Value::Null).await {
+                Some(resp) if resp.status == "ok" => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&resp.data).unwrap_or_default());
+                    } else if let Some(data) = &resp.data {
+                        let pid = data.pointer("/daemon/pid").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let uptime = data.pointer("/daemon/uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let status = data.pointer("/daemon/status").and_then(|v| v.as_str()).unwrap_or("?");
+                        let token = data.pointer("/auth/token_valid").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let email = data.pointer("/auth/email").and_then(|v| v.as_str()).unwrap_or("?");
+                        println!("Daemon:  ● running (pid {}, uptime {}s)", pid, uptime);
+                        println!("Status:  {}", status);
+                        println!("Auth:    {} ({})", if token { "● valid" } else { "○ expired" }, email);
+                        let pods = data.pointer("/pods").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                        println!("Pods:    {}", pods);
+                    }
+                }
+                Some(resp) => {
+                    eprintln!("Daemon error: {}", resp.error.unwrap_or_default());
+                }
+                None => {
+                    if json { println!(r#"{{"daemon":"not_running"}}"#); }
+                    else { println!("Daemon is not running. Start with: tytus daemon run"); }
+                }
+            }
+        }
     }
 }
 
@@ -256,7 +338,14 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
         }
     }
 
-    // Device auth flow
+    // Device auth flow — refuse in headless context (LaunchAgent, cron, pipe)
+    if !wizard::is_interactive() {
+        let msg = "Cannot open browser for login in non-interactive context. Run 'tytus login' from a terminal.";
+        append_autostart_log(&format!("cmd_login BLOCKED: {}", msg));
+        eprintln!("tytus: {}", msg);
+        std::process::exit(1);
+    }
+
     let session = match atomek_auth::create_device_session(http).await {
         Ok(s) => s,
         Err(e) => { eprintln!("Failed to start login: {}", e); std::process::exit(1); }
@@ -309,8 +398,15 @@ async fn cmd_status(http: &atomek_core::HttpClient, json: bool) {
         return;
     }
 
-    ensure_token(&mut state, http).await;
+    if let Err(e) = ensure_token(&mut state, http).await {
+        if json { println!(r#"{{"logged_in":true,"token_error":"{}"}}"#, e); }
+        else { eprintln!("Token refresh failed: {}. Run: tytus login", e); }
+        return;
+    }
     sync_tytus(&mut state, http).await;
+
+    // Detect stale tunnels: state says tunnel is up but interface/daemon is dead
+    reap_dead_tunnels(&mut state);
     state.save();
 
     if json { print_json_status(&state); }
@@ -321,9 +417,33 @@ async fn cmd_status(http: &atomek_core::HttpClient, json: bool) {
 
 async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, agent: &str, json: bool) {
     let mut state = CliState::load();
+    let headless = !wizard::is_interactive();
+
+    // Structured diagnostic: log startup state in headless context
+    if headless {
+        let expires_desc = state.expires_at_ms.map(|ms| {
+            let secs = ms / 1000;
+            chrono::DateTime::from_timestamp(secs, 0)
+                .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                .unwrap_or_else(|| format!("{}ms", ms))
+        });
+        append_autostart_log(&format!(
+            "cmd_connect START: email={}, has_rt={}, has_at={}, expires_at={}, pods={}, agent={}",
+            state.email.as_deref().unwrap_or("none"),
+            state.refresh_token.is_some(),
+            state.access_token.is_some(),
+            expires_desc.as_deref().unwrap_or("none"),
+            state.pods.len(),
+            agent,
+        ));
+    }
 
     if !state.is_logged_in() {
-        eprintln!("Not logged in. Run: tytus login");
+        let msg = "Not logged in. Run: tytus login";
+        if !wizard::is_interactive() {
+            append_autostart_log(&format!("cmd_connect FAILED: {}", msg));
+        }
+        eprintln!("{}", msg);
         std::process::exit(1);
     }
 
@@ -336,7 +456,10 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
     }
 
     // ── Phase 1: API calls (no root needed) ──
-    ensure_token(&mut state, http).await;
+    if let Err(e) = ensure_token(&mut state, http).await {
+        eprintln!("Token refresh failed: {}. Run: tytus login", e);
+        std::process::exit(1);
+    }
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
     let target_pod_id: String;
@@ -462,6 +585,7 @@ async fn activate_tunnel_inline(
                 println!("{}", serde_json::to_string_pretty(&pod).unwrap_or_default());
             } else {
                 eprintln!("✓ Tunnel active on {}", iface);
+                if !wizard::is_interactive() { append_autostart_log(&format!("cmd_connect OK: tunnel active on {}", iface)); }
                 if let Some(pod) = state.pods.iter().find(|p| p.pod_id == target_pod_id) {
                     if let Some(ref ep) = pod.ai_endpoint {
                         println!("AI_GATEWAY={}", ep);
@@ -595,6 +719,7 @@ async fn activate_tunnel_elevated(
             println!("{}", serde_json::to_string_pretty(&pod).unwrap_or_default());
         } else {
             eprintln!("✓ Tunnel active on {}", iface);
+            if !wizard::is_interactive() { append_autostart_log(&format!("cmd_connect OK: tunnel active on {} (elevated)", iface)); }
             if let Some(pod) = state.pods.iter().find(|p| p.pod_id == target_pod_id) {
                 if let Some(ref ep) = pod.ai_endpoint {
                     println!("AI_GATEWAY={}", ep);
@@ -819,9 +944,24 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
             // loudly on unexpected task completion.
             let log_path_clone = log_file_path.clone();
             let mut task = handle.take_task();
+
+            // SIGTERM handler: the standard "please exit" signal. Without this,
+            // SIGTERM kills the daemon instantly — no log, no PID cleanup.
+            // macOS sends SIGTERM on system sleep, shutdown, launchd stop, and
+            // when sudo's session expires. This was the root cause of silent
+            // tunnel deaths during the headless-auth sprint testing.
+            let mut sigterm = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate(),
+            ).expect("Failed to register SIGTERM handler");
+
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
-                    append_log(&log_path_clone, &format!("tunnel-up pod={} pid={} received ctrl_c — shutting down cleanly", pod_id, std::process::id()));
+                    append_log(&log_path_clone, &format!("tunnel-up pod={} pid={} received SIGINT — shutting down cleanly", pod_id, std::process::id()));
+                    handle.cancel_token().cancel();
+                    let _ = (&mut task).await;
+                }
+                _ = sigterm.recv() => {
+                    append_log(&log_path_clone, &format!("tunnel-up pod={} pid={} received SIGTERM — shutting down cleanly", pod_id, std::process::id()));
                     handle.cancel_token().cancel();
                     let _ = (&mut task).await;
                 }
@@ -957,7 +1097,10 @@ async fn cmd_revoke(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
         std::process::exit(1);
     }
 
-    ensure_token(&mut state, http).await;
+    if let Err(e) = ensure_token(&mut state, http).await {
+        eprintln!("Token refresh failed: {}. Run: tytus login", e);
+        std::process::exit(1);
+    }
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
@@ -1174,7 +1317,10 @@ async fn cmd_restart(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
         wizard::print_fail("Not logged in. Run: tytus login");
         std::process::exit(1);
     }
-    ensure_token(&mut state, http).await;
+    if let Err(e) = ensure_token(&mut state, http).await {
+        wizard::print_fail(&format!("Token refresh failed: {}. Run: tytus login", e));
+        std::process::exit(1);
+    }
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
@@ -1222,7 +1368,10 @@ async fn cmd_exec(http: &atomek_core::HttpClient, command: Vec<String>, pod_id: 
         std::process::exit(1);
     }
 
-    ensure_token(&mut state, http).await;
+    if let Err(e) = ensure_token(&mut state, http).await {
+        eprintln!("Token refresh failed: {}. Run: tytus login", e);
+        std::process::exit(1);
+    }
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
@@ -1649,7 +1798,10 @@ async fn cmd_default(http: &atomek_core::HttpClient, json: bool) {
 async fn show_dashboard(http: &atomek_core::HttpClient, _state: &CliState, _json: bool) {
     // Refresh state from server
     let mut state = CliState::load();
-    ensure_token(&mut state, http).await;
+    if let Err(e) = ensure_token(&mut state, http).await {
+        wizard::print_fail(&format!("Token refresh failed: {}. Run: tytus login", e));
+        return;
+    }
     sync_tytus(&mut state, http).await;
     state.save();
 
@@ -1725,8 +1877,12 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
     wizard::print_step(1, total_steps, "Sign in to Traylinx");
     let mut state = CliState::load();
     if state.is_logged_in() {
-        ensure_token(&mut state, http).await;
-        wizard::print_ok(&format!("Already signed in as {}", state.email.as_deref().unwrap_or("?")));
+        if ensure_token(&mut state, http).await.is_err() {
+            wizard::print_fail("Session expired — let's sign in again.");
+            state.clear();
+        } else {
+            wizard::print_ok(&format!("Already signed in as {}", state.email.as_deref().unwrap_or("?")));
+        }
     } else {
         println!();
         wizard::print_info("We'll open your browser for a secure login.");
@@ -1840,7 +1996,11 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
         std::process::exit(1);
     }
 
-    ensure_token(&mut state, http).await;
+    if let Err(e) = ensure_token(&mut state, http).await {
+        if json { println!(r#"{{"ok":false,"error":"token_refresh_failed: {}"}}"#, e); }
+        else { wizard::print_fail(&format!("Token refresh failed: {}. Run: tytus login", e)); }
+        std::process::exit(1);
+    }
     sync_tytus(&mut state, http).await;
 
     if !json { wizard::print_header("Running Tytus health test"); }
@@ -1951,7 +2111,10 @@ async fn cmd_chat(http: &atomek_core::HttpClient, model: &str, json: bool) {
         wizard::print_fail("Not logged in. Run: tytus setup");
         std::process::exit(1);
     }
-    ensure_token(&mut state, http).await;
+    if let Err(e) = ensure_token(&mut state, http).await {
+        wizard::print_fail(&format!("Token refresh failed: {}. Run: tytus login", e));
+        std::process::exit(1);
+    }
     sync_tytus(&mut state, http).await;
 
     let pod = match state.pods.first() {
@@ -2063,7 +2226,10 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
         wizard::print_fail("Not logged in. Run: tytus setup");
         std::process::exit(1);
     }
-    ensure_token(&mut state, http).await;
+    if let Err(e) = ensure_token(&mut state, http).await {
+        wizard::print_fail(&format!("Token refresh failed: {}. Run: tytus login", e));
+        std::process::exit(1);
+    }
     sync_tytus(&mut state, http).await;
 
     let pod = match state.pods.first() {
@@ -2191,6 +2357,8 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
         <string>{home}</string>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>TYTUS_HEADLESS</key>
+        <string>1</string>
     </dict>
 </dict>
 </plist>
@@ -2981,6 +3149,18 @@ fi
 
 // ── Helpers ──────────────────────────────────────────────────
 
+/// Returns true if the token is still valid but expires within 10 minutes.
+/// Used for opportunistic proactive refresh — failure is non-fatal.
+fn should_proactively_refresh(state: &CliState) -> bool {
+    if let (Some(_), Some(exp)) = (&state.access_token, state.expires_at_ms) {
+        let now = chrono::Utc::now().timestamp_millis();
+        // Token is valid (has_valid_token passed) but expires within 10 min
+        (now + 600_000) >= exp
+    } else {
+        false
+    }
+}
+
 /// Update tokens from API response. Preserves email if API returns empty.
 fn update_tokens(state: &mut CliState, result: &atomek_auth::DeviceAuthResult, fallback_email: &Option<String>) {
     state.access_token = Some(result.access_token.clone());
@@ -2996,19 +3176,174 @@ fn update_tokens(state: &mut CliState, result: &atomek_auth::DeviceAuthResult, f
     }
 }
 
-async fn ensure_token(state: &mut CliState, http: &atomek_core::HttpClient) {
-    if state.has_valid_token() { return; }
-    let email_backup = state.email.clone();
-    if let Some(ref rt) = state.refresh_token.clone() {
-        match atomek_auth::refresh_access_token(http, rt).await {
-            Ok(result) => {
-                update_tokens(state, &result, &email_backup);
-                state.save();
-            }
-            Err(e) => {
-                tracing::warn!("Token refresh failed: {}", e);
+async fn ensure_token(state: &mut CliState, http: &atomek_core::HttpClient) -> Result<(), atomek_core::AtomekError> {
+    let headless = !wizard::is_interactive();
+
+    if state.has_valid_token() {
+        // Server-side validation: confirm the server agrees the token is valid.
+        // If server says expired (clock skew or revoked), fall through to refresh.
+        // On success, sync local expires_at_ms with server truth to fix clock drift.
+        // trust_token: true means we believe the token is usable for this call.
+        // Set to true on: (a) server confirmed valid, (b) network error but local
+        // says valid (availability > correctness — blocking a paying user because
+        // Sentinel is unreachable is worse than a downstream 401 that gets retried).
+        // Set to false only when server explicitly says AuthExpired.
+        let mut trust_token = false;
+        if let Some(ref at) = state.access_token.clone() {
+            match atomek_auth::validate_token(http, at).await {
+                Ok(info) => {
+                    // Sync local expiry with server-reported TTL
+                    state.expires_at_ms = Some(
+                        chrono::Utc::now().timestamp_millis() + (info.expires_in as i64 * 1000)
+                    );
+                    state.save();
+                    trust_token = true;
+                }
+                Err(atomek_core::AtomekError::AuthExpired) => {
+                    // Server says token is dead — fall through to refresh
+                    tracing::warn!("Server rejected locally-valid token (clock skew or revoked)");
+                    state.access_token = None;
+                    state.expires_at_ms = None;
+                    // Don't return — fall through to refresh below
+                }
+                Err(_) => {
+                    // Network error hitting validation endpoint — trust local state.
+                    // Design decision: availability over correctness. If Sentinel is
+                    // unreachable, don't lock out a paying user. A downstream 401
+                    // from the actual API will trigger re-auth if the token is truly dead.
+                    tracing::debug!("Token validation endpoint unreachable, trusting local expiry");
+                    trust_token = true;
+                }
             }
         }
+
+        // Re-check after possible server-side invalidation.
+        // If we trust the token (server confirmed or network error with valid local),
+        // attempt proactive refresh if expiring soon, but don't fall through to
+        // mandatory refresh which would needlessly rotate the RT.
+        if state.has_valid_token() || trust_token {
+            if should_proactively_refresh(state) || (trust_token && !state.has_valid_token()) {
+                // Proactive refresh: token is expiring soon. Non-fatal — token still works.
+                let email_backup = state.email.clone();
+                if let Some(ref rt) = state.refresh_token.clone() {
+                    match atomek_auth::refresh_access_token(http, rt).await {
+                        Ok(result) => {
+                            update_tokens(state, &result, &email_backup);
+                            // Critical save: RT was rotated server-side, old RT is dead
+                            if let Err(e) = state.save_critical() {
+                                tracing::error!("CRITICAL: Failed to save rotated tokens: {}. Re-login may be required.", e);
+                                if headless {
+                                    append_autostart_log(&format!("CRITICAL: save_critical failed after proactive refresh: {}", e));
+                                }
+                            }
+                            tracing::debug!("Proactively refreshed token (was expiring soon)");
+                        }
+                        Err(e) => {
+                            // Non-fatal: token still has some life left
+                            tracing::debug!("Proactive refresh failed (non-fatal): {}", e);
+                            if headless {
+                                append_autostart_log(&format!("ensure_token: proactive refresh failed (non-fatal): {}", e));
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    // Mandatory refresh: token is expired or server rejected it
+    let email_backup = state.email.clone();
+    let result = match state.refresh_token.clone() {
+        Some(rt) => {
+            match atomek_auth::refresh_access_token(http, &rt).await {
+                Ok(result) => {
+                    update_tokens(state, &result, &email_backup);
+                    // Critical save: RT was rotated server-side, old RT is dead
+                    if let Err(e) = state.save_critical() {
+                        tracing::error!("CRITICAL: Failed to save rotated tokens: {}. Re-login may be required.", e);
+                        if headless {
+                            append_autostart_log(&format!("CRITICAL: save_critical failed after mandatory refresh: {}", e));
+                        }
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::warn!("Token refresh failed: {}", e);
+                    Err(e)
+                }
+            }
+        }
+        None => Err(atomek_core::AtomekError::Other(
+            "No refresh token available — run 'tytus login' to re-authenticate".into(),
+        )),
+    };
+    if headless {
+        if let Err(ref e) = result {
+            append_autostart_log(&format!(
+                "ensure_token FAILED: {}. email={}, has_rt={}, has_at={}, expires_at_ms={:?}",
+                e,
+                state.email.as_deref().unwrap_or("none"),
+                state.refresh_token.is_some(),
+                state.access_token.is_some(),
+                state.expires_at_ms,
+            ));
+        } else {
+            append_autostart_log("ensure_token OK: token refreshed successfully");
+        }
+    }
+    result
+}
+
+/// Detect and clean up stale tunnels: state says tunnel is active but the
+/// daemon is dead or the interface no longer exists. Clears tunnel_iface on
+/// affected pods so status/connect don't lie about connectivity.
+fn reap_dead_tunnels(state: &mut CliState) {
+    for pod in &mut state.pods {
+        if let Some(ref iface) = pod.tunnel_iface {
+            let pid_file = format!("/tmp/tytus/tunnel-{}.pid", pod.pod_id);
+            let daemon_alive = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .map(|pid| {
+                    // kill(pid, 0) checks if process exists without sending a signal.
+                    // Returns 0 if we have permission, -1 with:
+                    //   EPERM = process exists but we can't signal it (it's root) → alive
+                    //   ESRCH = no such process → dead
+                    let ret = unsafe { libc::kill(pid as i32, 0) };
+                    if ret == 0 { return true; }
+                    // EPERM means "exists but you're not root" — daemon is alive
+                    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                    errno == libc::EPERM
+                })
+                .unwrap_or(false);
+
+            if !daemon_alive {
+                tracing::debug!(
+                    "Stale tunnel on pod {}: iface={} but daemon is dead — clearing",
+                    pod.pod_id, iface
+                );
+                pod.tunnel_iface = None;
+                // Clean up stale PID/iface files
+                let _ = std::fs::remove_file(&pid_file);
+                let _ = std::fs::remove_file(format!("/tmp/tytus/tunnel-{}.iface", pod.pod_id));
+            }
+        }
+    }
+}
+
+/// Append a timestamped line to /tmp/tytus/autostart.log for headless diagnostics.
+fn append_autostart_log(msg: &str) {
+    use std::io::Write;
+    let dir = std::path::Path::new("/tmp/tytus");
+    let _ = std::fs::create_dir_all(dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("autostart.log"))
+    {
+        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let _ = writeln!(f, "[{}] {}", ts, msg);
     }
 }
 
