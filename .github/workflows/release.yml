@@ -1,8 +1,16 @@
 name: Release
 
+# Early-access policy: releases are manual-only while the CLI is under
+# active development. Users install from source via `cargo install --git`
+# through install.sh — every fix lands for them instantly without a tag.
+# Flip this back to `push: tags: ['v*']` when the CLI is stable.
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build (e.g. v0.4.0). Must already exist.'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -33,6 +41,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       # The Linux keyring backend (keyring crate with
       # linux-native-sync-persistent + sync-secret-service) links libdbus-1
@@ -92,6 +102,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag }}
           files: |
             dist/*.tar.gz
             dist/*.zip

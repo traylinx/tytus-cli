@@ -5,17 +5,24 @@
 # Usage:
 #     powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
 #
+# Early-access policy:
+#   Tytus is under active development. The installer builds from source
+#   against `main` via `cargo install --git` so every user gets the latest
+#   fixes without us cutting a release for every bugfix. Prebuilt binaries
+#   will return once the CLI is stable and versioned.
+#
 # What it does:
 #   1. Detects architecture (x86_64 or arm64)
-#   2. Downloads the latest release from GitHub
-#   3. Verifies SHA256SUMS before installing
-#   4. Falls back to `cargo install --git` from source (installs rustup if needed)
-#   5. Drops binaries into $env:LOCALAPPDATA\Programs\Tytus and adds to PATH
+#   2. Ensures a Rust toolchain is present (offers rustup install if not)
+#   3. Builds tytus + tytus-mcp from the main branch
+#   4. (Opt-in) Uses the last published release if $env:TYTUS_USE_RELEASE=1
+#   5. Adds install dir to user PATH
 #
 # Env vars:
 #     $env:TYTUS_INSTALL_DIR    Override install directory
-#     $env:TYTUS_FORCE_SOURCE   Skip release download, build from source
-#     $env:TYTUS_SKIP_CHECKSUM  Skip SHA256 verification (NOT RECOMMENDED)
+#     $env:TYTUS_USE_RELEASE    Prefer the last published release (may be stale)
+#     $env:TYTUS_SKIP_CHECKSUM  Skip SHA256 verification when using
+#                                TYTUS_USE_RELEASE (NOT RECOMMENDED)
 #
 # NOTE: Windows tunnel support is experimental. The `tytus connect` command
 # needs wintun.dll to function — we're bundling it in a future release.
@@ -72,7 +79,8 @@ function Add-ToUserPath($dir) {
 }
 
 function Install-FromRelease {
-    if ($env:TYTUS_FORCE_SOURCE -eq '1') { return $false }
+    # Early-access policy: releases are opt-in.
+    if ($env:TYTUS_USE_RELEASE -ne '1') { return $false }
 
     $arch = Get-Arch
     $asset = "tytus-windows-$arch.zip"
@@ -241,8 +249,14 @@ Show-Banner
 
 $arch = Get-Arch
 Write-Ok "Detected: Windows $arch"
+Write-Warn2 "Early access — building from main branch source."
 
-$ok = Install-FromRelease
+# Default path: source build from main. Opt in to stale prebuilt
+# release via $env:TYTUS_USE_RELEASE=1.
+$ok = $false
+if ($env:TYTUS_USE_RELEASE -eq '1') {
+    $ok = Install-FromRelease
+}
 if (-not $ok) {
     Install-FromSource
 }

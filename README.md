@@ -44,24 +44,33 @@ a pod — never the contents of your conversations.
 
 ---
 
-## Install
+## Install (early access)
 
 ```bash
 curl -fsSL https://get.traylinx.com/install.sh | bash
 ```
 
+> **Early access.** Tytus is under active development. The installer builds
+> from source against `main` so every fix reaches you immediately. Prebuilt
+> binaries and `brew install traylinx/tap/tytus` will return once the CLI is
+> stable. Requires a Rust toolchain (the installer can install it for you).
+
 What the installer does:
 
 1. Detects your OS and architecture (macOS / Linux, x86_64 / aarch64)
-2. Tries to download a prebuilt binary from the latest GitHub release
-3. Falls back to `cargo install --git` if no release matches your platform
-   (installs Rust via rustup with your consent if it's missing)
+2. Ensures a Rust toolchain is present — offers to install rustup if missing
+3. Builds `tytus` and `tytus-mcp` from the `main` branch via
+   `cargo install --git` (~3 minutes first build)
 4. Sets up a tightly-scoped passwordless sudoers entry so `tytus connect`
    never prompts you for a password (opt-out with `TYTUS_SKIP_SUDOERS=1`)
 5. Verifies and prints next steps
 
 Override the install location with `TYTUS_INSTALL_DIR=/opt/tytus/bin` if you
-want it somewhere other than the default.
+want it somewhere other than `~/.cargo/bin`.
+
+If you already have a release from before we switched back to source-only,
+you can force that path with `TYTUS_USE_RELEASE=1` — but you'll miss any
+fixes that landed on `main` since that tag.
 
 ### From source
 

@@ -7,22 +7,30 @@
 #     curl -fsSL https://get.traylinx.com/install.sh | bash
 # (legacy direct-from-github URL also works as a fallback)
 #
+# Early-access policy:
+#   Tytus is under active development. The installer builds from source
+#   against `main` via `cargo install --git` so every user gets the latest
+#   fixes without us having to cut a release for every bugfix. Prebuilt
+#   binaries will return once the CLI is stable and versioned.
+#
 # What it does:
 #   1. Detects your OS + arch
-#   2. Downloads a prebuilt release from GitHub + verifies SHA256SUMS
-#   3. Falls back to building from source via `cargo install --git`
-#      (installs rust via rustup if needed, with consent)
-#   4. Sets up a tightly-scoped sudoers entry so `tytus connect` never
+#   2. Ensures a Rust toolchain is present (offers rustup install if not)
+#   3. Builds + installs `tytus` and `tytus-mcp` from the main branch
+#   4. (Opt-in) Tries an older prebuilt release if TYTUS_USE_RELEASE=1
+#   5. Sets up a tightly-scoped sudoers entry so `tytus connect` never
 #      prompts for a password when opening the WireGuard tunnel
-#   5. Prints clear next steps
+#   6. Prints clear next steps
 #
 # Env:
-#     TYTUS_INSTALL_DIR    Override the install directory (default: /usr/local/bin
-#                          for releases, $HOME/.cargo/bin for source builds)
+#     TYTUS_INSTALL_DIR    Override the install directory
+#                          (default: $HOME/.cargo/bin for source builds,
+#                          /usr/local/bin for releases)
 #     TYTUS_SKIP_SUDOERS   Set to "1" to skip sudoers configuration
-#     TYTUS_FORCE_SOURCE   Set to "1" to skip the release download and go
-#                          straight to cargo install --git
-#     TYTUS_SKIP_CHECKSUM  Set to "1" to skip SHA256 verification (NOT RECOMMENDED)
+#     TYTUS_USE_RELEASE    Set to "1" to prefer the last published GitHub
+#                          release over a fresh source build (may be stale)
+#     TYTUS_SKIP_CHECKSUM  Set to "1" to skip SHA256 verification when
+#                          using TYTUS_USE_RELEASE (NOT RECOMMENDED)
 # ============================================================
 
 set -eu
@@ -57,6 +65,9 @@ banner() {
     printf "%s│          Installing %sTytus CLI%s                    │%s\n" "$BOLD" "$BLUE" "$RESET$BOLD" "$RESET"
     printf "%s│   %sPrivate AI pods driven from your terminal%s     │%s\n" "$BOLD" "$DIM" "$RESET$BOLD" "$RESET"
     printf "%s└─────────────────────────────────────────────────┘%s\n" "$BOLD" "$RESET"
+    printf "\n"
+    printf "%sEarly access:%s building from source against main branch.\n" "$YELLOW$BOLD" "$RESET"
+    printf "%sRequires:%s a Rust toolchain (we can install it for you).\n" "$DIM" "$RESET"
     printf "\n"
 }
 
@@ -107,7 +118,9 @@ detect_platform() {
 # ── Try prebuilt release download ──────────────────────────
 
 try_release_download() {
-    [ "${TYTUS_FORCE_SOURCE:-}" = "1" ] && return 1
+    # Early-access policy: releases are opt-in. The default path is a
+    # fresh source build from main so users always get the latest fixes.
+    [ "${TYTUS_USE_RELEASE:-}" = "1" ] || return 1
 
     RELEASE_ASSET=""
     case "${OS}-${ARCH_NORM}" in
@@ -227,9 +240,8 @@ ensure_cargo() {
             fi
             ;;
         *)
-            err "Rust is required to install Tytus from source."
+            err "Rust is required to build Tytus from source during early access."
             err "Install manually from https://rustup.rs and re-run this script."
-            err "Or wait for us to ship prebuilt binaries — coming soon."
             exit 1
             ;;
     esac
@@ -346,7 +358,9 @@ main() {
     banner
     detect_platform
 
-    if try_release_download; then
+    # Default path: source build from main. Opt-in to stale prebuilt
+    # release via TYTUS_USE_RELEASE=1.
+    if [ "${TYTUS_USE_RELEASE:-}" = "1" ] && try_release_download; then
         :
     else
         install_from_source

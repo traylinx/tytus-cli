@@ -162,26 +162,27 @@
       Isolated. WireGuard-tunneled. OpenAI-compatible. Drives every AI CLI you
       already use — Claude Code, OpenCode, Gemini, Cursor. Yours alone.
     </p>
+    <p class="tagline" style="font-size: 15px; color: var(--accent); margin-top: -32px;">
+      Early access — builds from source, requires a Rust toolchain.
+    </p>
 
-    <h2>Install</h2>
+    <h2>Install (early access)</h2>
 
     <div class="cmd" id="cmd-unix">
       <code>curl -fsSL https://get.traylinx.com/install.sh | bash</code>
       <button onclick="copyCmd('cmd-unix', this)">copy</button>
     </div>
-    <div class="small">macOS &middot; Linux</div>
+    <div class="small">macOS &middot; Linux &middot; installs Rust via rustup if needed, then builds from main (~3 min first run)</div>
 
     <div class="cmd" id="cmd-win" style="margin-top: 20px;">
       <code>powershell -c "irm https://get.traylinx.com/install.ps1 | iex"</code>
       <button onclick="copyCmd('cmd-win', this)">copy</button>
     </div>
-    <div class="small">Windows (tunnel support experimental)</div>
+    <div class="small">Windows &middot; CLI builds but tunnel (<code>tytus connect</code>) is not yet supported</div>
 
-    <div class="cmd" id="cmd-brew" style="margin-top: 20px;">
-      <code>brew install traylinx/tap/tytus</code>
-      <button onclick="copyCmd('cmd-brew', this)">copy</button>
+    <div class="small" style="margin-top: 24px; padding: 16px 20px; background: var(--card); border: 1px solid var(--border); border-radius: 10px;">
+      <strong style="color: var(--fg);">Why source builds?</strong> Tytus is under active development. Building from <code>main</code> means every fix reaches you the moment it lands. Prebuilt binaries and <code>brew install</code> will return once the CLI is stable.
     </div>
-    <div class="small">Homebrew (macOS &middot; Linuxbrew)</div>
 
     <h2>Then</h2>
     <div class="cmd" id="cmd-setup">
