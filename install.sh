@@ -252,7 +252,13 @@ install_from_source() {
     msg "Building ${CLI_NAME} and ${MCP_NAME} from source via cargo install --git..."
     msg "First build takes 3–5 minutes. Subsequent upgrades take ~30 seconds."
 
-    CARGO_ARGS="--git ${REPO_URL} --branch main --bin ${CLI_NAME} --bin ${MCP_NAME} --force"
+    # Workspace has three bin-producing packages (atomek-cli, tytus-mcp,
+    # tytus-tray). cargo install --git needs explicit crate selection when
+    # the target repo has >1 package with binaries, otherwise it errors
+    # out with "multiple packages with binaries found". Crate names are
+    # passed positionally to `cargo install` (not via -p flags — that's
+    # `cargo build` syntax).
+    CARGO_ARGS="--git ${REPO_URL} --branch main atomek-cli tytus-mcp --force"
     if [ -n "${TYTUS_INSTALL_DIR:-}" ]; then
         msg "Installing to ${TYTUS_INSTALL_DIR}"
         # shellcheck disable=SC2086

@@ -186,6 +186,8 @@ function Install-FromSource {
     Write-Step "Building tytus and tytus-mcp from source via cargo install --git..."
     Write-Step "First build takes 5-8 minutes. Subsequent upgrades take ~30 seconds."
 
+    # Workspace has three bin-producing packages (atomek-cli, tytus-mcp,
+    # tytus-tray). Crate names are passed positionally to cargo install.
     $installRoot = if ($env:TYTUS_INSTALL_DIR) {
         Split-Path $env:TYTUS_INSTALL_DIR -Parent
     } else {
@@ -193,10 +195,10 @@ function Install-FromSource {
     }
 
     if ($installRoot) {
-        cargo install --git $RepoUrl --branch main --bin tytus --bin tytus-mcp --force --root $installRoot
+        cargo install --git $RepoUrl --branch main atomek-cli tytus-mcp --force --root $installRoot
         $binDir = Join-Path $installRoot 'bin'
     } else {
-        cargo install --git $RepoUrl --branch main --bin tytus --bin tytus-mcp --force
+        cargo install --git $RepoUrl --branch main atomek-cli tytus-mcp --force
         $binDir = Join-Path $env:USERPROFILE '.cargo\bin'
     }
 
