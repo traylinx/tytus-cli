@@ -1,9 +1,8 @@
-# Homebrew formula for Tytus CLI.
+# Homebrew formula for Tytus CLI (template).
 #
-# Lives in this repo as a template; gets copied to traylinx/homebrew-tap on
-# each release by a CI step (see .github/workflows/homebrew.yml — TODO) which
-# substitutes the {{VERSION}} and {{SHA_*}} placeholders with the actual values
-# from the release's SHA256SUMS file.
+# Rendered into traylinx/homebrew-tap/Formula/tytus.rb on each release by
+# .github/workflows/homebrew.yml + .github/scripts/render_homebrew_formula.py.
+# Placeholders below are replaced with real values from SHA256SUMS.
 #
 # End-users install with:
 #   brew tap traylinx/tap

@@ -3,6 +3,15 @@ name: Update Homebrew Tap
 on:
   release:
     types: [published]
+  # Manual trigger — used when the release was created by the default
+  # GITHUB_TOKEN, which does not fire downstream workflow events. Pass
+  # the tag (e.g. v0.3.0) as the `tag` input.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish formula for (e.g. v0.3.0)'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,30 +22,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG version=$VERSION"
+
       - name: Download SHA256SUMS from release
         id: sums
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/SHA256SUMS" -o SHA256SUMS
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/SHA256SUMS" -o SHA256SUMS
           cat SHA256SUMS
+          # Extract SHAs for each target if present; empty string means the
+          # target was not built for this release (e.g. linux-aarch64 on
+          # v0.3.0). The render step skips empty targets.
           {
-            echo "sha_macos_aarch64=$(grep tytus-macos-aarch64.tar.gz SHA256SUMS | awk '{print $1}')"
-            echo "sha_macos_x86_64=$(grep tytus-macos-x86_64.tar.gz SHA256SUMS | awk '{print $1}')"
-            echo "sha_linux_aarch64=$(grep tytus-linux-aarch64.tar.gz SHA256SUMS | awk '{print $1}')"
-            echo "sha_linux_x86_64=$(grep tytus-linux-x86_64.tar.gz SHA256SUMS | awk '{print $1}')"
+            echo "sha_macos_aarch64=$(grep 'tytus-macos-aarch64.tar.gz'  SHA256SUMS | awk '{print $1}' | head -1)"
+            echo "sha_macos_x86_64=$(grep 'tytus-macos-x86_64.tar.gz'   SHA256SUMS | awk '{print $1}' | head -1)"
+            echo "sha_linux_x86_64=$(grep 'tytus-linux-x86_64.tar.gz'   SHA256SUMS | awk '{print $1}' | head -1)"
+            echo "sha_linux_aarch64=$(grep 'tytus-linux-aarch64.tar.gz' SHA256SUMS | awk '{print $1}' | head -1)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Render formula
         run: |
           mkdir -p out
-          sed \
-            -e "s|{{VERSION}}|${{ steps.sums.outputs.version }}|g" \
-            -e "s|{{SHA_MACOS_AARCH64}}|${{ steps.sums.outputs.sha_macos_aarch64 }}|g" \
-            -e "s|{{SHA_MACOS_X86_64}}|${{ steps.sums.outputs.sha_macos_x86_64 }}|g" \
-            -e "s|{{SHA_LINUX_AARCH64}}|${{ steps.sums.outputs.sha_linux_aarch64 }}|g" \
-            -e "s|{{SHA_LINUX_X86_64}}|${{ steps.sums.outputs.sha_linux_x86_64 }}|g" \
-            contrib/homebrew/tytus.rb > out/tytus.rb
+          python3 .github/scripts/render_homebrew_formula.py \
+            --template contrib/homebrew/tytus.rb \
+            --version "${{ steps.tag.outputs.version }}" \
+            --sha-macos-aarch64 "${{ steps.sums.outputs.sha_macos_aarch64 }}" \
+            --sha-macos-x86_64  "${{ steps.sums.outputs.sha_macos_x86_64 }}" \
+            --sha-linux-x86_64  "${{ steps.sums.outputs.sha_linux_x86_64 }}" \
+            --sha-linux-aarch64 "${{ steps.sums.outputs.sha_linux_aarch64 }}" \
+            > out/tytus.rb
+          echo "── rendered formula ──"
           cat out/tytus.rb
 
       - name: Push to traylinx/homebrew-tap
