@@ -17,6 +17,12 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
 dirs.workspace = true
+# tiny_http powers the localhost install wizard (sprint §6 E1). Chosen
+# over warp/axum/actix because it's dep-free, std-only, synchronous, and
+# under 200KB — we only need 4 endpoints and one SSE stream.
+tiny_http = "0.12"
+atomek-pods = { path = "../pods" }
+atomek-core = { path = "../core" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

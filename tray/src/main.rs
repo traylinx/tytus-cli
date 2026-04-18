@@ -21,6 +21,7 @@ mod launcher;
 mod socket;
 mod single_instance;
 mod gateway_probe;
+mod web_server;
 
 /// Canonical documentation URL. `tytus.traylinx.com` is the Provider API
 /// (returns 404 on `/`), not a docs site — point at the public README.
@@ -260,6 +261,17 @@ fn main() {
     }
 
     let state = Arc::new(Mutex::new(TrayState::default()));
+
+    // Spin up the localhost install wizard server on a random port. This
+    // is the entry point for the browser-based "Install Agent…" flow.
+    // Failure to bind is non-fatal: the menu action falls back to opening
+    // a Terminal with `tytus agent install` if the port file is missing.
+    // Tray-side integration for SPRINT §6 E1.
+    if let Some(port) = web_server::start() {
+        eprintln!("[tray] install wizard ready on http://127.0.0.1:{}/install", port);
+    } else {
+        eprintln!("[tray] install wizard not available (bind failed)");
+    }
 
     // Initial poll
     {
@@ -548,11 +560,15 @@ fn build_menu(state: &TrayState) -> Menu {
             }
         }
 
-        // "Install Agent ▸" — replaces the pre-sprint "Add Pod ▸". Routes
-        // through `tytus agent install` (new B1 subcommand) so default pods
-        // aren't created here, only agent-bearing ones. Phase E will swap
-        // the terminal-picker handlers for a browser wizard.
-        let add_sub = Submenu::new("Install Agent", true);
+        // Install Agent — opens the browser wizard (SPRINT §6 E). The
+        // single entry point covers the whole catalog and renders agent
+        // cards dynamically, so we don't need to re-list agent types in
+        // the menu itself. Legacy terminal-picker entries stay below as
+        // quick shortcuts + fallback if the localhost server didn't bind.
+        let _ = pods_sub.append(&MenuItem::with_id(
+            "install_agent", "Install Agent…", true, None,
+        ));
+        let add_sub = Submenu::new("Install Agent (terminal)", true);
         let remaining = state.units_limit.saturating_sub(state.units_used);
         let nemo_ok = state.units_limit == 0 || remaining >= 1;
         let hermes_ok = state.units_limit == 0 || remaining >= 2;
@@ -834,9 +850,14 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 ));
             }
         }
-        // Install a specific agent. Phase E will replace these with a
-        // browser wizard; for now open the CLI in a terminal so the user
-        // sees the streaming install logs.
+        // Primary install entry point — opens the localhost wizard in
+        // the user's default browser (SPRINT §6 E). The per-agent
+        // terminal shortcuts below are legacy + fallback when the
+        // localhost server isn't bound (rare).
+        "install_agent" => {
+            web_server::open_wizard();
+        }
+        // Install a specific agent via the terminal-picker fallback.
         "install_agent_nemoclaw" => {
             open_in_terminal_simple(
                 "tytus agent install nemoclaw; echo; echo 'Press Enter to close…'; read _"
