@@ -101,10 +101,11 @@ pub struct PodInfo {
 }
 
 impl PodInfo {
-    /// Unit cost — mirrors Scalesys: NemoClaw=1, Hermes=2.
+    /// Unit cost — mirrors Scalesys: NemoClaw=1, Hermes=2, Default pod=0.
     pub fn units(&self) -> u32 {
         match self.agent_type.as_str() {
             "hermes" => 2,
+            "none" => 0, // agent-less default pod (SPRINT §4.1)
             _ => 1,
         }
     }
@@ -113,9 +114,15 @@ impl PodInfo {
         match self.agent_type.as_str() {
             "nemoclaw" => "NemoClaw".into(),
             "hermes" => "Hermes".into(),
+            "none" => "Default (AIL only)".into(),
             other if !other.is_empty() => other.to_string(),
             _ => "Unknown".into(),
         }
+    }
+    /// True if this is the always-on, 0-unit default pod (agent-less,
+    /// AIL-gateway-only). Added SPRINT §4.1.
+    pub fn is_default(&self) -> bool {
+        self.agent_type == "none"
     }
 }
 
@@ -472,7 +479,29 @@ fn build_menu(state: &TrayState) -> Menu {
             let _ = pods_sub.append(&MenuItem::with_id("no_pods", "No pods allocated", false, None));
             let _ = pods_sub.append(&PredefinedMenuItem::separator());
         } else {
-            for p in &state.pods {
+            // Surface the default pod (agent-less, 0 units) on its own row
+            // so users see AIL is always-on and not confused by a mysterious
+            // "Default (AIL only)" appearing in the agent swap/revoke UI
+            // where those actions don't make sense. Per SPRINT §4.3.
+            for p in state.pods.iter().filter(|p| p.is_default()) {
+                let header = format!(
+                    "Default Pod {} — AIL only  (0 units)",
+                    p.pod_id,
+                );
+                let _ = pods_sub.append(&MenuItem::with_id(
+                    format!("pod_header_{}", p.pod_id),
+                    &header,
+                    false,
+                    None,
+                ));
+                let _ = pods_sub.append(&MenuItem::with_id(
+                    format!("pod_{}_revoke", p.pod_id),
+                    "  Revoke Default Pod", true, None,
+                ));
+                let _ = pods_sub.append(&PredefinedMenuItem::separator());
+            }
+
+            for p in state.pods.iter().filter(|p| !p.is_default()) {
                 let header = format!("Pod {} — {}  ({} unit{})",
                     p.pod_id,
                     p.display_name(),
@@ -487,25 +516,29 @@ fn build_menu(state: &TrayState) -> Menu {
                     format!("pod_{}_restart", p.pod_id),
                     "  Restart Agent", true, None,
                 ));
-                // Agent swap: offer the OTHER agent type. Requires
-                // revoke + reallocate (destroys pod state), so the
-                // handler opens a confirm dialog first.
+                // Replace Agent: offer the OTHER agent type. `tytus agent
+                // replace` keeps the slot allocated and swaps the container
+                // only — unlike the pre-sprint "Switch" which did a full
+                // revoke+reallocate that broke tooling locked to the
+                // per-pod subnet IP.
                 let other = match p.agent_type.as_str() {
                     "hermes" => ("nemoclaw", "NemoClaw", 1u32),
                     _ => ("hermes", "Hermes", 2u32),
                 };
-                // Only enable the swap if we have enough spare units
-                // AFTER freeing the current pod. (other_cost <= freed + free_now)
-                let spare_after_free = state.units_used.saturating_sub(p.units())
-                    .saturating_add(0);
-                let _avail = state.units_limit.saturating_sub(spare_after_free);
+                let spare_after_free = state.units_used.saturating_sub(p.units());
                 let can_swap = state.units_limit == 0
                     || state.units_limit.saturating_sub(spare_after_free) >= other.2;
-                let swap_label = format!("  Switch to {} ({} unit{})",
+                let swap_label = format!("  Replace with {} ({} unit{})",
                     other.1, other.2, if other.2 == 1 { "" } else { "s" });
                 let _ = pods_sub.append(&MenuItem::with_id(
-                    format!("pod_{}_switch_{}", p.pod_id, other.0),
+                    format!("pod_{}_replace_{}", p.pod_id, other.0),
                     &swap_label, can_swap, None,
+                ));
+                // Uninstall Agent: keeps the pod slot allocated (AIL still
+                // works through it), drops the container. SPRINT §4.3.
+                let _ = pods_sub.append(&MenuItem::with_id(
+                    format!("pod_{}_uninstall", p.pod_id),
+                    "  Uninstall Agent  (keeps pod)", true, None,
                 ));
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_{}_revoke", p.pod_id),
@@ -515,18 +548,21 @@ fn build_menu(state: &TrayState) -> Menu {
             }
         }
 
-        // "Add Pod ▸" — enabled agent types depend on remaining units.
-        let add_sub = Submenu::new("Add Pod", true);
+        // "Install Agent ▸" — replaces the pre-sprint "Add Pod ▸". Routes
+        // through `tytus agent install` (new B1 subcommand) so default pods
+        // aren't created here, only agent-bearing ones. Phase E will swap
+        // the terminal-picker handlers for a browser wizard.
+        let add_sub = Submenu::new("Install Agent", true);
         let remaining = state.units_limit.saturating_sub(state.units_used);
         let nemo_ok = state.units_limit == 0 || remaining >= 1;
         let hermes_ok = state.units_limit == 0 || remaining >= 2;
         let _ = add_sub.append(&MenuItem::with_id(
-            "add_pod_nemoclaw",
+            "install_agent_nemoclaw",
             format!("NemoClaw  (1 unit){}", if nemo_ok { "" } else { "  — not enough units" }),
             nemo_ok, None,
         ));
         let _ = add_sub.append(&MenuItem::with_id(
-            "add_pod_hermes",
+            "install_agent_hermes",
             format!("Hermes  (2 units){}", if hermes_ok { "" } else { "  — not enough units" }),
             hermes_ok, None,
         ));
@@ -762,20 +798,21 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 ));
             }
         }
-        // Agent swap = revoke + connect --agent NEW.
-        // Agents are pod-bound; there's no in-place swap today.
-        other if other.starts_with("pod_") && other.contains("_switch_") => {
-            // Parse `pod_<id>_switch_<agent>`
+        // Agent replace = stop old container + deploy new on same slot.
+        // `tytus agent replace` (Phase B) keeps the WG subnet stable —
+        // unlike the pre-sprint "Switch" which revoked+reallocated.
+        other if other.starts_with("pod_") && other.contains("_replace_") => {
+            // Parse `pod_<id>_replace_<agent>`
             let rest = other.trim_start_matches("pod_");
-            if let Some((pod_id, agent)) = rest.split_once("_switch_") {
+            if let Some((pod_id, agent)) = rest.split_once("_replace_") {
                 if confirm_dialog(
-                    &format!("Switch pod {} to {}?",
+                    &format!("Replace agent on pod {} with {}?",
                         pod_id,
                         match agent { "hermes" => "Hermes", "nemoclaw" => "NemoClaw", o => o }),
-                    "This will revoke the current pod (losing any workspace state inside it) and allocate a new one with the chosen agent. Your stable endpoint and user key stay the same, so apps using them keep working across the swap.",
+                    "The pod slot stays allocated and keeps its subnet; only the agent container is replaced. Existing container state (volumes, in-memory sessions) is lost.",
                 ) {
                     let script = format!(
-                        "tytus revoke {pid} && tytus connect --agent {agent}; \
+                        "tytus agent replace {pid} {agent} --yes; \
                          echo; echo 'Press Enter to close…'; read _",
                         pid = shell_escape(pod_id),
                         agent = shell_escape(agent),
@@ -784,15 +821,30 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 }
             }
         }
-        // Allocate a new pod with the chosen agent.
-        "add_pod_nemoclaw" => {
+        // Agent uninstall = stop container, keep pod slot (AIL still works).
+        other if other.starts_with("pod_") && other.ends_with("_uninstall") => {
+            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_uninstall");
+            if confirm_dialog(
+                &format!("Uninstall agent on pod {}?", pod_id),
+                "The agent container is stopped and removed but the pod slot stays allocated. AIL gateway access keeps working through the sidecar. Use 'Revoke Pod' to fully free units.",
+            ) {
+                open_in_terminal_simple(&format!(
+                    "tytus agent uninstall {}; echo; echo 'Press Enter to close…'; read _",
+                    shell_escape(pod_id),
+                ));
+            }
+        }
+        // Install a specific agent. Phase E will replace these with a
+        // browser wizard; for now open the CLI in a terminal so the user
+        // sees the streaming install logs.
+        "install_agent_nemoclaw" => {
             open_in_terminal_simple(
-                "tytus connect --agent nemoclaw; echo; echo 'Press Enter to close…'; read _"
+                "tytus agent install nemoclaw; echo; echo 'Press Enter to close…'; read _"
             );
         }
-        "add_pod_hermes" => {
+        "install_agent_hermes" => {
             open_in_terminal_simple(
-                "tytus connect --agent hermes; echo; echo 'Press Enter to close…'; read _"
+                "tytus agent install hermes; echo; echo 'Press Enter to close…'; read _"
             );
         }
         other if other.starts_with("launch_") => {

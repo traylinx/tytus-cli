@@ -59,6 +59,47 @@ enum DaemonAction {
     Status,
 }
 
+#[derive(Subcommand, Debug)]
+enum AgentAction {
+    /// Install an agent. Without --pod, allocates a new pod. With --pod,
+    /// deploys into that pod (use --force to replace an existing agent).
+    Install {
+        /// Agent type (nemoclaw | hermes | …). Must match a catalog entry.
+        name: String,
+        /// Existing pod slot to install into. Omit to allocate a new slot.
+        #[arg(short, long)]
+        pod: Option<String>,
+        /// Replace an existing agent in the pod (destroys container state).
+        #[arg(long)]
+        force: bool,
+    },
+    /// Stop + remove the agent container. Pod slot stays allocated so AIL
+    /// keeps working through it — use `tytus revoke` to free the slot.
+    Uninstall {
+        /// Pod ID to uninstall from
+        pod: String,
+    },
+    /// Uninstall + install on the same slot. Destroys the old container's
+    /// state (configs, volumes). Requires confirmation unless --yes given.
+    Replace {
+        /// Pod ID holding the agent to replace
+        pod: String,
+        /// New agent type to install
+        new_name: String,
+        /// Skip the "are you sure" prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List all pods with their agent status (default + agent-bearing).
+    List,
+    /// Show the installable agent catalog (cached locally for 5 min).
+    Catalog {
+        /// Bypass the cache and force a live fetch.
+        #[arg(long)]
+        refresh: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Full first-time setup wizard — login, allocate pod, configure, test
@@ -77,14 +118,26 @@ enum Commands {
     Login,
     /// Show current status: plan, pods, tunnels
     Status,
-    /// Allocate a new pod and activate WireGuard tunnel
+    /// Activate the WireGuard tunnel. With no flags, uses your default pod
+    /// (agent-less, AIL-only) — allocating it if needed. Use `--pod` to
+    /// connect to a specific slot, or `--agent` as a deprecated shim for
+    /// `tytus agent install X`.
     Connect {
-        /// Pod ID to reconnect (e.g. "01"). Omit to allocate new.
+        /// Pod ID to reconnect (e.g. "01"). Omit to use the default pod.
         #[arg(short, long)]
         pod: Option<String>,
-        /// Agent type
-        #[arg(short, long, value_enum, default_value = "nemoclaw")]
-        agent: AgentType,
+        /// DEPRECATED — delegates to `tytus agent install <TYPE>`. Kept as
+        /// a shim because internal scripts and docs still reference it.
+        #[arg(short, long, value_enum)]
+        agent: Option<AgentType>,
+    },
+    /// Manage agents: install into a pod, uninstall, replace, list, catalog.
+    /// Decouples pod allocation from agent deployment — default pods
+    /// (agent-less, AIL-only) come for free on `tytus login`; agents cost
+    /// plan units and are installed explicitly.
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
     },
     /// Clear stale tunnel state (tunnels are stopped via Ctrl+C in connect)
     Disconnect {
@@ -257,7 +310,22 @@ async fn main() {
         Some(Commands::Configure) => cmd_configure(&http, cli.json).await,
         Some(Commands::Login) => cmd_login(&http, cli.json).await,
         Some(Commands::Status) => cmd_status(&http, cli.json).await,
-        Some(Commands::Connect { pod, agent }) => cmd_connect(&http, pod, agent.as_str(), cli.json).await,
+        Some(Commands::Connect { pod, agent }) => {
+            // `--agent X` is a shim for `tytus agent install X` + tunnel-up
+            // (see SPRINT §6 B2). Pre-sprint, `tytus connect --agent X` did
+            // allocate+deploy+tunnel; we preserve that by chaining into
+            // cmd_connect with the newly-installed pod's id. Without this
+            // chain, cmd_connect would default to the agent-less default
+            // pod on the next invocation and the user's new agent would
+            // never get a tunnel.
+            if let Some(a) = agent {
+                let new_pod = cmd_agent_install(&http, a.as_str(), pod.clone(), false, cli.json).await;
+                cmd_connect(&http, new_pod.or(pod), cli.json).await;
+            } else {
+                cmd_connect(&http, pod, cli.json).await;
+            }
+        }
+        Some(Commands::Agent { action }) => cmd_agent(&http, action, cli.json).await,
         Some(Commands::Disconnect { pod }) => cmd_disconnect(pod, cli.json).await,
         Some(Commands::Revoke { pod }) => cmd_revoke(&http, &pod, cli.json).await,
         Some(Commands::Logout) => cmd_logout(&http, cli.json).await,
@@ -502,7 +570,7 @@ async fn cmd_status(http: &atomek_core::HttpClient, json: bool) {
 
 // ── Connect ──────────────────────────────────────────────────
 
-async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, agent: &str, json: bool) {
+async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, json: bool) {
     let mut state = CliState::load();
     let headless = !wizard::is_interactive();
 
@@ -515,13 +583,13 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
                 .unwrap_or_else(|| format!("{}ms", ms))
         });
         append_autostart_log(&format!(
-            "cmd_connect START: email={}, has_rt={}, has_at={}, expires_at={}, pods={}, agent={}",
+            "cmd_connect START: email={}, has_rt={}, has_at={}, expires_at={}, pods={}, pod_id={:?}",
             state.email.as_deref().unwrap_or("none"),
             state.refresh_token.is_some(),
             state.access_token.is_some(),
             expires_desc.as_deref().unwrap_or("none"),
             state.pods.len(),
-            agent,
+            pod_id,
         ));
     }
 
@@ -554,14 +622,24 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
     if let Some(ref pid) = pod_id {
         target_pod_id = pid.clone();
         if !json { eprintln!("Connecting to pod {}...", pid); }
+    } else if let Some(default_pod) = state.pods.iter().find(|p| p.agent_type.as_deref() == Some("none")) {
+        // Prefer the user's default pod (agent-less, AIL-only) as the
+        // tunnel target — it's universal and free, matches the spirit of
+        // SPRINT §6 B2. Fall through to the existing-pod reuse if there
+        // isn't one yet.
+        target_pod_id = default_pod.pod_id.clone();
+        if !json { eprintln!("Connecting to default pod {}...", target_pod_id); }
     } else if let Some(existing) = state.pods.first() {
-        // Reuse existing pod — keeps the IP stable (important for users who
-        // configure the gateway URL in their tools)
+        // No default pod yet, but the user has agent-bearing pods — reuse
+        // the first one to keep the IP stable.
         target_pod_id = existing.pod_id.clone();
         if !json { eprintln!("Reconnecting to pod {}...", target_pod_id); }
     } else {
-        if !json { eprintln!("Allocating {} pod...", agent); }
-        match atomek_pods::request_pod_with_agent(&client, agent).await {
+        // No pods at all — allocate a default pod (free, 0 units) so a
+        // user who logged in without provisioning (e.g. early-access path)
+        // still gets working AIL access.
+        if !json { eprintln!("Allocating default pod..."); }
+        match atomek_pods::request_default_pod(&client).await {
             Ok(a) => {
                 target_pod_id = a.pod_id.clone();
                 state.pods.retain(|p| p.pod_id != a.pod_id);
@@ -571,14 +649,14 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, age
                     droplet_ip: a.droplet_ip.clone(),
                     ai_endpoint: a.ai_endpoint.clone(),
                     pod_api_key: a.pod_api_key.clone(),
-                    agent_type: a.agent_type.clone(),
-                    agent_endpoint: a.agent_endpoint.clone(),
+                    agent_type: Some("none".to_string()),
+                    agent_endpoint: None,
                     tunnel_iface: None,
                     stable_ai_endpoint: a.stable_ai_endpoint.clone(),
                     stable_user_key: a.stable_user_key.clone(),
                 });
                 state.save();
-                if !json { eprintln!("✓ Pod {} allocated", a.pod_id); }
+                if !json { eprintln!("✓ Default pod {} allocated", a.pod_id); }
             }
             Err(e) => {
                 state.save();
@@ -1205,6 +1283,285 @@ fn cmd_tunnel_down(pid: i32) {
         let err = std::io::Error::last_os_error();
         eprintln!("tunnel-down: kill({}, SIGTERM) failed: {}", pid, err);
         std::process::exit(1);
+    }
+}
+
+// ── Agent commands (install / uninstall / replace / list / catalog) ─
+//
+// Decouples pod allocation from agent deployment. Default pods (agent-less,
+// AIL-only, 0 units) come free on login; agents cost plan units and are
+// installed explicitly per SPRINT-AIL-DEFAULT-POD §4.1 / §6 B.
+//
+// These implementations lean on the existing Provider endpoints (/pod/request,
+// /pod/agent/deploy, /pod/agent/stop) rather than the proposed
+// /agent/install/uninstall/replace triad in §8 — the existing endpoints
+// cover the full behavior, and keeping the Provider surface unchanged in
+// this sprint lets Phase B ship independently of a Provider deploy.
+
+async fn cmd_agent(http: &atomek_core::HttpClient, action: AgentAction, json: bool) {
+    match action {
+        AgentAction::Install { name, pod, force } => {
+            let _ = cmd_agent_install(http, &name, pod, force, json).await;
+        }
+        AgentAction::Uninstall { pod } => cmd_agent_uninstall(http, &pod, json).await,
+        AgentAction::Replace { pod, new_name, yes } => {
+            cmd_agent_replace(http, &pod, &new_name, yes, json).await
+        }
+        AgentAction::List => cmd_agent_list(http, json).await,
+        AgentAction::Catalog { refresh } => cmd_agent_catalog(http, refresh, json).await,
+    }
+}
+
+/// Install an agent. Returns the pod id the agent landed on so callers
+/// (notably the `tytus connect --agent X` shim) can activate the tunnel
+/// targetting the right slot instead of defaulting back to the default pod.
+async fn cmd_agent_install(
+    http: &atomek_core::HttpClient,
+    name: &str,
+    pod_id: Option<String>,
+    force: bool,
+    json: bool,
+) -> Option<String> {
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        eprintln!("Not logged in. Run: tytus login");
+        std::process::exit(1);
+    }
+    if let Err(e) = ensure_token(&mut state, http).await {
+        eprintln!("Token refresh failed: {}. Run: tytus login", e);
+        std::process::exit(1);
+    }
+    let (sk, auid) = get_credentials(&mut state, http).await;
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+
+    match pod_id {
+        None => {
+            // Allocate new pod + deploy agent atomically via /pod/request.
+            if !json { eprintln!("Allocating pod with {}...", name); }
+            match atomek_pods::request_pod_with_agent(&client, name).await {
+                Ok(a) => {
+                    let returned_pod_id = a.pod_id.clone();
+                    state.pods.retain(|p| p.pod_id != a.pod_id);
+                    state.pods.push(PodEntry {
+                        pod_id: a.pod_id.clone(),
+                        droplet_id: a.droplet_id.clone(),
+                        droplet_ip: a.droplet_ip.clone(),
+                        ai_endpoint: a.ai_endpoint.clone(),
+                        pod_api_key: a.pod_api_key.clone(),
+                        agent_type: a.agent_type.clone().or_else(|| Some(name.to_string())),
+                        agent_endpoint: a.agent_endpoint.clone(),
+                        tunnel_iface: None,
+                        stable_ai_endpoint: a.stable_ai_endpoint.clone(),
+                        stable_user_key: a.stable_user_key.clone(),
+                    });
+                    state.save();
+                    if json {
+                        println!("{}", serde_json::json!({
+                            "pod_id": a.pod_id, "agent_type": name,
+                            "stable_ai_endpoint": a.stable_ai_endpoint,
+                        }));
+                    } else {
+                        println!("✓ {} installed on pod {}", name, a.pod_id);
+                        println!("  Activate: tytus connect --pod {}", a.pod_id);
+                    }
+                    Some(returned_pod_id)
+                }
+                Err(e) => {
+                    eprintln!("Install failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(pid) => {
+            // Deploy into an existing pod. Refuse to clobber unless --force.
+            let existing = state.pods.iter().find(|p| p.pod_id == pid);
+            if let Some(p) = existing {
+                match p.agent_type.as_deref() {
+                    Some("none") | None => {} // empty slot — safe to install
+                    Some(other) if !force => {
+                        eprintln!(
+                            "Pod {} already has {} installed. Use --force to replace \
+                             (or `tytus agent replace {} {}`).",
+                            pid, other, pid, name
+                        );
+                        std::process::exit(1);
+                    }
+                    _ => {} // --force given
+                }
+            } else {
+                eprintln!("Pod {} not found in local state. Run: tytus status", pid);
+                std::process::exit(1);
+            }
+
+            if !json { eprintln!("Installing {} on pod {}...", name, pid); }
+            match atomek_pods::deploy_agent(&client, &pid, name).await {
+                Ok(_) => {
+                    if let Some(p) = state.pods.iter_mut().find(|p| p.pod_id == pid) {
+                        p.agent_type = Some(name.to_string());
+                        p.agent_endpoint = None; // will be rehydrated on next connect
+                    }
+                    state.save();
+                    if json {
+                        println!("{}", serde_json::json!({"pod_id": pid, "agent_type": name}));
+                    } else {
+                        println!("✓ {} installed on pod {}", name, pid);
+                    }
+                    Some(pid)
+                }
+                Err(e) => {
+                    eprintln!("Deploy failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+async fn cmd_agent_uninstall(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        eprintln!("Not logged in. Run: tytus login");
+        std::process::exit(1);
+    }
+    if let Err(e) = ensure_token(&mut state, http).await {
+        eprintln!("Token refresh failed: {}. Run: tytus login", e);
+        std::process::exit(1);
+    }
+    let (sk, auid) = get_credentials(&mut state, http).await;
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+
+    if !json { eprintln!("Stopping agent on pod {}...", pod_id); }
+    match atomek_pods::stop_agent(&client, pod_id).await {
+        Ok(()) => {
+            if let Some(p) = state.pods.iter_mut().find(|p| p.pod_id == pod_id) {
+                // Keep the slot allocated — AIL still works through the
+                // sidecar. Caller uses `tytus revoke` to fully free units.
+                p.agent_type = Some("none".to_string());
+                p.agent_endpoint = None;
+            }
+            state.save();
+            if json {
+                println!("{}", serde_json::json!({"pod_id": pod_id, "agent_type": serde_json::Value::Null}));
+            } else {
+                println!("✓ Agent stopped on pod {}. Pod slot retained.", pod_id);
+                println!("  To fully free units: tytus revoke {}", pod_id);
+            }
+        }
+        Err(e) => {
+            eprintln!("Uninstall failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn cmd_agent_replace(
+    http: &atomek_core::HttpClient,
+    pod_id: &str,
+    new_name: &str,
+    yes: bool,
+    json: bool,
+) {
+    if !yes && wizard::is_interactive() {
+        let prompt = format!(
+            "Replace agent on pod {} with {}? This destroys the existing \
+             container's state.",
+            pod_id, new_name
+        );
+        if !wizard::confirm(&prompt, false).unwrap_or(false) {
+            eprintln!("Cancelled.");
+            return;
+        }
+    }
+
+    // Best-effort stop: if the slot is already empty or the container has
+    // already exited, `stop_agent` will return a non-2xx and cmd_agent_uninstall
+    // would exit(1), aborting the replace. Instead call stop directly and log.
+    // The subsequent deploy tolerates an empty slot.
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        eprintln!("Not logged in. Run: tytus login");
+        std::process::exit(1);
+    }
+    if let Err(e) = ensure_token(&mut state, http).await {
+        eprintln!("Token refresh failed: {}. Run: tytus login", e);
+        std::process::exit(1);
+    }
+    let (sk, auid) = get_credentials(&mut state, http).await;
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+
+    if !json { eprintln!("Stopping existing agent on pod {} (best-effort)...", pod_id); }
+    if let Err(e) = atomek_pods::stop_agent(&client, pod_id).await {
+        // Typical reasons: slot already empty, container already exited.
+        // Not fatal — proceed to install.
+        if !json { eprintln!("  stop skipped: {}", e); }
+    }
+
+    let _ = cmd_agent_install(http, new_name, Some(pod_id.to_string()), true, json).await;
+}
+
+async fn cmd_agent_list(http: &atomek_core::HttpClient, json: bool) {
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        eprintln!("Not logged in. Run: tytus login");
+        std::process::exit(1);
+    }
+    if let Err(e) = ensure_token(&mut state, http).await {
+        eprintln!("Token refresh failed: {}. Run: tytus login", e);
+        std::process::exit(1);
+    }
+    sync_tytus(&mut state, http).await;
+    state.save();
+
+    if json {
+        let pods: Vec<_> = state.pods.iter().map(|p| {
+            serde_json::json!({
+                "pod_id": p.pod_id,
+                "agent_type": p.agent_type,
+                "tunnel_iface": p.tunnel_iface,
+                "stable_ai_endpoint": p.stable_ai_endpoint,
+            })
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&pods).unwrap_or_default());
+        return;
+    }
+
+    if state.pods.is_empty() {
+        println!("No pods. Run: tytus connect (for AIL) or tytus agent install <name>");
+        return;
+    }
+    println!("{:<6} {:<12} {:<10} ENDPOINT", "POD", "AGENT", "TUNNEL");
+    for p in &state.pods {
+        let agent = p.agent_type.as_deref().unwrap_or("-");
+        let tunnel = p.tunnel_iface.as_deref().unwrap_or("down");
+        let endpoint = p.stable_ai_endpoint.as_deref().unwrap_or("http://10.42.42.1:18080");
+        let label = if agent == "none" { "default" } else { agent };
+        println!("{:<6} {:<12} {:<10} {}", p.pod_id, label, tunnel, endpoint);
+    }
+}
+
+async fn cmd_agent_catalog(http: &atomek_core::HttpClient, refresh: bool, json: bool) {
+    match atomek_pods::fetch_catalog(http, refresh).await {
+        Ok(cat) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&cat).unwrap_or_default());
+                return;
+            }
+            println!("Agent catalog (version {})", cat.version);
+            println!();
+            for a in &cat.agents {
+                let tagline = a.tagline.as_deref().unwrap_or("");
+                let min_plan = a.min_plan.as_deref().unwrap_or("any");
+                println!("  {} — {} unit(s), min plan: {}", a.name, a.units, min_plan);
+                if !tagline.is_empty() { println!("    {}", tagline); }
+                if let Some(ref desc) = a.description { println!("    {}", desc); }
+                println!("    Install: tytus agent install {}", a.id);
+                println!();
+            }
+        }
+        Err(e) => {
+            eprintln!("Catalog fetch failed: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
@@ -2043,7 +2400,14 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
     // ── Step 3: Allocate pod + activate tunnel ──
     wizard::print_step(3, total_steps, "Allocating your pod and starting tunnel");
     println!();
-    cmd_connect(http, None, agent, false).await;
+    // If no pods yet, install the picked agent so the first-run flow still
+    // ends up with a real agent runtime (not just AIL). cmd_agent_install
+    // allocates a pod AND deploys the agent in one shot via /pod/request;
+    // cmd_connect then brings the tunnel up to whatever was allocated.
+    if state.pods.is_empty() {
+        let _ = cmd_agent_install(http, agent, None, false, false).await;
+    }
+    cmd_connect(http, None, false).await;
     println!();
 
     // Re-load state — connect updated it
@@ -3447,7 +3811,20 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
         else { "No subscription. Upgrade at traylinx.com".into() }
     ));
 
-    // 5. Pods
+    // 5. Default pod (added SPRINT §6 B3). Separate check from "any pods"
+    // so the doctor distinguishes "no AIL access" from "pods but no agent".
+    let default_pod = state.pods.iter().find(|p| p.agent_type.as_deref() == Some("none"));
+    checks.push(("default_pod", default_pod.is_some(),
+        if let Some(p) = default_pod {
+            format!("Pod {} (AIL-only, 0 units)", p.pod_id)
+        } else if state.is_logged_in() {
+            "Missing — run: tytus login (auto-provisions) or tytus connect".into()
+        } else {
+            "No login yet".into()
+        }
+    ));
+
+    // 6. Pods
     checks.push(("pods", !state.pods.is_empty(),
         if state.pods.is_empty() { "No pods. Run: tytus connect".into() }
         else { format!("{} pod(s)", state.pods.len()) }
