@@ -600,9 +600,37 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
     }
 
     // ── Phase 1: API calls (no root needed) ──
+    //
+    // Try a silent refresh first. If the RT itself is dead server-side
+    // (Sentinel ~24h TTL, user hasn't touched the CLI in a while), fall
+    // back to the interactive browser device-auth flow — but ONLY if we
+    // have a controlling terminal. A headless connect (LaunchAgent /
+    // cron) should fail with the clear remediation instead of trying to
+    // open a browser where no one can approve it. User reported
+    // 2026-04-18: "it should try refresh and when not possible login".
     if let Err(e) = ensure_token(&mut state, http).await {
-        eprintln!("Token refresh failed: {}. Run: tytus login", e);
-        std::process::exit(1);
+        let auth_expired = matches!(e, atomek_core::AtomekError::AuthExpired)
+            || e.to_string().contains("Authentication expired");
+        if auth_expired && wizard::is_interactive() {
+            if !json {
+                eprintln!("Refresh token expired — opening browser to re-authenticate...");
+            }
+            // cmd_login handles the device-auth flow end-to-end: browser
+            // open, poll Sentinel, persist new tokens to keychain, run
+            // sync_tytus, and (post-A6) re-provision the default pod.
+            // It exits on failure, so if it returns, we're good.
+            cmd_login(http, false).await;
+            // Reload state from disk — cmd_login wrote fresh tokens +
+            // possibly a new default pod entry there.
+            state = CliState::load();
+            if !state.is_logged_in() {
+                eprintln!("Login cancelled. Run: tytus login");
+                std::process::exit(1);
+            }
+        } else {
+            eprintln!("Token refresh failed: {}. Run: tytus login", e);
+            std::process::exit(1);
+        }
     }
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
