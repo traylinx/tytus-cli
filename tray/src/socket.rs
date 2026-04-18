@@ -100,6 +100,8 @@ fn daemon_status() -> Option<DaemonSnap> {
         pod_id: p.get("pod_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         agent_type: p.get("agent_type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         tunnel_active: p.get("tunnel_iface").and_then(|v| v.as_str()).is_some(),
+        stable_ai_endpoint: p.get("stable_ai_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        stable_user_key: p.get("stable_user_key").and_then(|v| v.as_str()).map(|s| s.to_string()),
     }).collect();
     Some(DaemonSnap {
         daemon_pid: daemon.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -166,6 +168,8 @@ fn read_state_file() -> Option<FileSnap> {
         pod_id: p.get("pod_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         agent_type: p.get("agent_type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         tunnel_active: p.get("tunnel_iface").and_then(|v| v.as_str()).is_some(),
+        stable_ai_endpoint: p.get("stable_ai_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        stable_user_key: p.get("stable_user_key").and_then(|v| v.as_str()).map(|s| s.to_string()),
     }).collect();
 
     Some(FileSnap {

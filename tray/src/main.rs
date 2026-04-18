@@ -99,6 +99,12 @@ pub struct PodInfo {
     pub pod_id: String,
     pub agent_type: String,
     pub tunnel_active: bool,
+    /// Stable AI gateway URL — same across all pods (10.42.42.1:18080).
+    /// Populated from the daemon's status response or state.json.
+    pub stable_ai_endpoint: Option<String>,
+    /// Per-user stable API key (sk-tytus-user-<32hex>). Survives pod
+    /// revocation/reallocation and agent swaps.
+    pub stable_user_key: Option<String>,
 }
 
 impl PodInfo {
@@ -472,13 +478,74 @@ fn build_menu(state: &TrayState) -> Menu {
         let _ = open_sub.append(&MenuItem::with_id("launch_terminal", "Terminal", true, None));
         let _ = menu.append(&open_sub);
 
-        // Power-user conveniences that only make sense when connected.
-        let _ = menu.append(&MenuItem::with_id("copy_env", "Copy Connection Info", true, None));
         let _ = menu.append(&MenuItem::with_id("test", "Run Health Test", true, None));
 
         let _ = menu.append(&PredefinedMenuItem::separator());
     } else {
         let _ = menu.append(&MenuItem::with_id("connect", "Connect", true, None));
+        let _ = menu.append(&PredefinedMenuItem::separator());
+    }
+
+    // ── AIL Connection Info ▸ ─────────────────────────────────
+    //
+    // Surfaces the stable endpoint + key so users can paste them into
+    // Claude Code, Cursor, OpenCode, Codex — any OpenAI-compatible tool
+    // — without running a terminal round-trip. Visible whenever the user
+    // is logged in and has at least one pod (doesn't require the tunnel
+    // to be up: users often pre-configure clients).
+    //
+    // Pulls values from the first pod with stable fields (all pods on a
+    // user share the same stable endpoint + key, so the first one is
+    // representative). Falls back to the canonical 10.42.42.1 URL if the
+    // daemon hasn't yet populated the state.
+    if state.logged_in {
+        let primary = state.pods.iter().find(|p| p.stable_user_key.is_some());
+        let endpoint = primary
+            .and_then(|p| p.stable_ai_endpoint.clone())
+            .unwrap_or_else(|| "http://10.42.42.1:18080".to_string());
+        let key = primary.and_then(|p| p.stable_user_key.clone());
+
+        let info_sub = Submenu::new("AIL Connection Info", true);
+
+        // Display-only rows so the user can see what they'd copy.
+        let _ = info_sub.append(&MenuItem::with_id(
+            "ail_info_url",
+            format!("URL: {}/v1", endpoint),
+            false, None,
+        ));
+        if let Some(ref k) = key {
+            // Preview first 14 chars of the key so the user can recognize
+            // it without exposing the whole token in a screenshot.
+            let preview = if k.len() > 18 {
+                format!("{}…{}", &k[..14], &k[k.len() - 4..])
+            } else {
+                k.clone()
+            };
+            let _ = info_sub.append(&MenuItem::with_id(
+                "ail_info_key",
+                format!("Key: {}", preview),
+                false, None,
+            ));
+        } else {
+            let _ = info_sub.append(&MenuItem::with_id(
+                "ail_info_key",
+                "Key: (none yet — run `tytus login`)",
+                false, None,
+            ));
+        }
+
+        let _ = info_sub.append(&PredefinedMenuItem::separator());
+
+        let has_key = key.is_some();
+        let _ = info_sub.append(&MenuItem::with_id("copy_ail_url", "Copy OPENAI_BASE_URL", true, None));
+        let _ = info_sub.append(&MenuItem::with_id("copy_ail_key", "Copy OPENAI_API_KEY", has_key, None));
+        let _ = info_sub.append(&MenuItem::with_id("copy_ail_exports", "Copy export block", has_key, None));
+        let _ = info_sub.append(&MenuItem::with_id("copy_ail_json", "Copy JSON ({base_url, api_key})", has_key, None));
+
+        let _ = info_sub.append(&PredefinedMenuItem::separator());
+        let _ = info_sub.append(&MenuItem::with_id("open_mcp_guide", "Paste into Claude Code / Cursor / OpenCode…", true, None));
+
+        let _ = menu.append(&info_sub);
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
 
@@ -735,6 +802,37 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         "copy_env" => {
             copy_connection_info(state);
         }
+        "copy_ail_url" => {
+            let (url, _key) = connection_pair(state);
+            copy_to_clipboard(&format!("{}/v1", url));
+            notify("Tytus", "OPENAI_BASE_URL copied to clipboard.");
+        }
+        "copy_ail_key" => {
+            let (_url, key) = connection_pair(state);
+            if let Some(k) = key {
+                copy_to_clipboard(&k);
+                notify("Tytus", "OPENAI_API_KEY copied to clipboard.");
+            } else {
+                notify("Tytus", "No stable key yet — run tytus login first.");
+            }
+        }
+        "copy_ail_exports" => {
+            copy_connection_info(state);
+        }
+        "copy_ail_json" => {
+            let (url, key) = connection_pair(state);
+            let json = serde_json::json!({
+                "base_url": format!("{}/v1", url),
+                "api_key": key.as_deref().unwrap_or(""),
+            });
+            copy_to_clipboard(&serde_json::to_string_pretty(&json).unwrap_or_default());
+            notify("Tytus", "Config JSON copied to clipboard.");
+        }
+        "open_mcp_guide" => {
+            let _ = std::process::Command::new("open")
+                .arg("https://github.com/traylinx/tytus-cli#connect-from-claude-cursor-opencode")
+                .status();
+        }
         "test" => {
             open_in_terminal_simple("tytus test; echo; echo 'Press Enter to close…'; read _");
         }
@@ -915,12 +1013,73 @@ fn notify(title: &str, body: &str) {
 #[cfg(not(target_os = "macos"))]
 fn notify(_title: &str, _body: &str) {}
 
+/// Pull the stable (URL, API key) pair from TrayState.
+///
+/// All of a user's pods share the same stable pair (it's per-user, not
+/// per-pod), so we return the first pod with the key populated. If the
+/// state is sparse — e.g. the user is logged in but the daemon hasn't
+/// yet hydrated stable fields — we fall back to the canonical URL and
+/// return `None` for the key so the caller can surface a "run tytus
+/// login" hint instead of copying an empty string.
+fn connection_pair(state: &Arc<Mutex<TrayState>>) -> (String, Option<String>) {
+    let s = state.lock().unwrap();
+    let primary = s.pods.iter().find(|p| p.stable_user_key.is_some());
+    let url = primary
+        .and_then(|p| p.stable_ai_endpoint.clone())
+        .unwrap_or_else(|| "http://10.42.42.1:18080".to_string());
+    let key = primary.and_then(|p| p.stable_user_key.clone());
+    (url, key)
+}
+
+/// Put arbitrary text on the system clipboard. Factored out so individual
+/// menu items can copy URL / key / JSON independently rather than always
+/// dumping the full export block.
+fn copy_to_clipboard(text: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        if let Ok(mut child) = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::io::Write;
+        for (bin, args) in [("xclip", &["-selection", "clipboard"][..]), ("xsel", &["--clipboard", "--input"][..])] {
+            if let Ok(mut child) = std::process::Command::new(bin)
+                .args(args)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
+}
+
 /// Put the stable OpenAI-compatible env-var block on the clipboard.
 /// The user can paste it directly into .env files, IDE settings, or another
 /// shell — no terminal round-trip required.
+///
+/// Uses the state.pods snapshot (read via `connection_pair`) rather than
+/// the daemon's live view, so this works even when the tunnel isn't up
+/// yet — the stable URL + key pair doesn't depend on the tunnel being
+/// active, and users often pre-configure their clients before first
+/// connect.
 fn copy_connection_info(state: &Arc<Mutex<TrayState>>) {
-    let Some(conn) = get_pod_connection(state) else {
-        notify("Tytus", "Not connected — nothing to copy.");
+    let (url, key) = connection_pair(state);
+    let Some(key) = key else {
+        notify("Tytus", "No stable key yet — run `tytus login` first.");
         return;
     };
 
@@ -929,8 +1088,8 @@ fn copy_connection_info(state: &Arc<Mutex<TrayState>>) {
          export OPENAI_API_KEY=\"{key}\"\n\
          export OPENAI_API_BASE=\"{base}/v1\"\n\
          export AI_GATEWAY=\"{base}\"\n",
-        base = conn.ai_gateway,
-        key = conn.api_key,
+        base = url,
+        key = key,
     );
 
     #[cfg(target_os = "macos")]
