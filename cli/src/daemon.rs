@@ -337,37 +337,59 @@ async fn dispatch_command(
 
 // ── Background token refresh ────────────────────────────────
 
+/// Nominal refresh cadence. Keeps the sliding RT window well inside Sentinel's
+/// server-side RT TTL (~24h). Every tick, `ensure_token` decides whether to
+/// actually hit the network — cheap no-op when the token is still fresh.
+const REFRESH_TICK: std::time::Duration = std::time::Duration::from_secs(1800); // 30 min
+
+/// Backoff schedule on transient failure. Never gives up — the whole point of
+/// the daemon is to survive 24/7 across wakeups, Wi-Fi switches, VPN flaps.
+const BACKOFF_STEPS: &[u64] = &[60, 300, 900, 1800, 3600]; // 1m, 5m, 15m, 30m, 1h cap
+
 async fn token_refresh_loop(
     ctx: std::sync::Arc<DaemonCtx>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-    interval.tick().await; // skip immediate first tick
+    // Warm-up: do a refresh 10s after startup so we prove the tokens work
+    // (and rotate them) before the user next invokes the CLI. Without this,
+    // a freshly-booted machine waits 30 min before the first refresh, which
+    // can leave the daemon blind to a keychain RT that's already expired.
+    let mut next_wait = std::time::Duration::from_secs(10);
+    let mut backoff_idx: usize = 0;
 
     loop {
         tokio::select! {
-            _ = interval.tick() => {
-                let mut ds = ctx.state.lock().await;
-                if !ds.cli_state.is_logged_in() {
-                    ds.daemon_status = DaemonStatus::NeedsLogin;
-                    continue;
-                }
-
-                ds.daemon_status = DaemonStatus::Refreshing;
-                match super::ensure_token(&mut ds.cli_state, &ctx.http).await {
-                    Ok(()) => {
-                        ds.last_refresh = Some(std::time::Instant::now());
-                        ds.daemon_status = DaemonStatus::Running;
-                        tracing::debug!("Background token refresh: OK");
+            _ = tokio::time::sleep(next_wait) => {
+                let outcome = refresh_once(&ctx).await;
+                match outcome {
+                    RefreshOutcome::Ok => {
+                        backoff_idx = 0;
+                        next_wait = REFRESH_TICK;
                     }
-                    Err(e) => {
-                        tracing::warn!("Background token refresh failed: {}", e);
-                        ds.daemon_status = DaemonStatus::NeedsLogin;
+                    RefreshOutcome::NotLoggedIn => {
+                        // No credentials to refresh with — stay idle but keep the
+                        // loop alive so `tytus login` + SIGHUP-free recovery works.
+                        backoff_idx = 0;
+                        next_wait = REFRESH_TICK;
+                    }
+                    RefreshOutcome::AuthExpired => {
+                        // RT genuinely dead server-side. User must re-login.
+                        // Don't hammer the server — back off long, but keep
+                        // retrying in case the user runs `tytus login` and the
+                        // daemon picks up the new RT from keychain on next tick.
+                        next_wait = std::time::Duration::from_secs(*BACKOFF_STEPS.last().unwrap());
+                    }
+                    RefreshOutcome::Transient => {
+                        // Network / DNS / server hiccup. Exponential backoff,
+                        // never exit.
+                        let step = BACKOFF_STEPS
+                            .get(backoff_idx)
+                            .copied()
+                            .unwrap_or(*BACKOFF_STEPS.last().unwrap());
+                        next_wait = std::time::Duration::from_secs(step);
+                        backoff_idx = (backoff_idx + 1).min(BACKOFF_STEPS.len() - 1);
                     }
                 }
-
-                super::sync_tytus(&mut ds.cli_state, &ctx.http).await;
-                ds.cli_state.save();
             }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
@@ -375,6 +397,69 @@ async fn token_refresh_loop(
                     break;
                 }
             }
+        }
+    }
+}
+
+enum RefreshOutcome {
+    Ok,
+    NotLoggedIn,
+    AuthExpired,
+    Transient,
+}
+
+async fn refresh_once(ctx: &std::sync::Arc<DaemonCtx>) -> RefreshOutcome {
+    let mut ds = ctx.state.lock().await;
+
+    // If we previously saw NeedsLogin, re-read state + keychain — the user may
+    // have just run `tytus login` in another process, which writes a new RT
+    // to the keychain that our in-memory copy doesn't know about. Without
+    // this reload the daemon would keep trying the dead RT forever.
+    if ds.daemon_status == DaemonStatus::NeedsLogin || !ds.cli_state.is_logged_in() {
+        let fresh = CliState::load();
+        if fresh.is_logged_in() {
+            ds.cli_state = fresh;
+            ds.daemon_status = DaemonStatus::Running;
+        } else {
+            ds.daemon_status = DaemonStatus::NeedsLogin;
+            return RefreshOutcome::NotLoggedIn;
+        }
+    }
+
+    ds.daemon_status = DaemonStatus::Refreshing;
+    let result = super::ensure_token(&mut ds.cli_state, &ctx.http).await;
+
+    match result {
+        Ok(()) => {
+            ds.last_refresh = Some(std::time::Instant::now());
+            ds.daemon_status = DaemonStatus::Running;
+            // Persist with save_critical: we may have rotated RT and the
+            // new RT is already in keychain (via update_tokens), but we
+            // want expires_at_ms / access_token durable in case of crash.
+            if let Err(e) = ds.cli_state.save_critical() {
+                tracing::error!("Daemon failed to save state after refresh: {}", e);
+            }
+            // Best-effort sync of subscription data — isolate its failure
+            // from token refresh success.
+            super::sync_tytus(&mut ds.cli_state, &ctx.http).await;
+            let _ = ds.cli_state.save_critical();
+            tracing::debug!("Background token refresh: OK");
+            RefreshOutcome::Ok
+        }
+        Err(atomek_core::AtomekError::AuthExpired) => {
+            ds.daemon_status = DaemonStatus::NeedsLogin;
+            tracing::warn!("Background refresh: refresh token expired (needs re-login)");
+            RefreshOutcome::AuthExpired
+        }
+        Err(e) => {
+            // Do NOT flip to NeedsLogin — user auth is still valid, this is
+            // a transient error (network, DNS, Sentinel hiccup). Stay in
+            // Running so `tytus status` doesn't lie.
+            tracing::warn!("Background token refresh (transient): {}", e);
+            if ds.daemon_status != DaemonStatus::NeedsLogin {
+                ds.daemon_status = DaemonStatus::Running;
+            }
+            RefreshOutcome::Transient
         }
     }
 }
