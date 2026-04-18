@@ -498,6 +498,15 @@ async fn ensure_default_pod(state: &mut CliState, http: &atomek_core::HttpClient
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
     match atomek_pods::request_default_pod(&client).await {
         Ok(alloc) => {
+            // PRESERVE tunnel_iface on refresh. If this pod_id already
+            // exists in state with a live tunnel, keeping the iface is
+            // essential — a blind retain+push zeroed it on every login
+            // and made the tray think the tunnel was down even when
+            // boringtun was alive and routing traffic. Reported
+            // 2026-04-19 ("tunnel_iface null in state but tunnel works").
+            let preserved_iface = state.pods.iter()
+                .find(|p| p.pod_id == alloc.pod_id)
+                .and_then(|p| p.tunnel_iface.clone());
             state.pods.retain(|p| p.pod_id != alloc.pod_id);
             state.pods.push(PodEntry {
                 pod_id: alloc.pod_id.clone(),
@@ -507,7 +516,7 @@ async fn ensure_default_pod(state: &mut CliState, http: &atomek_core::HttpClient
                 pod_api_key: alloc.pod_api_key.clone(),
                 agent_type: Some("none".to_string()),
                 agent_endpoint: None,
-                tunnel_iface: None,
+                tunnel_iface: preserved_iface,
                 stable_ai_endpoint: alloc.stable_ai_endpoint.clone(),
                 stable_user_key: alloc.stable_user_key.clone(),
             });
@@ -660,6 +669,9 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
         match atomek_pods::request_default_pod(&client).await {
             Ok(a) => {
                 target_pod_id = a.pod_id.clone();
+                let preserved_iface = state.pods.iter()
+                    .find(|p| p.pod_id == a.pod_id)
+                    .and_then(|p| p.tunnel_iface.clone());
                 state.pods.retain(|p| p.pod_id != a.pod_id);
                 state.pods.push(PodEntry {
                     pod_id: a.pod_id.clone(),
@@ -669,7 +681,7 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
                     pod_api_key: a.pod_api_key.clone(),
                     agent_type: Some("none".to_string()),
                     agent_endpoint: None,
-                    tunnel_iface: None,
+                    tunnel_iface: preserved_iface,
                     stable_ai_endpoint: a.stable_ai_endpoint.clone(),
                     stable_user_key: a.stable_user_key.clone(),
                 });
@@ -1490,6 +1502,14 @@ async fn cmd_agent_install(
             match atomek_pods::request_pod_with_agent(&client, name).await {
                 Ok(a) => {
                     let returned_pod_id = a.pod_id.clone();
+                    // Preserve tunnel_iface if this pod_id is being
+                    // re-provisioned (rare — typically only happens when
+                    // Scalesys stable-reuse returns a slot that had a
+                    // live tunnel). See ensure_default_pod for the same
+                    // pattern + rationale.
+                    let preserved_iface = state.pods.iter()
+                        .find(|p| p.pod_id == a.pod_id)
+                        .and_then(|p| p.tunnel_iface.clone());
                     state.pods.retain(|p| p.pod_id != a.pod_id);
                     state.pods.push(PodEntry {
                         pod_id: a.pod_id.clone(),
@@ -1499,7 +1519,7 @@ async fn cmd_agent_install(
                         pod_api_key: a.pod_api_key.clone(),
                         agent_type: a.agent_type.clone().or_else(|| Some(name.to_string())),
                         agent_endpoint: a.agent_endpoint.clone(),
-                        tunnel_iface: None,
+                        tunnel_iface: preserved_iface,
                         stable_ai_endpoint: a.stable_ai_endpoint.clone(),
                         stable_user_key: a.stable_user_key.clone(),
                     });
@@ -3782,10 +3802,73 @@ async fn cmd_ui(
         }
     };
 
+    // Refuse to try opening the UI for a pod whose agent doesn't exist.
+    // The agent-less default pod (agent_type=="none") only serves AIL
+    // through the sidecar's socat forwarder on 10.42.42.1:18080 — there
+    // is no `/` web UI to show. Silently forwarding would land the user
+    // on a blank page with no explanation.
+    if pod.agent_type.as_deref() == Some("none") {
+        eprintln!(
+            "Pod {} is the default pod (AIL-only, no agent installed).\n\
+             There's no agent UI to open. Either install an agent:\n  \
+               tytus agent install openclaw --pod {}\n\
+             or use the stable AIL endpoint directly:\n  \
+               http://10.42.42.1:18080/v1",
+            pod.pod_id, pod.pod_id,
+        );
+        std::process::exit(1);
+    }
+
+    // Refuse to try if the tunnel isn't routing to THIS pod's subnet.
+    // Each WG tunnel routes one pod's /24 (e.g. pod 02 → 10.18.2.0/24).
+    // Cross-pod traffic is blocked by sidecar iptables per security
+    // invariants, so no amount of cleverness lets us reach a second pod
+    // over a tunnel bound to the first. The user has to disconnect and
+    // reconnect targetting the desired pod. Observed 2026-04-19: user
+    // had tunnel to pod 01, clicked "Open in Browser" on pod 02 → six
+    // seconds of connect-timeout and a blank browser tab.
+    let tunnel_targets_this_pod = state.pods.iter().any(|p| {
+        p.pod_id == pod.pod_id && p.tunnel_iface.is_some()
+    });
+    // Heuristic fallback for the tunnel_iface-was-null bug: check if any
+    // utun has the pod's subnet in its peer address. We compare the
+    // first three octets of pod.ai_endpoint (e.g. "10.18.2.1") against
+    // live ifconfig output. Belt + suspenders until the state.json
+    // preservation fix propagates through every cached state file.
+    let pod_subnet_prefix = pod.ai_endpoint.as_deref()
+        .and_then(|s| s.strip_prefix("http://"))
+        .and_then(|s| s.split(':').next())
+        .and_then(|host| {
+            let parts: Vec<&str> = host.split('.').collect();
+            if parts.len() == 4 { Some(format!("{}.{}.{}.", parts[0], parts[1], parts[2])) }
+            else { None }
+        });
+    let tunnel_reaches_live = pod_subnet_prefix.as_ref().map(|prefix| {
+        let out = std::process::Command::new("ifconfig").output();
+        match out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).lines().any(|l| l.contains(prefix)),
+            Err(_) => false,
+        }
+    }).unwrap_or(false);
+    if !tunnel_targets_this_pod && !tunnel_reaches_live {
+        eprintln!(
+            "No tunnel to pod {}. Each tunnel routes exactly one pod's subnet —\n\
+             cross-pod traffic is blocked by sidecar firewall rules.\n\
+             \n\
+             To open this pod's UI, switch your tunnel:\n  \
+               tytus disconnect\n  \
+               tytus connect --pod {}\n  \
+               tytus ui --pod {}",
+            pod.pod_id, pod.pod_id, pod.pod_id,
+        );
+        std::process::exit(1);
+    }
+
     // Resolve upstream: agent_endpoint is "10.X.Y.1:3000" (nemoclaw) or
     // "10.X.Y.1:8642" (hermes). If missing, derive from ai_endpoint.
+    // Strip any http:// prefix — copy_bidirectional wants a raw host:port.
     let upstream = match pod.agent_endpoint.clone() {
-        Some(ep) => ep,
+        Some(ep) => ep.strip_prefix("http://").unwrap_or(&ep).to_string(),
         None => {
             match pod.ai_endpoint.as_deref() {
                 Some(ai) => {
