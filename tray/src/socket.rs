@@ -61,13 +61,16 @@ pub fn poll_daemon_status() -> super::TrayState {
     out.units_used = out.pods.iter().map(|p| p.units()).sum();
     out.units_limit = super::units_for_tier(&out.tier);
 
-    // If the gateway probe succeeded, treat the tunnel as active even
-    // when state.json/daemon disagree — the probe is ground truth. This
-    // is what fixes the utun5→utun4 renumbering mismatch without needing
-    // to actively rewrite state.json.
-    if gateway_reachable {
-        out.tunnel_active = true;
-    }
+    // The gateway probe is ground truth — resolve state.json/daemon
+    // disagreement in both directions:
+    //   reachable + claim-inactive → tunnel IS active (utun renumbering
+    //     mismatch; don't demand a Connect click that would no-op)
+    //   !reachable + claim-active  → tunnel is stale (PID dead, state
+    //     file not reaped). Show Connect, not a useless Disconnect.
+    // Without this second branch, the menu reports "Pod unreachable" on
+    // one line but offers only a Disconnect on the next — clicking does
+    // nothing because `tytus disconnect` SIGTERMs a long-dead PID.
+    out.tunnel_active = gateway_reachable;
 
     out
 }

@@ -751,10 +751,24 @@ fn format_uptime(secs: u64) -> String {
 fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
     match id {
         "connect" => {
-            spawn_detached("tytus", &["connect"]);
+            // Connect needs to run in a Terminal so the osascript/sudo
+            // prompt is visible and the user sees the progress output.
+            // A detached background spawn silently asks for credentials
+            // via a modal that sometimes never surfaces — leaving the
+            // user thinking the click did nothing. Terminal-based run
+            // also gives them the tunnel-up summary line they can
+            // screenshot if it fails.
+            open_in_terminal_simple(
+                "tytus connect; echo; echo 'Press Enter to close…'; read _"
+            );
         }
         "disconnect" => {
-            spawn_detached("tytus", &["disconnect"]);
+            // Same reasoning as connect: run in Terminal so the user
+            // sees the "tunnel-down OK" / failure output instead of a
+            // silent detached no-op.
+            open_in_terminal_simple(
+                "tytus disconnect; echo; echo 'Press Enter to close…'; read _"
+            );
         }
         "login" => {
             // `tytus login` opens a browser — must run in terminal so the user
