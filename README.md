@@ -10,17 +10,31 @@ rotated, your droplet migrates, or you switch agent runtimes.
 
 ```bash
 curl -fsSL https://get.traylinx.com/install.sh | bash
-tytus setup
+tytus login && tytus connect
 ```
 
-That's it. The wizard logs you in, allocates a pod, opens the tunnel, and
-runs a sample chat. After setup, your stable values for any AI tool are:
+That's it. `tytus login` provisions a **default pod** (agent-less, zero
+plan units) automatically, and `tytus connect` brings the WG tunnel up to
+it. AIL gateway access at `http://10.42.42.1:18080` works immediately —
+no agent install required, no plan units spent.
 
 ```bash
 eval "$(tytus env --export)"
 echo $OPENAI_BASE_URL    # http://10.42.42.1:18080/v1   (constant forever)
 echo $OPENAI_API_KEY     # sk-tytus-user-<32hex>          (per user, persistent)
 ```
+
+Need a specific agent runtime (NemoClaw, Hermes) on top? Install one
+separately — pod allocation and agent deployment are decoupled:
+
+```bash
+tytus agent catalog              # list installable agents
+tytus agent install nemoclaw     # allocate a pod slot + deploy NemoClaw
+tytus agent list                 # see what's running where
+```
+
+Or `tytus setup` walks you through login + default pod + agent picker in
+one interactive wizard.
 
 ---
 

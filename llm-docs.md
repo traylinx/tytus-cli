@@ -102,6 +102,27 @@ pod rotation, droplet migration, or octet reassignment.
 **Do not use `--raw` values in user-visible config files** — they break
 on the next pod rotation.
 
+## 5b. Default pod (AIL gateway, zero units)
+
+Every authenticated user has a **default pod** — an agent-less pod
+allocated at `tytus login` that exists solely to route the WG tunnel so
+the stable URL + stable key pair reach the droplet's SwitchAILocal
+gateway. Properties:
+
+- Costs **0 plan units** (independent of Explorer / Creator / Operator).
+- `agent_type: "none"` in `state.json`.
+- Allocated via `POST /pod/default` — idempotent, returns the same pod
+  on every call until revoked.
+- No agent container: the sidecar's built-in socat forwarder on
+  `10.42.42.1:18080` is what serves the AIL gateway.
+- Survives `tytus agent uninstall` on any pod: uninstalling an agent
+  stops the container but keeps the slot, so even a single-slot plan
+  never loses AIL access when swapping agents.
+
+When users ask "how do I just call your models without setting up an
+agent", the answer is: they already can — right after `tytus login`,
+the default pod + stable env pair from §5 just work.
+
 ## 6. Full command reference
 
 ```text
@@ -126,12 +147,49 @@ tytus setup                        Interactive wizard: login (if needed),
                                    first-run experiences.
 
 tytus connect [--pod NN] [--agent nemoclaw|hermes]
-                                   Allocate (or reuse) a pod, deploy the
-                                   agent if needed, elevate (osascript /
-                                   sudo -n / interactive sudo), spawn the
-                                   tunnel daemon, return immediately. The
-                                   daemon writes its PID to
-                                   /tmp/tytus/tunnel-NN.pid.
+                                   No flags: bring the tunnel up to the
+                                   user's default pod (agent-less, 0
+                                   units, always available). Allocates
+                                   the default pod on-the-fly if login
+                                   didn't (rare race).
+                                   --pod NN: connect to that specific pod.
+                                   --agent X: deprecated shim — equivalent
+                                   to `tytus agent install X && tytus
+                                   connect --pod <new>`. The tunnel is
+                                   activated via elevation (osascript /
+                                   sudo -n / interactive sudo); the daemon
+                                   writes its PID to /tmp/tytus/tunnel-NN.pid.
+
+tytus agent install <name> [--pod NN] [--force]
+                                   Install an agent runtime (nemoclaw,
+                                   hermes, …). Without --pod: allocate a
+                                   new pod slot and deploy the agent in
+                                   one shot (costs plan units per the
+                                   catalog). With --pod: deploy into that
+                                   existing slot; --force replaces an
+                                   existing agent on the slot.
+
+tytus agent uninstall <pod>        Stop + remove the agent container. The
+                                   pod slot stays allocated so AIL keeps
+                                   working through it; use `tytus revoke`
+                                   to fully free units.
+
+tytus agent replace <pod> <new> [--yes]
+                                   Uninstall + install on the same slot
+                                   (pod subnet stays stable so locked-in
+                                   tooling keeps working). Destroys the
+                                   old container's state. Prompts unless
+                                   --yes given.
+
+tytus agent list [--json]          Print all pods (default + agent-bearing)
+                                   with agent + tunnel status.
+
+tytus agent catalog [--refresh] [--json]
+                                   Fetch the installable-agent catalog
+                                   from Provider. Cached locally for 5
+                                   minutes; --refresh forces a live
+                                   fetch. Works offline against the
+                                   stale cache.
 
 tytus disconnect [--pod NN]        Read the PID file, send SIGTERM to the
                                    tunnel daemon. Allocation is preserved
@@ -323,6 +381,21 @@ ssh root@<droplet-ip> "curl -X POST -H 'X-Scalesys-Token: ...' http://localhost:
 # OR just:
 tytus restart                                # triggers DAM sync as a side effect
 ```
+
+### Recipe F — Call AIL without installing an agent
+Users on the free tier (or who just want raw gateway access) don't have
+to spend a unit on NemoClaw / Hermes — the default pod covers this.
+```bash
+tytus login          # provisions the default pod automatically
+tytus connect        # no --agent: brings the tunnel up to the default pod
+eval "$(tytus env --export)"
+curl -sS "$OPENAI_BASE_URL/chat/completions" \
+    -H "Authorization: Bearer $OPENAI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"ail-compound","messages":[{"role":"user","content":"hi"}]}'
+```
+Install an agent later — units are only spent when the user actually
+wants one: `tytus agent install nemoclaw`.
 
 ## 9. Error catalog
 
