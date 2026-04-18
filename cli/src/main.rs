@@ -3819,22 +3819,14 @@ async fn cmd_ui(
         std::process::exit(1);
     }
 
-    // Refuse to try if the tunnel isn't routing to THIS pod's subnet.
-    // Each WG tunnel routes one pod's /24 (e.g. pod 02 → 10.18.2.0/24).
-    // Cross-pod traffic is blocked by sidecar iptables per security
-    // invariants, so no amount of cleverness lets us reach a second pod
-    // over a tunnel bound to the first. The user has to disconnect and
-    // reconnect targetting the desired pod. Observed 2026-04-19: user
-    // had tunnel to pod 01, clicked "Open in Browser" on pod 02 → six
-    // seconds of connect-timeout and a blank browser tab.
-    let tunnel_targets_this_pod = state.pods.iter().any(|p| {
-        p.pod_id == pod.pod_id && p.tunnel_iface.is_some()
-    });
-    // Heuristic fallback for the tunnel_iface-was-null bug: check if any
-    // utun has the pod's subnet in its peer address. We compare the
-    // first three octets of pod.ai_endpoint (e.g. "10.18.2.1") against
-    // live ifconfig output. Belt + suspenders until the state.json
-    // preservation fix propagates through every cached state file.
+    // Each WG tunnel routes exactly one pod's /24 (e.g. pod 02 →
+    // 10.18.2.0/24). Cross-pod traffic is blocked by sidecar iptables per
+    // the security invariants — so if the current tunnel doesn't target
+    // the pod the user asked for, the forwarder would just time out
+    // silently. When that happens we auto-swap: disconnect the current
+    // tunnel and reconnect targeting the requested pod. The user already
+    // said "open pod N" by running `tytus ui --pod N`, so reinterpret the
+    // intent as "get me into pod N whatever that takes".
     let pod_subnet_prefix = pod.ai_endpoint.as_deref()
         .and_then(|s| s.strip_prefix("http://"))
         .and_then(|s| s.split(':').next())
@@ -3843,26 +3835,33 @@ async fn cmd_ui(
             if parts.len() == 4 { Some(format!("{}.{}.{}.", parts[0], parts[1], parts[2])) }
             else { None }
         });
-    let tunnel_reaches_live = pod_subnet_prefix.as_ref().map(|prefix| {
+    let tunnel_reaches_this_pod = pod_subnet_prefix.as_ref().map(|prefix| {
         let out = std::process::Command::new("ifconfig").output();
         match out {
             Ok(o) => String::from_utf8_lossy(&o.stdout).lines().any(|l| l.contains(prefix)),
             Err(_) => false,
         }
     }).unwrap_or(false);
-    if !tunnel_targets_this_pod && !tunnel_reaches_live {
-        eprintln!(
-            "No tunnel to pod {}. Each tunnel routes exactly one pod's subnet —\n\
-             cross-pod traffic is blocked by sidecar firewall rules.\n\
-             \n\
-             To open this pod's UI, switch your tunnel:\n  \
-               tytus disconnect\n  \
-               tytus connect --pod {}\n  \
-               tytus ui --pod {}",
-            pod.pod_id, pod.pod_id, pod.pod_id,
-        );
-        std::process::exit(1);
+
+    if !tunnel_reaches_this_pod {
+        if !json {
+            println!("→ Tunnel isn't routing to pod {} yet — switching now.", pod.pod_id);
+            println!("  (each WireGuard tunnel serves one pod; cross-pod traffic is firewalled)");
+        }
+        // Tear down whatever is up, then bring up a tunnel for the target
+        // pod. cmd_disconnect with no filter reaps every live pidfile;
+        // cmd_connect handles sudo elevation the same way a fresh
+        // `tytus connect --pod NN` would.
+        cmd_disconnect(None, false).await;
+        cmd_connect(http, Some(pod.pod_id.clone()), false).await;
     }
+
+    // Re-resolve `pod` after the potential swap so upstream resolution
+    // sees post-connect agent_endpoint / ai_endpoint / tunnel_iface.
+    let pod = {
+        let fresh = CliState::load();
+        fresh.pods.iter().find(|p| p.pod_id == pod.pod_id).cloned().unwrap_or(pod)
+    };
 
     // Resolve upstream: agent_endpoint is "10.X.Y.1:3000" (nemoclaw) or
     // "10.X.Y.1:8642" (hermes). If missing, derive from ai_endpoint.
