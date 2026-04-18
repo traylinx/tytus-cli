@@ -350,9 +350,13 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
             Ok(result) => {
                 update_tokens(&mut state, &result, &original_email);
                 sync_tytus(&mut state, http).await;
+                let default_msg = ensure_default_pod(&mut state, http).await;
                 state.save();
                 if json { print_json_status(&state); }
-                else { println!("✓ Logged in as {}", state.email.as_deref().unwrap_or("?")); }
+                else {
+                    println!("✓ Logged in as {}", state.email.as_deref().unwrap_or("?"));
+                    if let Some(msg) = default_msg { println!("{}", msg); }
+                }
                 return;
             }
             Err(_) => {
@@ -398,6 +402,7 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
     let _ = atomek_auth::KeychainStore::store_last_email(&result.user.email);
 
     sync_tytus(&mut state, http).await;
+    let default_msg = ensure_default_pod(&mut state, http).await;
     state.save();
 
     if json {
@@ -406,6 +411,65 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
         println!("✓ Logged in as {}", result.user.email);
         if let Some(ref tier) = state.tier {
             println!("  Plan: {}", tier);
+        }
+        if let Some(msg) = default_msg { println!("{}", msg); }
+    }
+}
+
+/// Idempotently ensure the user has a default (agent-less, 0-unit) pod so
+/// AIL access at http://10.42.42.1:18080 works right after `tytus login`.
+///
+/// Returns a human-readable status line for the login output, or `None`
+/// if we can't or shouldn't show one (no subscription yet, silent
+/// capacity failure, etc). Never panics and never fails the login: a
+/// default-pod hiccup must not lock the user out of their account.
+///
+/// Called on every login (fresh browser flow AND RT auto-refresh) per
+/// SPRINT-AIL-DEFAULT-POD phase A6.
+async fn ensure_default_pod(state: &mut CliState, http: &atomek_core::HttpClient) -> Option<String> {
+    let (sk, auid) = match (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
+        (Some(s), Some(a)) => (s.clone(), a.clone()),
+        _ => return None, // no subscription / Wannolot Pass yet
+    };
+
+    // Always POST /pod/default. The endpoint is idempotent server-side, and
+    // unconditionally calling it is the only way to guarantee we pick up a
+    // fresh `stable_user_key` — `sync_tytus`'s pod list (from /pod/status)
+    // returns a "thin" entry without the user key, so relying on its
+    // presence to short-circuit would leave the user unable to use AIL.
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+    match atomek_pods::request_default_pod(&client).await {
+        Ok(alloc) => {
+            state.pods.retain(|p| p.pod_id != alloc.pod_id);
+            state.pods.push(PodEntry {
+                pod_id: alloc.pod_id.clone(),
+                droplet_id: alloc.droplet_id.clone(),
+                droplet_ip: alloc.droplet_ip.clone(),
+                ai_endpoint: alloc.ai_endpoint.clone(),
+                pod_api_key: alloc.pod_api_key.clone(),
+                agent_type: Some("none".to_string()),
+                agent_endpoint: None,
+                tunnel_iface: None,
+                stable_ai_endpoint: alloc.stable_ai_endpoint.clone(),
+                stable_user_key: alloc.stable_user_key.clone(),
+            });
+            // Message verbatim per sprint doc §6 A6 acceptance criterion.
+            // The stable endpoint at 10.42.42.1:18080 is reachable once the
+            // tunnel is up (Phase B2 makes `tytus connect` activate the
+            // default pod's tunnel; the tray auto-probes and can activate
+            // on its own). A6 scope is allocation only.
+            Some(format!(
+                "✓ Default pod ready at {}",
+                alloc.stable_ai_endpoint.as_deref().unwrap_or("http://10.42.42.1:18080")
+            ))
+        }
+        Err(atomek_core::AtomekError::NoCapacity { .. }) => {
+            Some("⚠ Default pod unavailable (no capacity). Retry with: tytus connect".to_string())
+        }
+        Err(e) => {
+            // Don't fail login on a default-pod blip; the user can retry via
+            // `tytus connect` once the backend recovers.
+            Some(format!("⚠ Default pod not provisioned: {}. Retry with: tytus connect", e))
         }
     }
 }
