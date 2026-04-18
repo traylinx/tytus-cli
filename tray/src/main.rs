@@ -457,9 +457,16 @@ fn build_menu(state: &TrayState) -> Menu {
     let _ = menu.append(&PredefinedMenuItem::separator());
 
     // ── Primary action + tunnel utilities ─────────────────
-    if !state.daemon_running {
-        // Daemon-controls section below emits Start Daemon.
-    } else if !state.logged_in {
+    //
+    // Connect / Disconnect must be independent of daemon_running. The
+    // daemon is a background token-refresh process; the WG tunnel lives
+    // in its own root process spawned by `tytus connect`. A dead daemon
+    // means token refresh is stale, not that the tunnel is broken — and
+    // conversely a user with an offline daemon still needs a path to
+    // bring the tunnel up. Gating Connect on daemon_running is the bug
+    // that made the previous tray tell users "click Connect" without
+    // rendering the button (screenshot 2026-04-18).
+    if !state.logged_in {
         let _ = menu.append(&MenuItem::with_id("login", "Sign In…", true, None));
         let _ = menu.append(&PredefinedMenuItem::separator());
     } else if state.tunnel_active {
@@ -482,6 +489,8 @@ fn build_menu(state: &TrayState) -> Menu {
 
         let _ = menu.append(&PredefinedMenuItem::separator());
     } else {
+        // Logged in but tunnel not active — show Connect, regardless of
+        // whether the daemon is running.
         let _ = menu.append(&MenuItem::with_id("connect", "Connect", true, None));
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
