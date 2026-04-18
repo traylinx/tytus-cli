@@ -174,12 +174,11 @@ tytus agent uninstall <pod>        Stop + remove the agent container. The
                                    working through it; use `tytus revoke`
                                    to fully free units.
 
-tytus agent replace <pod> <new> [--yes]
-                                   Uninstall + install on the same slot
-                                   (pod subnet stays stable so locked-in
-                                   tooling keeps working). Destroys the
-                                   old container's state. Prompts unless
-                                   --yes given.
+                                   There is no `tytus agent replace`. If
+                                   a user wants a different agent on a
+                                   slot, they `tytus revoke <pod>` and
+                                   `tytus agent install <new>` — add and
+                                   delete, never switch.
 
 tytus agent list [--json]          Print all pods (default + agent-bearing)
                                    with agent + tunnel status.

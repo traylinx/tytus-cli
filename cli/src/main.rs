@@ -79,17 +79,6 @@ enum AgentAction {
         /// Pod ID to uninstall from
         pod: String,
     },
-    /// Uninstall + install on the same slot. Destroys the old container's
-    /// state (configs, volumes). Requires confirmation unless --yes given.
-    Replace {
-        /// Pod ID holding the agent to replace
-        pod: String,
-        /// New agent type to install
-        new_name: String,
-        /// Skip the "are you sure" prompt
-        #[arg(long)]
-        yes: bool,
-    },
     /// List all pods with their agent status (default + agent-bearing).
     List,
     /// Show the installable agent catalog (cached locally for 5 min).
@@ -1304,9 +1293,6 @@ async fn cmd_agent(http: &atomek_core::HttpClient, action: AgentAction, json: bo
             let _ = cmd_agent_install(http, &name, pod, force, json).await;
         }
         AgentAction::Uninstall { pod } => cmd_agent_uninstall(http, &pod, json).await,
-        AgentAction::Replace { pod, new_name, yes } => {
-            cmd_agent_replace(http, &pod, &new_name, yes, json).await
-        }
         AgentAction::List => cmd_agent_list(http, json).await,
         AgentAction::Catalog { refresh } => cmd_agent_catalog(http, refresh, json).await,
     }
@@ -1452,51 +1438,6 @@ async fn cmd_agent_uninstall(http: &atomek_core::HttpClient, pod_id: &str, json:
             std::process::exit(1);
         }
     }
-}
-
-async fn cmd_agent_replace(
-    http: &atomek_core::HttpClient,
-    pod_id: &str,
-    new_name: &str,
-    yes: bool,
-    json: bool,
-) {
-    if !yes && wizard::is_interactive() {
-        let prompt = format!(
-            "Replace agent on pod {} with {}? This destroys the existing \
-             container's state.",
-            pod_id, new_name
-        );
-        if !wizard::confirm(&prompt, false).unwrap_or(false) {
-            eprintln!("Cancelled.");
-            return;
-        }
-    }
-
-    // Best-effort stop: if the slot is already empty or the container has
-    // already exited, `stop_agent` will return a non-2xx and cmd_agent_uninstall
-    // would exit(1), aborting the replace. Instead call stop directly and log.
-    // The subsequent deploy tolerates an empty slot.
-    let mut state = CliState::load();
-    if !state.is_logged_in() {
-        eprintln!("Not logged in. Run: tytus login");
-        std::process::exit(1);
-    }
-    if let Err(e) = ensure_token(&mut state, http).await {
-        eprintln!("Token refresh failed: {}. Run: tytus login", e);
-        std::process::exit(1);
-    }
-    let (sk, auid) = get_credentials(&mut state, http).await;
-    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
-
-    if !json { eprintln!("Stopping existing agent on pod {} (best-effort)...", pod_id); }
-    if let Err(e) = atomek_pods::stop_agent(&client, pod_id).await {
-        // Typical reasons: slot already empty, container already exited.
-        // Not fatal — proceed to install.
-        if !json { eprintln!("  stop skipped: {}", e); }
-    }
-
-    let _ = cmd_agent_install(http, new_name, Some(pod_id.to_string()), true, json).await;
 }
 
 async fn cmd_agent_list(http: &atomek_core::HttpClient, json: bool) {

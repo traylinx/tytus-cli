@@ -528,26 +528,16 @@ fn build_menu(state: &TrayState) -> Menu {
                     format!("pod_{}_restart", p.pod_id),
                     "  Restart Agent", true, None,
                 ));
-                // Replace Agent: offer the OTHER agent type. `tytus agent
-                // replace` keeps the slot allocated and swaps the container
-                // only — unlike the pre-sprint "Switch" which did a full
-                // revoke+reallocate that broke tooling locked to the
-                // per-pod subnet IP.
-                let other = match p.agent_type.as_str() {
-                    "hermes" => ("nemoclaw", "NemoClaw", 1u32),
-                    _ => ("hermes", "Hermes", 2u32),
-                };
-                let spare_after_free = state.units_used.saturating_sub(p.units());
-                let can_swap = state.units_limit == 0
-                    || state.units_limit.saturating_sub(spare_after_free) >= other.2;
-                let swap_label = format!("  Replace with {} ({} unit{})",
-                    other.1, other.2, if other.2 == 1 { "" } else { "s" });
-                let _ = pods_sub.append(&MenuItem::with_id(
-                    format!("pod_{}_replace_{}", p.pod_id, other.0),
-                    &swap_label, can_swap, None,
-                ));
                 // Uninstall Agent: keeps the pod slot allocated (AIL still
                 // works through it), drops the container. SPRINT §4.3.
+                //
+                // There is intentionally NO "Replace with X" action here.
+                // The mental model is add + delete only — if a user wants
+                // to change the agent on a pod, they revoke the pod and
+                // install a fresh one with the new type. Prevents the
+                // subtle trap of slot-preserving "replace" looking like a
+                // safe in-place swap while still destroying container
+                // workspace state. (Decision: 2026-04-18, post-sprint UX.)
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_{}_uninstall", p.pod_id),
                     "  Uninstall Agent  (keeps pod)", true, None,
@@ -812,29 +802,6 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                     "tytus revoke {}; echo; echo 'Press Enter to close…'; read _",
                     shell_escape(pod_id),
                 ));
-            }
-        }
-        // Agent replace = stop old container + deploy new on same slot.
-        // `tytus agent replace` (Phase B) keeps the WG subnet stable —
-        // unlike the pre-sprint "Switch" which revoked+reallocated.
-        other if other.starts_with("pod_") && other.contains("_replace_") => {
-            // Parse `pod_<id>_replace_<agent>`
-            let rest = other.trim_start_matches("pod_");
-            if let Some((pod_id, agent)) = rest.split_once("_replace_") {
-                if confirm_dialog(
-                    &format!("Replace agent on pod {} with {}?",
-                        pod_id,
-                        match agent { "hermes" => "Hermes", "nemoclaw" => "NemoClaw", o => o }),
-                    "The pod slot stays allocated and keeps its subnet; only the agent container is replaced. Existing container state (volumes, in-memory sessions) is lost.",
-                ) {
-                    let script = format!(
-                        "tytus agent replace {pid} {agent} --yes; \
-                         echo; echo 'Press Enter to close…'; read _",
-                        pid = shell_escape(pod_id),
-                        agent = shell_escape(agent),
-                    );
-                    open_in_terminal_simple(&script);
-                }
             }
         }
         // Agent uninstall = stop container, keep pod slot (AIL still works).
