@@ -1903,6 +1903,7 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, json: bool, ht
         if let Some(ref ep) = pod.ai_endpoint {
             println!("{}AIL_URL={}/v1", prefix, ep);
             println!("{}OPENAI_BASE_URL={}/v1", prefix, ep);
+            println!("{}ANTHROPIC_BASE_URL={}", prefix, ep);
             println!("{}TYTUS_AI_GATEWAY={}", prefix, ep);
         }
         if let Some(ref ep) = pod.agent_endpoint {
@@ -1911,12 +1912,16 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, json: bool, ht
         if let Some(ref key) = pod.pod_api_key {
             println!("{}AIL_API_KEY={}", prefix, key);
             println!("{}OPENAI_API_KEY={}", prefix, key);
+            println!("{}ANTHROPIC_API_KEY={}", prefix, key);
             println!("{}TYTUS_API_KEY={}", prefix, key);
         }
     } else {
         // Stable values — the pair to paste into Cursor / Claude Desktop /
-        // etc. Canonical name is AIL_*; OPENAI_* + TYTUS_* kept as aliases
-        // so OpenAI-compatible clients and legacy scripts keep working.
+        // etc. Canonical name is AIL_*; OPENAI_* / ANTHROPIC_* / TYTUS_*
+        // kept as aliases so OpenAI-compatible clients, the Anthropic
+        // SDK, and legacy scripts all keep working without user config.
+        // Note: ANTHROPIC_BASE_URL is the bare origin (no /v1) because
+        // the Anthropic SDK appends /v1/messages itself.
         let endpoint = pod.stable_ai_endpoint.as_deref()
             .unwrap_or("http://10.42.42.1:18080");
         let key = pod.stable_user_key.as_deref()
@@ -1926,6 +1931,8 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, json: bool, ht
         println!("{}AIL_API_KEY={}", prefix, key);
         println!("{}OPENAI_BASE_URL={}/v1", prefix, endpoint);
         println!("{}OPENAI_API_KEY={}", prefix, key);
+        println!("{}ANTHROPIC_BASE_URL={}", prefix, endpoint);
+        println!("{}ANTHROPIC_API_KEY={}", prefix, key);
         println!("{}TYTUS_AI_GATEWAY={}", prefix, endpoint);
         println!("{}TYTUS_API_KEY={}", prefix, key);
     }

@@ -84,6 +84,11 @@ eval "$(tytus env --export)"
 # by convention; these always track AIL_* above):
 # → OPENAI_BASE_URL=http://10.42.42.1:18080/v1
 # → OPENAI_API_KEY=sk-tytus-user-<32hex>
+# Anthropic-compatible aliases (Anthropic Python/TS/Ruby SDK, Claude
+# Code with a custom base URL, Anthropic-native tooling). Note the
+# BASE_URL has no /v1 suffix — the Anthropic SDK appends it itself:
+# → ANTHROPIC_BASE_URL=http://10.42.42.1:18080
+# → ANTHROPIC_API_KEY=sk-tytus-user-<32hex>
 # Legacy TYTUS_* aliases kept for pre-sprint scripts:
 # → TYTUS_AI_GATEWAY=http://10.42.42.1:18080
 # → TYTUS_API_KEY=sk-tytus-user-<32hex>

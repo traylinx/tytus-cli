@@ -539,7 +539,9 @@ fn build_menu(state: &TrayState) -> Menu {
         let has_key = key.is_some();
         let _ = info_sub.append(&MenuItem::with_id("copy_ail_url", "Copy AIL_URL", true, None));
         let _ = info_sub.append(&MenuItem::with_id("copy_ail_key", "Copy AIL_API_KEY", has_key, None));
-        let _ = info_sub.append(&MenuItem::with_id("copy_ail_exports", "Copy export block (AIL_* + OpenAI aliases)", has_key, None));
+        let _ = info_sub.append(&MenuItem::with_id("copy_ail_exports", "Copy export block (all aliases)", has_key, None));
+        let _ = info_sub.append(&MenuItem::with_id("copy_openai_block", "Copy as OpenAI exports", has_key, None));
+        let _ = info_sub.append(&MenuItem::with_id("copy_anthropic_block", "Copy as Anthropic exports", has_key, None));
         let _ = info_sub.append(&MenuItem::with_id("copy_ail_json", "Copy JSON ({url, api_key})", has_key, None));
 
         let _ = info_sub.append(&PredefinedMenuItem::separator());
@@ -819,6 +821,36 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         "copy_ail_exports" => {
             copy_connection_info(state);
         }
+        "copy_openai_block" => {
+            let (url, key) = connection_pair(state);
+            if let Some(k) = key {
+                copy_to_clipboard(&format!(
+                    "export OPENAI_BASE_URL=\"{}/v1\"\n\
+                     export OPENAI_API_KEY=\"{}\"\n\
+                     export OPENAI_API_BASE=\"{}/v1\"\n",
+                    url, k, url
+                ));
+                notify("Tytus", "OpenAI exports copied to clipboard.");
+            } else {
+                notify("Tytus", "No stable key yet — run tytus login first.");
+            }
+        }
+        "copy_anthropic_block" => {
+            let (url, key) = connection_pair(state);
+            if let Some(k) = key {
+                // ANTHROPIC_BASE_URL is the bare origin (no /v1) — the
+                // SDK appends /v1/messages itself, so double-prefixing
+                // would 404.
+                copy_to_clipboard(&format!(
+                    "export ANTHROPIC_API_KEY=\"{}\"\n\
+                     export ANTHROPIC_BASE_URL=\"{}\"\n",
+                    k, url
+                ));
+                notify("Tytus", "Anthropic exports copied to clipboard.");
+            } else {
+                notify("Tytus", "No stable key yet — run tytus login first.");
+            }
+        }
         "copy_ail_json" => {
             let (url, key) = connection_pair(state);
             let json = serde_json::json!({
@@ -1083,19 +1115,29 @@ fn copy_connection_info(state: &Arc<Mutex<TrayState>>) {
         return;
     };
 
+    // Anthropic's gateway path is /v1 too and its SDKs route calls to
+    // {base}/v1/messages. We strip the trailing /v1 from AIL_URL when
+    // setting ANTHROPIC_BASE_URL so the SDK doesn't double-append.
+    let ail_bare = url.as_str();  // e.g. http://10.42.42.1:18080 (no /v1)
     let text = format!(
         "# AIL — your private AI gateway (canonical names)\n\
-         export AIL_URL=\"{base}/v1\"\n\
+         export AIL_URL=\"{bare}/v1\"\n\
          export AIL_API_KEY=\"{key}\"\n\
          \n\
-         # OpenAI-compatible aliases — needed by Claude Code, Cursor,\n\
-         # OpenCode, Continue, Aider and every other tool that reads\n\
-         # OPENAI_BASE_URL / OPENAI_API_KEY by convention. Keep these\n\
-         # even if you prefer the AIL_ names in your own scripts.\n\
+         # OpenAI-compatible aliases — used by Claude Code, Cursor,\n\
+         # OpenCode, Continue, Aider and every tool that reads\n\
+         # OPENAI_BASE_URL / OPENAI_API_KEY by convention.\n\
          export OPENAI_BASE_URL=\"$AIL_URL\"\n\
          export OPENAI_API_KEY=\"$AIL_API_KEY\"\n\
-         export OPENAI_API_BASE=\"$AIL_URL\"\n",
-        base = url,
+         export OPENAI_API_BASE=\"$AIL_URL\"\n\
+         \n\
+         # Anthropic-compatible aliases — used by the Anthropic SDK\n\
+         # (anthropic Python/TS/Ruby), Claude Code with a custom base\n\
+         # URL, and any Anthropic-native tooling. ANTHROPIC_BASE_URL is\n\
+         # the bare origin (no /v1) because the SDK appends /v1/messages.\n\
+         export ANTHROPIC_API_KEY=\"$AIL_API_KEY\"\n\
+         export ANTHROPIC_BASE_URL=\"{bare}\"\n",
+        bare = ail_bare,
         key = key,
     );
 
