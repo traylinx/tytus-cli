@@ -118,8 +118,13 @@ impl PodInfo {
     }
     /// Human label for menus. Falls back to the raw id if we don't know it.
     pub fn display_name(&self) -> String {
+        // User-facing names. Internal agent_type identifiers (nemoclaw =
+        // the NemoClaw safety harness that runs OpenClaw inside) stay as
+        // the Docker image + Scalesys enum, but the menu always renders
+        // the public brand name ("OpenClaw"). Same for any future harness
+        // rename — this is the one place to keep in sync.
         match self.agent_type.as_str() {
-            "nemoclaw" => "NemoClaw".into(),
+            "nemoclaw" => "OpenClaw".into(),
             "hermes" => "Hermes".into(),
             "none" => "Default (AIL only)".into(),
             other if !other.is_empty() => other.to_string(),
@@ -570,9 +575,14 @@ fn build_menu(state: &TrayState) -> Menu {
             let _ = pods_sub.append(&PredefinedMenuItem::separator());
         } else {
             // Surface the default pod (agent-less, 0 units) on its own row
-            // so users see AIL is always-on and not confused by a mysterious
-            // "Default (AIL only)" appearing in the agent swap/revoke UI
-            // where those actions don't make sense. Per SPRINT §4.3.
+            // as informational — no actions. It's universal, costs
+            // nothing, and auto-reprovisions on every `tytus login`, so
+            // there's nothing a user ever gains from "revoking" it (the
+            // next login would just allocate another one, churning the
+            // slot and the stable key map without freeing units). Power
+            // users who genuinely want to release the droplet slot can
+            // still `tytus revoke <pod_id>` from the CLI. Per §4.1 +
+            // user feedback 2026-04-19.
             for p in state.pods.iter().filter(|p| p.is_default()) {
                 let header = format!(
                     "Default Pod {} — AIL only  (0 units)",
@@ -583,10 +593,6 @@ fn build_menu(state: &TrayState) -> Menu {
                     &header,
                     false,
                     None,
-                ));
-                let _ = pods_sub.append(&MenuItem::with_id(
-                    format!("pod_{}_revoke", p.pod_id),
-                    "  Revoke Default Pod", true, None,
                 ));
                 let _ = pods_sub.append(&PredefinedMenuItem::separator());
             }
@@ -601,6 +607,18 @@ fn build_menu(state: &TrayState) -> Menu {
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_header_{}", p.pod_id),
                     &header, false, None,
+                ));
+                // Open the agent's web UI via tytus ui (localhost forwarder
+                // + browser launch). Only meaningful for agents that
+                // actually expose a web UI on the pod — currently both
+                // OpenClaw (port 3000) and Hermes (port 8642). The tunnel
+                // must be up; the handler prints a clear message if it
+                // isn't. Per user request 2026-04-19 "we need to be able
+                // to reach always the tytus pod openclaw or hermes agent
+                // via the browser".
+                let _ = pods_sub.append(&MenuItem::with_id(
+                    format!("pod_{}_open", p.pod_id),
+                    "  Open in Browser", true, None,
                 ));
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_{}_restart", p.pod_id),
@@ -642,7 +660,7 @@ fn build_menu(state: &TrayState) -> Menu {
         let hermes_ok = state.units_limit == 0 || remaining >= 2;
         let _ = add_sub.append(&MenuItem::with_id(
             "install_agent_nemoclaw",
-            format!("NemoClaw  (1 unit){}", if nemo_ok { "" } else { "  — not enough units" }),
+            format!("OpenClaw  (1 unit){}", if nemo_ok { "" } else { "  — not enough units" }),
             nemo_ok, None,
         ));
         let _ = add_sub.append(&MenuItem::with_id(
@@ -935,6 +953,19 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         "quit" => {
             single_instance::release();
             std::process::exit(0);
+        }
+        // Open the pod's agent web UI via a localhost forwarder. `tytus
+        // ui` binds 127.0.0.1:3000 (or next free) → pod's agent port,
+        // opens the default browser, blocks until Ctrl+C. Run it in
+        // Terminal so the forwarder stays alive and the user sees the
+        // URL + "Press Ctrl+C to stop" hint. Closing the Terminal stops
+        // the forwarder.
+        other if other.starts_with("pod_") && other.ends_with("_open") => {
+            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open");
+            open_in_terminal_simple(&format!(
+                "tytus ui --pod {}; echo; echo 'Press Enter to close…'; read _",
+                shell_escape(pod_id),
+            ));
         }
         // Agent container restart (no state loss).
         other if other.starts_with("pod_") && other.ends_with("_restart") => {

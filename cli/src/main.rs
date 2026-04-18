@@ -64,7 +64,8 @@ enum AgentAction {
     /// Install an agent. Without --pod, allocates a new pod. With --pod,
     /// deploys into that pod (use --force to replace an existing agent).
     Install {
-        /// Agent type (nemoclaw | hermes | …). Must match a catalog entry.
+        /// Agent type — accepts `openclaw` (aliased to `nemoclaw` on the
+        /// backend), `hermes`, or any other id from `tytus agent catalog`.
         name: String,
         /// Existing pod slot to install into. Omit to allocate a new slot.
         #[arg(short, long)]
@@ -1442,6 +1443,20 @@ async fn cmd_agent(http: &atomek_core::HttpClient, action: AgentAction, json: bo
     }
 }
 
+/// Normalize a user-provided agent name to the backend (Scalesys + DAM)
+/// identifier. The public brand name is "OpenClaw" but the Docker image +
+/// agent_type enum is `nemoclaw` (the NemoClaw safety harness that runs
+/// OpenClaw inside). Accepting the alias lets users type either name.
+///
+/// Keep this list short. If the catalog grows, make the Provider return
+/// an `aliases` array per agent and resolve client-side from there.
+fn normalize_agent_name(input: &str) -> String {
+    match input.to_ascii_lowercase().as_str() {
+        "openclaw" => "nemoclaw".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Install an agent. Returns the pod id the agent landed on so callers
 /// (notably the `tytus connect --agent X` shim) can activate the tunnel
 /// targetting the right slot instead of defaulting back to the default pod.
@@ -1452,6 +1467,10 @@ async fn cmd_agent_install(
     force: bool,
     json: bool,
 ) -> Option<String> {
+    // Accept `openclaw` as the public name; backend still speaks
+    // `nemoclaw` (the internal harness identifier).
+    let name = normalize_agent_name(name);
+    let name = name.as_str();
     let mut state = CliState::load();
     if !state.is_logged_in() {
         eprintln!("Not logged in. Run: tytus login");
@@ -1619,7 +1638,14 @@ async fn cmd_agent_list(http: &atomek_core::HttpClient, json: bool) {
         let agent = p.agent_type.as_deref().unwrap_or("-");
         let tunnel = p.tunnel_iface.as_deref().unwrap_or("down");
         let endpoint = p.stable_ai_endpoint.as_deref().unwrap_or("http://10.42.42.1:18080");
-        let label = if agent == "none" { "default" } else { agent };
+        // Display the public brand name; keep the internal identifier
+        // consistent in --json output (elsewhere) for scripting.
+        let label = match agent {
+            "none" => "default",
+            "nemoclaw" => "OpenClaw",
+            "hermes" => "Hermes",
+            other => other,
+        };
         println!("{:<6} {:<12} {:<10} {}", p.pod_id, label, tunnel, endpoint);
     }
 }
@@ -2478,18 +2504,24 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
     // ── Step 2: Choose agent type ──
     wizard::print_step(2, total_steps, "Choose your AI agent");
     println!();
-    wizard::print_info("NemoClaw — lightweight assistant (1 unit, good for most tasks)");
+    wizard::print_info("OpenClaw — lightweight assistant (1 unit, good for most tasks)");
     wizard::print_info("Hermes   — advanced reasoning agent (2 units, better for complex tasks)");
     println!();
 
     let agent = if state.pods.is_empty() {
-        match wizard::select("Which agent?", &["nemoclaw (recommended)", "hermes"]) {
-            Ok(s) if s.starts_with("hermes") => "hermes",
-            _ => "nemoclaw",
+        match wizard::select("Which agent?", &["OpenClaw (recommended)", "Hermes"]) {
+            Ok(s) if s.to_ascii_lowercase().starts_with("hermes") => "hermes",
+            _ => "nemoclaw", // backend identifier; public brand is OpenClaw
         }
     } else {
         let first_agent = state.pods[0].agent_type.clone().unwrap_or_else(|| "nemoclaw".to_string());
-        wizard::print_ok(&format!("Using existing pod ({})", first_agent));
+        let display = match first_agent.as_str() {
+            "nemoclaw" => "OpenClaw",
+            "hermes" => "Hermes",
+            "none" => "Default (AIL only)",
+            other => other,
+        };
+        wizard::print_ok(&format!("Using existing pod ({})", display));
         // Leak is fine here — agent is used as &str for a single call
         Box::leak(first_agent.into_boxed_str())
     };
