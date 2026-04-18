@@ -198,12 +198,34 @@ enum Commands {
         #[arg(value_enum, default_value = "status")]
         action: DaemonAction,
     },
+    /// Install / uninstall the macOS Tytus.app bundle + launch-at-login hook.
+    /// Makes tytus-tray findable in Spotlight, draggable to the Dock, and
+    /// auto-starts it on every login (single-instance guard prevents dupes).
+    /// Same model as Ollama / Docker Desktop: quit for the session, restart
+    /// via Spotlight, comes back on reboot.
+    Tray {
+        #[arg(value_enum, default_value = "status")]
+        action: TrayAction,
+    },
     /// (internal) Activate tunnel from a temp config file — called by elevated helper
     #[command(hide = true)]
     TunnelUp {
         /// Path to temp JSON file with tunnel config
         config_file: String,
     },
+}
+
+#[derive(Clone, ValueEnum, Debug)]
+enum TrayAction {
+    /// Install Tytus.app in /Applications + LaunchAgent for auto-start
+    Install,
+    /// Remove the .app bundle and LaunchAgent
+    Uninstall,
+    /// Show what's installed
+    Status,
+    /// Start the tray right now (open /Applications/Tytus.app if present,
+    /// otherwise fall back to ~/bin/tytus-tray)
+    Start,
 }
 
 #[tokio::main]
@@ -251,6 +273,7 @@ async fn main() {
         Some(Commands::Ui { pod, port, no_open }) => cmd_ui(&http, pod, port, no_open, cli.json).await,
         Some(Commands::Doctor) => cmd_doctor(&http, cli.json).await,
         Some(Commands::Daemon { action }) => cmd_daemon(action, cli.json).await,
+        Some(Commands::Tray { action }) => cmd_tray(action, cli.json),
         // Hidden subcommand: called by elevated helper to activate tunnel from a temp config file
         Some(Commands::TunnelUp { config_file }) => cmd_tunnel_up(&config_file, cli.json).await,
     }
@@ -2353,7 +2376,11 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/unknown".to_string());
         let plist_dir = std::path::PathBuf::from(&home).join("Library/LaunchAgents");
+        // Two agents: one oneshot that brings the tunnel up at login, one
+        // persistent daemon that keeps refreshing tokens 24/7 so the RT never
+        // expires server-side. Both are managed atomically by this subcommand.
         let plist_path = plist_dir.join("com.traylinx.tytus.plist");
+        let daemon_plist_path = plist_dir.join("com.traylinx.tytus.daemon.plist");
         let exe = std::env::current_exe()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
@@ -2365,6 +2392,7 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                     eprintln!("Failed to create LaunchAgents dir: {}", e);
                     std::process::exit(1);
                 }
+                // Oneshot: run `tytus connect` once at login to activate tunnel.
                 let plist = format!(
                     r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -2402,51 +2430,120 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                     eprintln!("Failed to write plist: {}", e);
                     std::process::exit(1);
                 }
-                // Load the agent so it starts now and runs at every subsequent login
-                let _ = std::process::Command::new("launchctl")
-                    .args(["unload", plist_path.to_str().unwrap_or_default()])
-                    .output();
-                let load_result = std::process::Command::new("launchctl")
+                // Persistent daemon: `tytus daemon run` keeps refreshing tokens
+                // forever. KeepAlive restarts it if it ever exits; ThrottleInterval
+                // prevents tight respawn loops if something is genuinely broken.
+                let daemon_plist = format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.traylinx.tytus.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>daemon</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/tytus/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/tytus/daemon.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{home}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>TYTUS_HEADLESS</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
+"#
+                );
+                if let Err(e) = std::fs::write(&daemon_plist_path, daemon_plist) {
+                    eprintln!("Failed to write daemon plist: {}", e);
+                    std::process::exit(1);
+                }
+                // (Re)load both agents.
+                for p in [&plist_path, &daemon_plist_path] {
+                    let _ = std::process::Command::new("launchctl")
+                        .args(["unload", p.to_str().unwrap_or_default()])
+                        .output();
+                }
+                let load_connect = std::process::Command::new("launchctl")
                     .args(["load", "-w", plist_path.to_str().unwrap_or_default()])
                     .output();
-                let ok = load_result.map(|o| o.status.success()).unwrap_or(false);
+                let load_daemon = std::process::Command::new("launchctl")
+                    .args(["load", "-w", daemon_plist_path.to_str().unwrap_or_default()])
+                    .output();
+                let ok_connect = load_connect.map(|o| o.status.success()).unwrap_or(false);
+                let ok_daemon = load_daemon.map(|o| o.status.success()).unwrap_or(false);
                 if json {
                     println!(
                         "{}",
                         serde_json::json!({
                             "action": "install",
                             "plist_path": plist_path.to_string_lossy(),
-                            "loaded": ok
+                            "daemon_plist_path": daemon_plist_path.to_string_lossy(),
+                            "loaded": ok_connect,
+                            "daemon_loaded": ok_daemon
                         })
                     );
                 } else {
                     println!("✓ LaunchAgent installed at {}", plist_path.display());
+                    println!("✓ Token-refresh daemon installed at {}", daemon_plist_path.display());
                     println!("  Auto-start on every login: enabled");
+                    println!("  Background token refresh: enabled (KeepAlive)");
                     println!("  Your stable endpoint http://10.42.42.1:18080 + sk-tytus-user-* will");
-                    println!("  keep working across reboots — apps don't need reconfiguration.");
+                    println!("  keep working across reboots — no more expired-token prompts.");
                 }
             }
             AutostartAction::Uninstall => {
-                let _ = std::process::Command::new("launchctl")
-                    .args(["unload", "-w", plist_path.to_str().unwrap_or_default()])
-                    .output();
-                let _ = std::fs::remove_file(&plist_path);
+                for p in [&plist_path, &daemon_plist_path] {
+                    let _ = std::process::Command::new("launchctl")
+                        .args(["unload", "-w", p.to_str().unwrap_or_default()])
+                        .output();
+                    let _ = std::fs::remove_file(p);
+                }
                 if json {
                     println!(
                         "{}",
                         serde_json::json!({
                             "action": "uninstall",
-                            "plist_path": plist_path.to_string_lossy()
+                            "plist_path": plist_path.to_string_lossy(),
+                            "daemon_plist_path": daemon_plist_path.to_string_lossy()
                         })
                     );
                 } else {
-                    println!("✓ LaunchAgent removed. Auto-start disabled.");
+                    println!("✓ LaunchAgents removed. Auto-start and daemon disabled.");
                 }
             }
             AutostartAction::Status => {
                 let installed = plist_path.exists();
+                let daemon_installed = daemon_plist_path.exists();
                 let loaded = std::process::Command::new("launchctl")
                     .args(["list", "com.traylinx.tytus"])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                let daemon_loaded = std::process::Command::new("launchctl")
+                    .args(["list", "com.traylinx.tytus.daemon"])
                     .output()
                     .map(|o| o.status.success())
                     .unwrap_or(false);
@@ -2457,16 +2554,21 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                             "action": "status",
                             "installed": installed,
                             "loaded": loaded,
-                            "plist_path": plist_path.to_string_lossy()
+                            "daemon_installed": daemon_installed,
+                            "daemon_loaded": daemon_loaded,
+                            "plist_path": plist_path.to_string_lossy(),
+                            "daemon_plist_path": daemon_plist_path.to_string_lossy()
                         })
                     );
                 } else {
                     println!("Auto-start status:");
-                    println!("  plist:  {} {}", plist_path.display(), if installed { "[installed]" } else { "[missing]" });
-                    println!("  loaded: {}", if loaded { "yes" } else { "no" });
-                    if !installed {
+                    println!("  plist:          {} {}", plist_path.display(), if installed { "[installed]" } else { "[missing]" });
+                    println!("  loaded:         {}", if loaded { "yes" } else { "no" });
+                    println!("  daemon plist:   {} {}", daemon_plist_path.display(), if daemon_installed { "[installed]" } else { "[missing]" });
+                    println!("  daemon loaded:  {}", if daemon_loaded { "yes" } else { "no" });
+                    if !installed || !daemon_installed {
                         println!();
-                        println!("To enable auto-start on boot: tytus autostart install");
+                        println!("To enable auto-start + background refresh: tytus autostart install");
                     }
                 }
             }
@@ -2478,6 +2580,7 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/home/unknown".to_string());
         let unit_dir = std::path::PathBuf::from(&home).join(".config/systemd/user");
         let unit_path = unit_dir.join("tytus.service");
+        let daemon_unit_path = unit_dir.join("tytus-daemon.service");
         let exe = std::env::current_exe()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
@@ -2490,10 +2593,18 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                     std::process::exit(1);
                 }
                 let unit = format!(
-                    "[Unit]\nDescription=Tytus private AI pod tunnel (auto-start on login)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart={exe} connect\nRemainAfterExit=yes\nStandardOutput=append:/tmp/tytus/autostart.log\nStandardError=append:/tmp/tytus/autostart.log\n\n[Install]\nWantedBy=default.target\n"
+                    "[Unit]\nDescription=Tytus private AI pod tunnel (auto-start on login)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart={exe} connect\nRemainAfterExit=yes\nEnvironment=TYTUS_HEADLESS=1\nStandardOutput=append:/tmp/tytus/autostart.log\nStandardError=append:/tmp/tytus/autostart.log\n\n[Install]\nWantedBy=default.target\n"
                 );
                 if let Err(e) = std::fs::write(&unit_path, unit) {
                     eprintln!("Failed to write unit: {}", e);
+                    std::process::exit(1);
+                }
+                // Persistent token-refresh daemon — restart forever on crash.
+                let daemon_unit = format!(
+                    "[Unit]\nDescription=Tytus token-refresh daemon (background)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={exe} daemon run\nRestart=always\nRestartSec=30\nEnvironment=TYTUS_HEADLESS=1\nStandardOutput=append:/tmp/tytus/daemon.log\nStandardError=append:/tmp/tytus/daemon.log\n\n[Install]\nWantedBy=default.target\n"
+                );
+                if let Err(e) = std::fs::write(&daemon_unit_path, daemon_unit) {
+                    eprintln!("Failed to write daemon unit: {}", e);
                     std::process::exit(1);
                 }
                 let _ = std::process::Command::new("systemctl")
@@ -2502,40 +2613,71 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                 let r = std::process::Command::new("systemctl")
                     .args(["--user", "enable", "--now", "tytus.service"])
                     .output();
+                let rd = std::process::Command::new("systemctl")
+                    .args(["--user", "enable", "--now", "tytus-daemon.service"])
+                    .output();
                 let ok = r.map(|o| o.status.success()).unwrap_or(false);
+                let ok_daemon = rd.map(|o| o.status.success()).unwrap_or(false);
                 if json {
                     println!("{}", serde_json::json!({
-                        "action":"install","unit_path":unit_path.to_string_lossy(),"enabled":ok
+                        "action":"install",
+                        "unit_path":unit_path.to_string_lossy(),
+                        "daemon_unit_path":daemon_unit_path.to_string_lossy(),
+                        "enabled":ok,
+                        "daemon_enabled":ok_daemon
                     }));
                 } else {
                     println!("✓ systemd --user unit installed at {}", unit_path.display());
-                    println!("  Auto-start on every login: enabled");
+                    println!("✓ token-refresh daemon installed at {}", daemon_unit_path.display());
+                    println!("  Auto-start on every login + 24/7 background refresh: enabled");
                 }
             }
             AutostartAction::Uninstall => {
                 let _ = std::process::Command::new("systemctl")
                     .args(["--user", "disable", "--now", "tytus.service"])
                     .output();
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "disable", "--now", "tytus-daemon.service"])
+                    .output();
                 let _ = std::fs::remove_file(&unit_path);
+                let _ = std::fs::remove_file(&daemon_unit_path);
                 if json {
-                    println!("{}", serde_json::json!({"action":"uninstall","unit_path":unit_path.to_string_lossy()}));
+                    println!("{}", serde_json::json!({
+                        "action":"uninstall",
+                        "unit_path":unit_path.to_string_lossy(),
+                        "daemon_unit_path":daemon_unit_path.to_string_lossy()
+                    }));
                 } else {
-                    println!("✓ systemd --user unit removed. Auto-start disabled.");
+                    println!("✓ systemd --user units removed. Auto-start and daemon disabled.");
                 }
             }
             AutostartAction::Status => {
                 let installed = unit_path.exists();
+                let daemon_installed = daemon_unit_path.exists();
                 let active = std::process::Command::new("systemctl")
                     .args(["--user", "is-enabled", "tytus.service"])
                     .output()
                     .map(|o| o.status.success())
                     .unwrap_or(false);
+                let daemon_active = std::process::Command::new("systemctl")
+                    .args(["--user", "is-enabled", "tytus-daemon.service"])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
                 if json {
-                    println!("{}", serde_json::json!({"action":"status","installed":installed,"enabled":active}));
+                    println!("{}", serde_json::json!({
+                        "action":"status",
+                        "installed":installed,
+                        "enabled":active,
+                        "daemon_installed":daemon_installed,
+                        "daemon_enabled":daemon_active
+                    }));
                 } else {
                     println!("Auto-start status:");
-                    println!("  unit:    {} {}", unit_path.display(), if installed { "[installed]" } else { "[missing]" });
-                    println!("  enabled: {}", if active { "yes" } else { "no" });
+                    println!("  unit:           {} {}", unit_path.display(), if installed { "[installed]" } else { "[missing]" });
+                    println!("  enabled:        {}", if active { "yes" } else { "no" });
+                    println!("  daemon unit:    {} {}", daemon_unit_path.display(), if daemon_installed { "[installed]" } else { "[missing]" });
+                    println!("  daemon enabled: {}", if daemon_active { "yes" } else { "no" });
                 }
             }
         }
@@ -2548,6 +2690,503 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
         eprintln!("Autostart is only supported on macOS and Linux.");
         std::process::exit(1);
     }
+}
+
+// ── Tray .app bundle + launch-at-login ──────────────────────
+
+/// Manage `/Applications/Tytus.app` + the tray-launch-at-login LaunchAgent.
+///
+/// The .app bundle is what gives tytus-tray real macOS-citizen status:
+///   * Findable in Spotlight (⌘+Space "Tytus")
+///   * Draggable to the Dock
+///   * Can be added to System Settings → Login Items
+///   * LaunchServices handles double-click → launches the bundled executable
+///
+/// Internally the bundle's `Contents/MacOS/Tytus` is a copy of `~/bin/tytus-tray`
+/// (not a symlink — Gatekeeper is flaky with symlinked binaries in .app bundles).
+///
+/// The LaunchAgent opens the bundle on login; combined with the single-instance
+/// pidfile guard in tytus-tray itself, you can quit the tray any time and
+/// reliably get exactly one tray back on next login.
+#[cfg(target_os = "macos")]
+fn cmd_tray(action: TrayAction, json: bool) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/unknown".into());
+    let app_path = std::path::PathBuf::from("/Applications/Tytus.app");
+    let macos_dir = app_path.join("Contents/MacOS");
+    let resources_dir = app_path.join("Contents/Resources");
+    let info_plist = app_path.join("Contents/Info.plist");
+    let bundle_exe = macos_dir.join("Tytus");
+    let plist_dir = std::path::PathBuf::from(&home).join("Library/LaunchAgents");
+    let tray_plist_path = plist_dir.join("com.traylinx.tytus.tray.plist");
+
+    match action {
+        TrayAction::Install => {
+            // Locate the tray binary. Prefer ~/bin/tytus-tray (where the
+            // installer drops it); fall back to PATH; finally a sibling of
+            // the running tytus binary (common when running from a build dir).
+            let src = find_tray_binary(&home);
+            let Some(src) = src else {
+                eprintln!("tytus-tray binary not found. Install it first:");
+                eprintln!("  cp target/release/tytus-tray ~/bin/tytus-tray");
+                std::process::exit(1);
+            };
+
+            // Build bundle skeleton.
+            for d in [&macos_dir, &resources_dir] {
+                if let Err(e) = std::fs::create_dir_all(d) {
+                    eprintln!("Failed to create {}: {}", d.display(), e);
+                    std::process::exit(1);
+                }
+            }
+
+            // Copy (not symlink — Gatekeeper rejects symlinked bundle executables).
+            // If an old copy exists, replace it atomically via remove+copy.
+            let _ = std::fs::remove_file(&bundle_exe);
+            if let Err(e) = std::fs::copy(&src, &bundle_exe) {
+                eprintln!("Failed to copy binary into bundle: {}", e);
+                std::process::exit(1);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &bundle_exe,
+                    std::fs::Permissions::from_mode(0o755),
+                );
+            }
+
+            // Info.plist — LSUIElement=true keeps the T out of the Dock
+            // (same technique Ollama uses). Version string tracks the CLI.
+            let plist = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Tytus</string>
+    <key>CFBundleName</key>
+    <string>Tytus</string>
+    <key>CFBundleExecutable</key>
+    <string>Tytus</string>
+    <key>CFBundleIconFile</key>
+    <string>icon.icns</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.traylinx.tytus</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>Tytus URL</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>tytus</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
+"#,
+                version = env!("CARGO_PKG_VERSION"),
+            );
+            if let Err(e) = std::fs::write(&info_plist, plist) {
+                eprintln!("Failed to write Info.plist: {}", e);
+                std::process::exit(1);
+            }
+
+            // App icon: best-effort. Failure doesn't block install — macOS
+            // just falls back to the generic Exec icon.
+            match generate_app_icon(&resources_dir) {
+                Ok(()) => { /* Info.plist already names icon.icns */ }
+                Err(e) => {
+                    tracing::warn!("Skipping .icns generation: {}", e);
+                }
+            }
+
+            // Poke LaunchServices so Spotlight picks up the bundle immediately
+            // instead of after the next mds re-scan (which can take minutes).
+            let _ = std::process::Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+                .args(["-f", app_path.to_str().unwrap_or_default()])
+                .output();
+
+            // LaunchAgent: open Tytus.app at login. Using `open -a` lets
+            // launchd reuse a running instance instead of racing against
+            // the tray's single-instance guard.
+            if let Err(e) = std::fs::create_dir_all(&plist_dir) {
+                eprintln!("Failed to create LaunchAgents dir: {}", e);
+                std::process::exit(1);
+            }
+            let tray_plist = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.traylinx.tytus.tray</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>-a</string>
+        <string>{app}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{home}</string>
+    </dict>
+</dict>
+</plist>
+"#,
+                app = app_path.display(),
+                home = home,
+            );
+            if let Err(e) = std::fs::write(&tray_plist_path, tray_plist) {
+                eprintln!("Failed to write tray plist: {}", e);
+                std::process::exit(1);
+            }
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", tray_plist_path.to_str().unwrap_or_default()])
+                .output();
+            let loaded = std::process::Command::new("launchctl")
+                .args(["load", "-w", tray_plist_path.to_str().unwrap_or_default()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            // Start the tray right now so the user sees the T immediately.
+            let _ = std::process::Command::new("/usr/bin/open")
+                .args(["-a", app_path.to_str().unwrap_or_default()])
+                .status();
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "action": "install",
+                        "app_path": app_path.to_string_lossy(),
+                        "tray_plist_path": tray_plist_path.to_string_lossy(),
+                        "loaded": loaded,
+                    })
+                );
+            } else {
+                println!("✓ /Applications/Tytus.app installed ({})", bundle_exe.display());
+                println!("✓ Launch-at-login agent installed ({})", tray_plist_path.display());
+                println!("✓ Tytus is now running in your menu bar");
+                println!();
+                println!("You can now:");
+                println!("  • Find Tytus in Spotlight (⌘+Space, type 'Tytus')");
+                println!("  • Drag Tytus.app to your Dock from /Applications");
+                println!("  • Quit the tray anytime — it comes back on next login");
+            }
+        }
+        TrayAction::Uninstall => {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", "-w", tray_plist_path.to_str().unwrap_or_default()])
+                .output();
+            let _ = std::fs::remove_file(&tray_plist_path);
+            let _ = std::fs::remove_dir_all(&app_path);
+            // Best-effort: kill any running tray so /Applications/Tytus.app
+            // doesn't linger in LaunchServices' cache.
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", "tytus-tray"])
+                .status();
+            let _ = std::process::Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+                .args(["-u", app_path.to_str().unwrap_or_default()])
+                .output();
+            if json {
+                println!("{}", serde_json::json!({"action":"uninstall"}));
+            } else {
+                println!("✓ Removed /Applications/Tytus.app and launch-at-login agent.");
+            }
+        }
+        TrayAction::Status => {
+            let app_installed = app_path.exists();
+            let plist_installed = tray_plist_path.exists();
+            let loaded = std::process::Command::new("launchctl")
+                .args(["list", "com.traylinx.tytus.tray"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            // Probe /tmp/tytus/tray.pid (the tray's single-instance lock)
+            // and verify the pid is actually alive. More reliable than pgrep,
+            // which has different process names for bundle vs raw binary.
+            let running = std::fs::read_to_string("/tmp/tytus/tray.pid")
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .map(|pid| unsafe { libc::kill(pid, 0) } == 0)
+                .unwrap_or(false);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "app_installed": app_installed,
+                        "launch_at_login": plist_installed,
+                        "loaded": loaded,
+                        "running": running,
+                    })
+                );
+            } else {
+                println!("Tray status:");
+                println!("  /Applications/Tytus.app: {}", if app_installed { "[installed]" } else { "[missing]" });
+                println!("  launch at login:        {}", if plist_installed && loaded { "yes" } else { "no" });
+                println!("  running:                {}", if running { "yes" } else { "no" });
+                if !app_installed {
+                    println!();
+                    println!("To install: tytus tray install");
+                }
+            }
+        }
+        TrayAction::Start => {
+            if app_path.exists() {
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .args(["-a", app_path.to_str().unwrap_or_default()])
+                    .status();
+            } else if let Some(fallback) = find_tray_binary(&home) {
+                let _ = std::process::Command::new(fallback)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            } else {
+                eprintln!("tytus-tray not found. Install it: tytus tray install");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Generate `icon.icns` inside the bundle's Resources directory.
+///
+/// Strategy: draw a single 1024×1024 PNG of the T glyph on a macOS-like
+/// rounded-rect tile, then let macOS' own `sips` resize it to the sizes
+/// Apple's iconset format requires. `iconutil -c icns` composes the
+/// final `.icns`. We rely on two binaries that are always present on
+/// macOS — no third-party tooling.
+///
+/// The tile colour is a muted teal that matches the Traylinx brand
+/// without being gaudy; a white T sits on top with a slight offset
+/// so it looks like a flat-design glyph rather than a font render.
+#[cfg(target_os = "macos")]
+fn generate_app_icon(resources_dir: &std::path::Path) -> Result<(), String> {
+    use std::process::Command;
+
+    // Draw the master image (1024×1024 RGBA).
+    let master = render_app_icon_rgba(1024);
+    let iconset_dir = resources_dir.join("Tytus.iconset");
+    std::fs::create_dir_all(&iconset_dir)
+        .map_err(|e| format!("create iconset dir: {}", e))?;
+
+    // Encode master PNG.
+    let master_path = iconset_dir.join("icon_512x512@2x.png");
+    write_png(&master_path, &master, 1024, 1024)
+        .map_err(|e| format!("write master png: {}", e))?;
+
+    // Apple's iconset requires these sizes (name → pixels):
+    //   icon_16x16.png            16
+    //   icon_16x16@2x.png         32
+    //   icon_32x32.png            32
+    //   icon_32x32@2x.png         64
+    //   icon_128x128.png         128
+    //   icon_128x128@2x.png      256
+    //   icon_256x256.png         256
+    //   icon_256x256@2x.png      512
+    //   icon_512x512.png         512
+    //   icon_512x512@2x.png     1024  (already written)
+    let sizes: &[(&str, u32)] = &[
+        ("icon_16x16.png",      16),
+        ("icon_16x16@2x.png",   32),
+        ("icon_32x32.png",      32),
+        ("icon_32x32@2x.png",   64),
+        ("icon_128x128.png",   128),
+        ("icon_128x128@2x.png",256),
+        ("icon_256x256.png",   256),
+        ("icon_256x256@2x.png",512),
+        ("icon_512x512.png",   512),
+    ];
+    for (name, px) in sizes {
+        let out = iconset_dir.join(name);
+        let status = Command::new("sips")
+            .args(["-z", &px.to_string(), &px.to_string(),
+                   master_path.to_str().unwrap_or_default(),
+                   "--out", out.to_str().unwrap_or_default()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("sips: {}", e))?;
+        if !status.success() {
+            return Err(format!("sips failed resizing to {}px", px));
+        }
+    }
+
+    // Compose .icns. `iconutil` reads the .iconset/ directory whose layout
+    // we just produced and emits a single .icns file.
+    let icns_path = resources_dir.join("icon.icns");
+    let status = Command::new("iconutil")
+        .args(["-c", "icns",
+               iconset_dir.to_str().unwrap_or_default(),
+               "-o", icns_path.to_str().unwrap_or_default()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("iconutil: {}", e))?;
+    if !status.success() {
+        return Err("iconutil failed".into());
+    }
+
+    // Clean up the intermediate iconset now that .icns is built.
+    let _ = std::fs::remove_dir_all(&iconset_dir);
+    Ok(())
+}
+
+/// Encode an RGBA buffer as a PNG file. Thin wrapper around the `png` crate.
+#[cfg(target_os = "macos")]
+fn write_png(
+    path: &std::path::Path,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), std::io::Error> {
+    let file = std::fs::File::create(path)?;
+    let w = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(w, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()
+        .map_err(|e| std::io::Error::other(format!("png header: {}", e)))?;
+    writer.write_image_data(rgba)
+        .map_err(|e| std::io::Error::other(format!("png data: {}", e)))?;
+    Ok(())
+}
+
+/// Draw the Tytus.app icon into an RGBA buffer of the given size.
+///
+/// A macOS-squircle background (rounded rect with continuous corners) in
+/// brand teal, with a bold white "T" glyph centered on it. Done with
+/// raw pixel ops — no font rendering, no image crate — because we only
+/// need one glyph at one size and `sips` handles downscaling for us.
+#[cfg(target_os = "macos")]
+fn render_app_icon_rgba(size: u32) -> Vec<u8> {
+    let s = size as i32;
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    let bg = [24u8, 128, 128, 255];      // Traylinx teal
+    let bg_edge = [16u8, 96, 96, 255];    // subtle darker edge for depth
+    let fg = [255u8, 255, 255, 255];      // white T
+
+    // Continuous-corner squircle approximation: a superellipse with n≈5.
+    // For each pixel, test (|dx|^n + |dy|^n) < r^n where r is half-size
+    // minus a margin. This gives macOS Big Sur-style soft-corner tiles.
+    // Using n=4 (close to iOS app icon mask). Exponent via powf on f32.
+    let margin = (s as f32) * 0.08;
+    let r = (s as f32) / 2.0 - margin;
+    let cx = (s as f32) / 2.0;
+    let cy = (s as f32) / 2.0;
+    let n = 4.0f32;
+
+    for y in 0..s {
+        for x in 0..s {
+            let dx = (x as f32 + 0.5 - cx).abs() / r;
+            let dy = (y as f32 + 0.5 - cy).abs() / r;
+            let d = dx.powf(n) + dy.powf(n);
+            if d <= 1.0 {
+                // Inside the squircle — base fill with a subtle radial
+                // darkening near the edge so the icon reads as a 3D tile.
+                let t = d.clamp(0.0, 1.0);
+                let mix = |a: u8, b: u8| -> u8 {
+                    (a as f32 * (1.0 - t * 0.25) + b as f32 * (t * 0.25)) as u8
+                };
+                let px = [mix(bg[0], bg_edge[0]), mix(bg[1], bg_edge[1]), mix(bg[2], bg_edge[2]), 255];
+                let i = ((y * s + x) * 4) as usize;
+                rgba[i..i+4].copy_from_slice(&px);
+            }
+        }
+    }
+
+    // T glyph: crossbar + stem, centred, with proportions that read well
+    // at 16px (the smallest iconset size).
+    //   crossbar: spans ~56% of the icon width, height ~14% of icon
+    //   stem:     width ~18% of icon, runs from crossbar to ~80% height
+    let cb_half_w = (s as f32 * 0.28) as i32;
+    let cb_top = (s as f32 * 0.28) as i32;
+    let cb_bot = (s as f32 * 0.42) as i32;
+    let stem_half_w = (s as f32 * 0.09) as i32;
+    let stem_top = cb_bot;
+    let stem_bot = (s as f32 * 0.80) as i32;
+    let icx = s / 2;
+
+    for y in cb_top..cb_bot {
+        for x in (icx - cb_half_w)..(icx + cb_half_w) {
+            let i = ((y * s + x) * 4) as usize;
+            if i + 4 <= rgba.len() {
+                rgba[i..i+4].copy_from_slice(&fg);
+            }
+        }
+    }
+    for y in stem_top..stem_bot {
+        for x in (icx - stem_half_w)..(icx + stem_half_w) {
+            let i = ((y * s + x) * 4) as usize;
+            if i + 4 <= rgba.len() {
+                rgba[i..i+4].copy_from_slice(&fg);
+            }
+        }
+    }
+
+    rgba
+}
+
+#[cfg(target_os = "macos")]
+fn find_tray_binary(home: &str) -> Option<std::path::PathBuf> {
+    let candidates = [
+        std::path::PathBuf::from(home).join("bin/tytus-tray"),
+        std::path::PathBuf::from("/usr/local/bin/tytus-tray"),
+        std::path::PathBuf::from("/opt/homebrew/bin/tytus-tray"),
+    ];
+    for c in &candidates {
+        if c.exists() { return Some(c.clone()); }
+    }
+    // Sibling of the running tytus binary (common during dev).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("tytus-tray");
+            if sibling.exists() { return Some(sibling); }
+        }
+    }
+    // PATH lookup as last resort.
+    std::process::Command::new("which")
+        .arg("tytus-tray")
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() {
+            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !p.is_empty() { Some(std::path::PathBuf::from(p)) } else { None }
+        } else { None })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cmd_tray(action: TrayAction, _json: bool) {
+    // Linux/Windows don't have the same .app-bundle model. tytus-tray is
+    // a regular binary on PATH; `tytus autostart install` already creates
+    // the user-unit on Linux. For now, point users at that path.
+    let _ = action;
+    eprintln!("The Tytus.app bundle is a macOS feature.");
+    eprintln!("On Linux, run: tytus autostart install  (systemd user unit)");
+    eprintln!("Windows support is not yet implemented.");
 }
 
 // ── UI (localhost forwarder to OpenClaw control UI) ─────────
@@ -2717,12 +3356,25 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
         else { "Run: tytus login".into() }
     ));
 
-    // 3. Token validity
+    // 3. Token validity.
+    // Be honest about what the user should do. The old "will auto-refresh"
+    // text was misleading when the refresh token itself had expired
+    // server-side — the daemon would spin forever without progress. We
+    // can't cheaply prove the RT is dead without burning a refresh call,
+    // so we hint at both paths: if the daemon's alive and reachable, it's
+    // probably transient; if not, re-login.
     let token_valid = state.has_valid_token();
+    let daemon_alive = std::path::Path::new("/tmp/tytus/daemon.sock").exists();
     checks.push(("token_valid", token_valid,
-        if token_valid { "Access token current".into() }
-        else if state.refresh_token.is_some() { "Expired (will auto-refresh)".into() }
-        else { "No token".into() }
+        if token_valid {
+            "Access token current".into()
+        } else if state.refresh_token.is_some() && daemon_alive {
+            "Expired — daemon will auto-refresh within 30 min (if this persists, run: tytus login)".into()
+        } else if state.refresh_token.is_some() {
+            "Expired — daemon not running. Try: tytus daemon run, or run: tytus login".into()
+        } else {
+            "No token — run: tytus login".into()
+        }
     ));
 
     // 4. Tytus subscription
@@ -3207,6 +3859,27 @@ fn update_tokens(state: &mut CliState, result: &atomek_auth::DeviceAuthResult, f
         state.email = Some(result.user.email.clone());
     } else if let Some(ref email) = fallback_email {
         state.email = Some(email.clone());
+    }
+    // Persist rotated RT to keychain. Sentinel invalidates the old RT on every
+    // refresh; without this write the next process start loads the stale RT
+    // from keychain and is forced into re-login. RT lives *only* in keychain
+    // (state.json has skip_serializing on the field — see state.rs), so the
+    // keychain is the one persistence point that matters.
+    if let Some(ref email) = state.email {
+        if !email.is_empty() {
+            if let Err(e) = atomek_auth::KeychainStore::store_refresh_token(email, &result.refresh_token) {
+                tracing::error!(
+                    "CRITICAL: failed to persist rotated refresh token to keychain: {}. \
+                     Next restart will require re-login.",
+                    e
+                );
+                if !wizard::is_interactive() {
+                    append_autostart_log(&format!(
+                        "CRITICAL: keychain write failed after token rotation: {}", e
+                    ));
+                }
+            }
+        }
     }
 }
 

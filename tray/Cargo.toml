@@ -18,8 +18,15 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
 dirs.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # macOS: need to run NSApplication event loop
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
+# Grand Central Dispatch wrapper — we marshal tray icon updates from the
+# poll thread onto AppKit's main queue so TrayIcon (!Send on macOS) is only
+# ever touched from the thread that owns it.
+dispatch2 = "0.2"

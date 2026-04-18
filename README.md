@@ -170,9 +170,50 @@ tytus link [DIR] [--only ...]        Link a project so AI CLIs in it know Tytus
 tytus mcp [--format ...]             Print MCP server config for an AI tool
 tytus bootstrap-prompt               Print the paste prompt for any AI tool
 tytus llm-docs                       Print the full LLM-facing reference
+
+tytus daemon run|stop|status         Background token-refresh daemon
+tytus autostart install|uninstall    LaunchAgent (macOS) / systemd (Linux) for
+                                     tunnel + daemon — keeps your pod alive
+                                     24/7 with auto-refreshing credentials
+tytus tray install|uninstall|status  macOS only — installs /Applications/Tytus.app
+                                     (Spotlight-discoverable menu-bar app) plus
+                                     a launch-at-login agent, so you can quit
+                                     the tray anytime and it comes back on reboot
 ```
 
 Run `tytus <command> --help` for per-command details.
+
+---
+
+## Menu-bar app (macOS)
+
+Once-only setup for a Docker-Desktop-style experience:
+
+```bash
+tytus tray install    # creates /Applications/Tytus.app + launches it now
+tytus login           # browser device-auth (once, then daemon keeps it fresh)
+tytus autostart install   # tunnel + token-refresh daemon at every login
+```
+
+You now have a colored T in the menu bar with:
+
+| Dot | Meaning |
+|---|---|
+| 🟢 Connected | Pod reachable, tokens valid, daemon refreshing |
+| 🟡 Connected — daemon offline | Pod reachable but no background refresh (RT will die in ~24h) |
+| 🟡 Connected — token expired | Tunnel up; daemon will refresh on next tick |
+| 🟡 Not logged in / Pod unreachable | Credentials present but tunnel down → click **Connect** |
+| 🔴 Not logged in | No credentials at all → click **Sign In…** |
+
+The dot is driven by a **live HTTP probe** to the stable pod endpoint
+`http://10.42.42.1:18080` — not by daemon or state-file inspection, so it
+reflects ground truth even if the daemon is stopped or the kernel renumbered
+the tunnel interface.
+
+Menu actions: Connect/Disconnect, Open in ▸ (Claude Code, OpenCode, Gemini,
+Codex, Cursor, Aider, Vibe, Cody, Amp, or Terminal), Copy Connection Info,
+Run Health Test, Configure Agent, Sign Out, Doctor, View Daemon/Startup Log,
+Start/Stop/Restart Daemon, Auto-start toggles, Documentation, About, Quit.
 
 ---
 

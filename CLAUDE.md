@@ -11,12 +11,22 @@ Two binaries: `tytus` (the CLI) and `tytus-mcp` (a stdio MCP server).
 ## Architecture
 
 ```
-cli/      Binary crate: the `tytus` command
+cli/      Binary crate: the `tytus` command + `daemon` subcommand (token-refresh
+          background process) + `tray install/uninstall` (creates the
+          Tytus.app bundle and its launch-at-login LaunchAgent)
 mcp/      Binary crate: the `tytus-mcp` MCP server (stdio JSON-RPC 2.0)
 core/     Error types, HTTP client (retry/backoff), token state, device fingerprint
-auth/     Sentinel device auth, OS keychain integration, token refresh
+auth/     Sentinel device auth, OS keychain integration, token refresh.
+          `update_tokens()` persists the ROTATED refresh token to keychain
+          on every refresh — without this, process restart reads stale RT
+          and is forced into re-login. Critical invariant (2026-04-18 fix).
 pods/     Provider API client: allocation, status, config, agent control, user-key
 tunnel/   WireGuard tunnel via boringtun (userspace, cross-platform)
+tray/     Binary crate: `tytus-tray` (menu-bar app). Single-instance guard
+          via /tmp/tytus/tray.pid. Health dot is driven by a live HTTP
+          probe to 10.42.42.1:18080 — NOT by daemon-status inspection.
+          The tunnel lives independently of the daemon (boringtun is a
+          separate root process), so a dead daemon does NOT mean 🔴.
 ```
 
 Workspace docs:
@@ -60,6 +70,20 @@ tytus link [DIR]                     # drop AI integration files into a project
 tytus mcp [--format ...]             # print MCP server config for an AI tool
 tytus bootstrap-prompt               # the paste prompt that points at the hosted SKILL.md
 tytus autostart install|uninstall|status  # LaunchAgent / systemd autostart
+                                          # Installs TWO plists on macOS:
+                                          #   com.traylinx.tytus (oneshot connect)
+                                          #   com.traylinx.tytus.daemon (KeepAlive)
+tytus daemon run|stop|status         # Background token-refresh daemon. Never
+                                     # calls Sentinel on its own schedule unless
+                                     # ensure_token() decides a refresh is due.
+                                     # Exponential backoff (60s→3600s cap) on
+                                     # transient failure; AuthExpired puts us in
+                                     # NeedsLogin and we reload from keychain on
+                                     # subsequent ticks in case the user re-logged.
+tytus tray install|uninstall|status  # macOS: creates /Applications/Tytus.app
+                                     # (LSUIElement=true, icon.icns generated
+                                     # at install time via sips + iconutil)
+                                     # and com.traylinx.tytus.tray LaunchAgent.
 tytus llm-docs                       # full LLM-facing reference
 ```
 
@@ -74,7 +98,17 @@ Hidden subcommands (used internally):
 - `~/Library/Application Support/tytus/state.json` (macOS) or `~/.config/tytus/state.json` (Linux), mode `0o600`
 - OS keychain entry: service `com.traylinx.atomek` (legacy name; do not change without migration)
 - Tunnel daemon PID files: `/tmp/tytus/tunnel-NN.pid` (cleaned up on exit)
-- Diagnostic log: `/tmp/tytus/autostart.log` (headless mode: timestamped token refresh results, startup state, tunnel success/failure)
+- Token-refresh daemon socket + PID: `/tmp/tytus/daemon.sock`, `/tmp/tytus/daemon.pid`
+- Tray single-instance lock: `/tmp/tytus/tray.pid`
+- Diagnostic logs:
+  - `/tmp/tytus/autostart.log` — headless-mode token refresh results, startup state, tunnel success/failure
+  - `/tmp/tytus/daemon.log` — persistent daemon stdout/stderr (launchd-captured)
+  - `/tmp/tytus/tray.log` — tray stdout/stderr
+- LaunchAgents (macOS, user scope):
+  - `~/Library/LaunchAgents/com.traylinx.tytus.plist` — oneshot tunnel-up at login
+  - `~/Library/LaunchAgents/com.traylinx.tytus.daemon.plist` — KeepAlive'd refresh daemon
+  - `~/Library/LaunchAgents/com.traylinx.tytus.tray.plist` — launch-at-login tray app
+- App bundle (macOS): `/Applications/Tytus.app` with `LSUIElement=true`, `CFBundleIdentifier=com.traylinx.tytus`
 
 ## Security invariants
 

@@ -192,14 +192,50 @@ tytus bootstrap-prompt             Print a one-liner you can paste into
                                    Tytus natively — it references the
                                    hosted SKILL.md on GitHub.
 
-tytus autostart install             Install a macOS LaunchAgent (or Linux
-                                   systemd unit) that runs `tytus connect`
-                                   at every login. Sets TYTUS_HEADLESS=1
-                                   so the daemon never opens a browser.
+tytus autostart install             Install two LaunchAgents (macOS) /
+                                   systemd user units (Linux):
+                                   (a) `tytus connect` at every login —
+                                       brings the WireGuard tunnel up.
+                                   (b) `tytus daemon run` keep-alive —
+                                       continuously refreshes the Sentinel
+                                       access + refresh tokens so the RT
+                                       never expires server-side (normally
+                                       ~24h TTL). Survives crashes via
+                                       KeepAlive / Restart=always.
+                                   Sets TYTUS_HEADLESS=1 so neither path
+                                   opens a browser.
 
-tytus autostart uninstall          Remove the LaunchAgent / systemd unit.
+tytus autostart uninstall          Remove both LaunchAgents / user units.
 
-tytus autostart status             Check if autostart is installed and loaded.
+tytus autostart status             Check if the autostart hooks are
+                                   installed and loaded.
+
+tytus daemon run                   Run the token-refresh daemon in the
+                                   foreground. Called by launchd / systemd.
+                                   Listens on /tmp/tytus/daemon.sock for
+                                   status + shutdown commands from the CLI
+                                   and the tray.
+
+tytus daemon stop                  Send SHUTDOWN to a running daemon.
+
+tytus daemon status                Query the daemon over its Unix socket.
+
+tytus tray install                 macOS only. Creates /Applications/Tytus.app
+                                   (a proper LSUIElement=true menu-bar app
+                                   bundle with an icon.icns) and registers
+                                   a `com.traylinx.tytus.tray` LaunchAgent
+                                   so the tray auto-starts at every login.
+                                   Also pokes LaunchServices so Spotlight
+                                   picks the bundle up immediately.
+
+tytus tray uninstall               Remove /Applications/Tytus.app and the
+                                   tray LaunchAgent.
+
+tytus tray status                  Show install / load / running state.
+
+tytus tray start                   Open /Applications/Tytus.app (or fall
+                                   back to ~/bin/tytus-tray). Useful from
+                                   scripts after a `quit`.
 
 tytus llm-docs                     Print THIS document.
 ```

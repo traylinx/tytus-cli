@@ -161,6 +161,7 @@ dependencies = [
  "inquire",
  "libc",
  "open",
+ "png 0.17.16",
  "reqwest",
  "serde",
  "serde_json",
@@ -741,6 +742,18 @@ dependencies = [
  "option-ext",
  "redox_users",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "dispatch2"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a0d569e003ff27784e0e14e4a594048698e0c0f0b66cabcb51511be55a7caa0"
+dependencies = [
+ "bitflags 2.11.0",
+ "block2 0.6.2",
+ "libc",
+ "objc2 0.6.4",
 ]
 
 [[package]]
@@ -2079,7 +2092,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
 dependencies = [
  "bitflags 2.11.0",
- "dispatch2",
+ "dispatch2 0.3.1",
  "objc2 0.6.4",
 ]
 
@@ -2090,7 +2103,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
 dependencies = [
  "bitflags 2.11.0",
- "dispatch2",
+ "dispatch2 0.3.1",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-io-surface",
@@ -2517,7 +2530,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.3",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3427,7 +3440,9 @@ name = "tytus-tray"
 version = "0.3.0"
 dependencies = [
  "dirs",
+ "dispatch2 0.2.0",
  "image",
+ "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
