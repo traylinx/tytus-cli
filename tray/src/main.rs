@@ -537,10 +537,10 @@ fn build_menu(state: &TrayState) -> Menu {
         let _ = info_sub.append(&PredefinedMenuItem::separator());
 
         let has_key = key.is_some();
-        let _ = info_sub.append(&MenuItem::with_id("copy_ail_url", "Copy OPENAI_BASE_URL", true, None));
-        let _ = info_sub.append(&MenuItem::with_id("copy_ail_key", "Copy OPENAI_API_KEY", has_key, None));
-        let _ = info_sub.append(&MenuItem::with_id("copy_ail_exports", "Copy export block", has_key, None));
-        let _ = info_sub.append(&MenuItem::with_id("copy_ail_json", "Copy JSON ({base_url, api_key})", has_key, None));
+        let _ = info_sub.append(&MenuItem::with_id("copy_ail_url", "Copy AIL_URL", true, None));
+        let _ = info_sub.append(&MenuItem::with_id("copy_ail_key", "Copy AIL_API_KEY", has_key, None));
+        let _ = info_sub.append(&MenuItem::with_id("copy_ail_exports", "Copy export block (AIL_* + OpenAI aliases)", has_key, None));
+        let _ = info_sub.append(&MenuItem::with_id("copy_ail_json", "Copy JSON ({url, api_key})", has_key, None));
 
         let _ = info_sub.append(&PredefinedMenuItem::separator());
         let _ = info_sub.append(&MenuItem::with_id("open_mcp_guide", "Paste into Claude Code / Cursor / OpenCode…", true, None));
@@ -805,13 +805,13 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         "copy_ail_url" => {
             let (url, _key) = connection_pair(state);
             copy_to_clipboard(&format!("{}/v1", url));
-            notify("Tytus", "OPENAI_BASE_URL copied to clipboard.");
+            notify("Tytus", "AIL_URL copied to clipboard.");
         }
         "copy_ail_key" => {
             let (_url, key) = connection_pair(state);
             if let Some(k) = key {
                 copy_to_clipboard(&k);
-                notify("Tytus", "OPENAI_API_KEY copied to clipboard.");
+                notify("Tytus", "AIL_API_KEY copied to clipboard.");
             } else {
                 notify("Tytus", "No stable key yet — run tytus login first.");
             }
@@ -822,7 +822,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         "copy_ail_json" => {
             let (url, key) = connection_pair(state);
             let json = serde_json::json!({
-                "base_url": format!("{}/v1", url),
+                "url": format!("{}/v1", url),
                 "api_key": key.as_deref().unwrap_or(""),
             });
             copy_to_clipboard(&serde_json::to_string_pretty(&json).unwrap_or_default());
@@ -1084,10 +1084,17 @@ fn copy_connection_info(state: &Arc<Mutex<TrayState>>) {
     };
 
     let text = format!(
-        "export OPENAI_BASE_URL=\"{base}/v1\"\n\
-         export OPENAI_API_KEY=\"{key}\"\n\
-         export OPENAI_API_BASE=\"{base}/v1\"\n\
-         export AI_GATEWAY=\"{base}\"\n",
+        "# AIL — your private AI gateway (canonical names)\n\
+         export AIL_URL=\"{base}/v1\"\n\
+         export AIL_API_KEY=\"{key}\"\n\
+         \n\
+         # OpenAI-compatible aliases — needed by Claude Code, Cursor,\n\
+         # OpenCode, Continue, Aider and every other tool that reads\n\
+         # OPENAI_BASE_URL / OPENAI_API_KEY by convention. Keep these\n\
+         # even if you prefer the AIL_ names in your own scripts.\n\
+         export OPENAI_BASE_URL=\"$AIL_URL\"\n\
+         export OPENAI_API_KEY=\"$AIL_API_KEY\"\n\
+         export OPENAI_API_BASE=\"$AIL_URL\"\n",
         base = url,
         key = key,
     );

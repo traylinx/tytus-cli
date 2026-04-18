@@ -76,8 +76,15 @@ no `qwen3-8b` — do not invent models.
 
 ```bash
 eval "$(tytus env --export)"
+# Canonical names (AIL = the private AI gateway this CLI fronts):
+# → AIL_URL=http://10.42.42.1:18080/v1
+# → AIL_API_KEY=sk-tytus-user-<32hex>
+# OpenAI-compatible aliases (required by Claude Code, Cursor, OpenCode,
+# Continue, Aider — every tool that reads OPENAI_BASE_URL/OPENAI_API_KEY
+# by convention; these always track AIL_* above):
 # → OPENAI_BASE_URL=http://10.42.42.1:18080/v1
 # → OPENAI_API_KEY=sk-tytus-user-<32hex>
+# Legacy TYTUS_* aliases kept for pre-sprint scripts:
 # → TYTUS_AI_GATEWAY=http://10.42.42.1:18080
 # → TYTUS_API_KEY=sk-tytus-user-<32hex>
 # → TYTUS_AGENT_TYPE=nemoclaw
@@ -388,8 +395,8 @@ to spend a unit on NemoClaw / Hermes — the default pod covers this.
 tytus login          # provisions the default pod automatically
 tytus connect        # no --agent: brings the tunnel up to the default pod
 eval "$(tytus env --export)"
-curl -sS "$OPENAI_BASE_URL/chat/completions" \
-    -H "Authorization: Bearer $OPENAI_API_KEY" \
+curl -sS "$AIL_URL/chat/completions" \
+    -H "Authorization: Bearer $AIL_API_KEY" \
     -H "Content-Type: application/json" \
     -d '{"model":"ail-compound","messages":[{"role":"user","content":"hi"}]}'
 ```
