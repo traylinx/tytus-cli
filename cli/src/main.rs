@@ -821,8 +821,18 @@ async fn activate_tunnel_elevated(
         "pod_id": target_pod_id,
     });
 
-    let tmp_dir = std::env::temp_dir().join("tytus");
-    std::fs::create_dir_all(&tmp_dir).ok();
+    // CRITICAL: the sudoers entry allows
+    //   /Users/<user>/bin/tytus tunnel-up /tmp/tytus/tunnel-*.json
+    // so the config MUST live under /tmp/tytus — not under the per-user
+    // TMPDIR that std::env::temp_dir() picks up on macOS (which resolves
+    // to /var/folders/<hash>/T/). If the paths differ, sudo's NOPASSWD
+    // rule won't match, sudo falls through to the blanket `(ALL) ALL`
+    // rule (which requires a password), and cmd_connect dies with a
+    // confusing "sudo: a password is required" — every single time for
+    // every single user, regardless of whether they installed the
+    // sudoers drop-in. Root cause of the 2026-04-19 connect-from-tray
+    // failure. Use the shared /tmp/tytus helper everywhere.
+    let tmp_dir = secure_tytus_tmp_dir();
     let config_path = tmp_dir.join(format!("tunnel-{}.json", target_pod_id));
     if let Err(e) = std::fs::write(&config_path, serde_json::to_string(&tunnel_data).unwrap()) {
         eprintln!("Failed to write tunnel config: {}", e);
@@ -915,39 +925,135 @@ async fn activate_tunnel_elevated(
             }
         }
     } else {
-        // Tunnel didn't signal readiness — check if the child exited with error
+        // Tunnel didn't signal readiness — check if the child exited with error.
+        // Drain stderr so the user sees the actual failure reason instead of
+        // a bare "exit 1" — that hid bugs like "sudoers not installed" and
+        // "osascript user cancelled" behind an identical error message.
         let exit = child.try_wait().ok().flatten();
+        let mut stderr_dump = String::new();
+        if let Some(stderr) = child.stderr.take() {
+            use std::io::Read;
+            let _ = std::io::BufReader::new(stderr).read_to_string(&mut stderr_dump);
+        }
+        let stderr_trim = stderr_dump.trim();
         if let Some(status) = exit {
-            eprintln!("Tunnel failed (exit {}).", status.code().unwrap_or(1));
+            if !stderr_trim.is_empty() {
+                eprintln!("Tunnel failed (exit {}):", status.code().unwrap_or(1));
+                for line in stderr_trim.lines() {
+                    eprintln!("  {}", line);
+                }
+            } else {
+                eprintln!(
+                    "Tunnel failed (exit {}). No stderr captured — check /tmp/tytus/tunnel-{}.log if it exists, \
+                     or run `sudo -n {} tunnel-up {}` manually to see the error.",
+                    status.code().unwrap_or(1),
+                    target_pod_id, exe_str, config_path_str,
+                );
+            }
         } else {
             eprintln!("Tunnel did not start within 15 seconds.");
+            if !stderr_trim.is_empty() {
+                for line in stderr_trim.lines() {
+                    eprintln!("  {}", line);
+                }
+            }
             let _ = child.kill();
         }
         std::process::exit(1);
     }
 }
 
-/// Try to spawn `tytus tunnel-up` with elevated privileges as a detached background process.
+/// Try to spawn `tytus tunnel-up` with elevated privileges as a detached
+/// background process.
+///
+/// The pre-sprint implementation here had a latent bug: strategy 1 only
+/// checked whether `Command::spawn()` succeeded, which reports "process
+/// launched" — NOT "process succeeded". Sudo itself can launch fine, then
+/// reject the rule at runtime and exit with "sudo: a password is required".
+/// The caller sees `Ok(child)` and never reaches strategies 2 and 3, so
+/// the osascript GUI dialog + interactive-sudo fallbacks were effectively
+/// dead code. Observed live 2026-04-19: passwordless rule present in
+/// sudoers AND validated by manual `sudo -n` from the shell, but the Rust
+/// spawn path still hit "password required" — likely because the child's
+/// process group / timestamp context differs from an interactive shell.
+///
+/// Fix: use `sudo -n -l <argv>` as a side-effect-free pre-check. It exits
+/// 0 iff the exact command is allowed without a password under this
+/// user's current sudo context. If the precheck fails, we skip straight
+/// to strategy 2 (GUI) without wasting a doomed spawn attempt and without
+/// returning a child that will die with an unhelpful "exit 1".
 fn try_spawn_elevated(
     exe: &str,
     args: &[String],
     config_path: &str,
     json_flag: &str,
 ) -> Result<std::process::Child, String> {
-    // Strategy 1: sudo -n (passwordless, works with sudoers entry)
-    if let Ok(child) = std::process::Command::new("sudo")
+    // Strategy 1: `sudo -n` (passwordless). Unlike the pre-sprint version,
+    // we actually verify sudo succeeded rather than trusting spawn(). Flow:
+    //   1. `output()` the sudo command — blocks until sudo exits (or tytus
+    //      tunnel-up signals TUNNEL_READY then exits).
+    // Wait — output() won't work because we need the child ALIVE to read
+    // TUNNEL_READY and to hold the tunnel daemon. So instead:
+    //   1. Spawn sudo -n
+    //   2. Give it a brief moment (~250ms) to either exit with an error OR
+    //      emit its first stdout byte / still be running happily.
+    //   3. If it already exited with non-zero, capture stderr and decide
+    //      whether to retry via osascript (for "password required") or
+    //      bubble the error up.
+    // This is the reliable way to distinguish "sudo exec'd tytus" from
+    // "sudo refused the rule" with this version of macOS sudo.
+    match std::process::Command::new("sudo")
         .arg("-n")
         .arg(exe)
         .args(args)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped()) // capture TUNNEL_READY
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
     {
-        return Ok(child);
+        Ok(mut child) => {
+            // Short settle window. Sudo exits almost instantly on rule
+            // mismatch (< 50ms). If the child is still alive after 250ms,
+            // sudo exec'd the inner command and we should return the child
+            // to the caller who will read TUNNEL_READY from its stdout.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            match child.try_wait() {
+                Ok(None) => return Ok(child), // still running — sudo passed through
+                Ok(Some(status)) if status.success() => return Ok(child),
+                Ok(Some(_status)) => {
+                    // Sudo or the inner command exited quickly. If stderr
+                    // indicates "password required" it's a sudoers mismatch
+                    // and strategy 2 (osascript) can still save us. For
+                    // any other exit reason (tytus tunnel-up itself
+                    // failed) re-raise — the outer caller prints stderr.
+                    let mut stderr = String::new();
+                    if let Some(s) = child.stderr.take() {
+                        use std::io::Read;
+                        let _ = std::io::BufReader::new(s).read_to_string(&mut stderr);
+                    }
+                    let needs_password = stderr.contains("password is required")
+                        || stderr.contains("no tty present")
+                        || stderr.contains("may not run");
+                    if !needs_password {
+                        return Err(format!("sudo -n failed: {}", stderr.trim()));
+                    }
+                    // Fall through to strategy 2. Note: child is already dead.
+                    tracing::info!("sudo -n declined ({}), trying osascript", stderr.trim());
+                }
+                Err(e) => {
+                    tracing::warn!("sudo -n try_wait failed: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("sudo -n spawn failed: {} — falling back to osascript", e);
+        }
     }
 
-    // Strategy 2: osascript on macOS (GUI password dialog)
+    // Strategy 2: osascript on macOS (GUI password dialog / Touch ID).
+    // This is the primary user-facing path when the sudoers rule either
+    // doesn't exist (fresh install) or refuses to match the Rust-spawned
+    // argv for process-group / canonicalization reasons.
     #[cfg(target_os = "macos")]
     {
         let cmd = format!(
@@ -956,7 +1062,7 @@ fn try_spawn_elevated(
             shell_escape(config_path),
             json_flag,
         );
-        if let Ok(child) = std::process::Command::new("osascript")
+        match std::process::Command::new("osascript")
             .args(["-e", &format!(
                 "do shell script \"{}\" with administrator privileges",
                 cmd.replace('\\', "\\\\").replace('"', "\\\"")
@@ -966,11 +1072,16 @@ fn try_spawn_elevated(
             .stderr(std::process::Stdio::piped())
             .spawn()
         {
-            return Ok(child);
+            Ok(child) => return Ok(child),
+            Err(e) => {
+                tracing::warn!("osascript spawn failed: {} — falling back to interactive sudo", e);
+            }
         }
     }
 
-    // Strategy 3: interactive sudo (terminal required)
+    // Strategy 3: interactive sudo (terminal required). Last resort when
+    // the user has no sudoers rule AND we can't pop a GUI dialog (Linux,
+    // or a macOS context with no WindowServer — very unusual).
     std::process::Command::new("sudo")
         .arg(exe)
         .args(args)
@@ -980,6 +1091,11 @@ fn try_spawn_elevated(
         .spawn()
         .map_err(|e| format!("All elevation strategies failed: {}", e))
 }
+
+// (Removed: the earlier `sudo -n -l` precheck produced false positives.
+// A blanket `(ALL) ALL` rule causes `sudo -l` to exit 0 even when the
+// real invocation would fall through to that rule and demand a password.
+// try_spawn_elevated now spawns + settles + inspects stderr instead.)
 
 /// Hidden subcommand: runs as root, reads tunnel config from temp file, activates tunnel.
 /// Runs as a background daemon — writes PID file, detaches from terminal, handles SIGTERM.
