@@ -833,6 +833,45 @@ async fn activate_tunnel_elevated(
     wg_config: &atomek_pods::WireGuardConfig,
     json: bool,
 ) {
+    // Duplicate-tunnel guard: if a daemon for this pod is already
+    // running, do NOT spawn a second one. Two boringtun instances on
+    // the same WireGuard config share the UDP socket and each decrypts
+    // every packet → halved throughput, ~2 minute page loads, browser
+    // hangs. Discovered 2026-04-19: user clicked Open in Browser on a
+    // pod that already had a tunnel, cmd_ui's auto-swap fired anyway
+    // and we ended up with two utunN interfaces both at 10.18.2.2.
+    //
+    // Three ways a daemon can be live for this pod:
+    //   1. Pidfile exists + pid alive + same pod (happy path).
+    //   2. Pidfile missing but an orphan `tytus tunnel-up /tmp/tytus/
+    //      tunnel-NN.json` process still runs (cleaned /tmp, crash).
+    //   3. Pidfile exists but points at a different pid (stale). We
+    //      skip this case — the caller's disconnect path handles it.
+    let existing_alive = {
+        let pidfile_pid = std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.pid", target_pod_id))
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .filter(|&pid| pid > 1 && unsafe {
+                if libc::kill(pid, 0) == 0 { true }
+                else { *libc::__error() == libc::EPERM }
+            });
+        let orphan_pods = tunnel_reap::list_orphan_tunnel_pods();
+        pidfile_pid.is_some() || orphan_pods.iter().any(|p| p == target_pod_id)
+    };
+    if existing_alive {
+        if json {
+            println!("{}", serde_json::json!({
+                "pod_id": target_pod_id,
+                "status": "tunnel_already_up",
+                "action": "no-op",
+            }));
+        } else {
+            eprintln!("✓ Tunnel for pod {} is already up — skipping duplicate activation", target_pod_id);
+            eprintln!("  To replace: `tytus disconnect --pod {}` first, then reconnect.", target_pod_id);
+        }
+        return;
+    }
+
     // Serialize tunnel config to temp file (will be read by elevated process)
     let tunnel_data = serde_json::json!({
         "private_key": wg_config.private_key,

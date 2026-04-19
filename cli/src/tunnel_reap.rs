@@ -233,6 +233,35 @@ fn find_orphan_tunnel_daemon(pod_num: &str) -> Option<i32> {
     None
 }
 
+/// Reap any REMAINING `tytus tunnel-up /tmp/tytus/tunnel-<pod>.json`
+/// processes after the pidfile-referenced daemon is dead. Iterates the
+/// ps scan because the pidfile only tracks one; duplicates only surface
+/// via argv. Each duplicate gets a fresh pidfile → tunnel-down → cleanup
+/// cycle. Bounded loop (max 5 iterations) so we can't spin forever on a
+/// process that refuses to die.
+fn reap_duplicates_for_pod(pod_num: &str) {
+    for _ in 0..5 {
+        let Some(dup_pid) = find_orphan_tunnel_daemon(pod_num) else { return; };
+        let path = pidfile_path(pod_num);
+        if std::fs::write(&path, format!("{}", dup_pid)).is_err() { return; }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        }
+        if invoke_tunnel_down(dup_pid).is_err() {
+            // Leave pidfile in place; follow-up disconnect can retry.
+            return;
+        }
+        // Give it a beat to exit before we scan again.
+        for _ in 0..10 {
+            if !pid_is_alive(dup_pid) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        cleanup_files(pod_num);
+    }
+}
+
 fn read_pid_from_file(pod_num: &str) -> Option<i32> {
     let path = pidfile_path(pod_num);
     let contents = std::fs::read_to_string(&path).ok()?;
@@ -431,6 +460,15 @@ pub fn reap_tunnel_for_pod(pod_num: &str) -> ReapOutcome {
                 }
             } else {
                 cleanup_files(pod_num);
+                // Mop up any DUPLICATE daemons for the same pod. Two
+                // tunnel-up processes racing on the same pod config
+                // halves throughput (each packet decrypted twice) and
+                // causes the browser to hang for minutes. Discovered
+                // 2026-04-19: user reported 2+ minute page loads on
+                // http://localhost:18702/ while curl returned HTTP 200
+                // in 1s — the tunnel was alive but shared between two
+                // boringtun instances fighting over the same UDP socket.
+                reap_duplicates_for_pod(pod_num);
                 ReapOutcome::Reaped { pid: pid as u32 }
             }
         }
