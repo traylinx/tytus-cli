@@ -531,6 +531,7 @@ async fn ensure_default_pod(state: &mut CliState, http: &atomek_core::HttpClient
                 tunnel_iface: preserved_iface,
                 stable_ai_endpoint: alloc.stable_ai_endpoint.clone(),
                 stable_user_key: alloc.stable_user_key.clone(),
+                gateway_token: None,
             });
             // Message verbatim per sprint doc §6 A6 acceptance criterion.
             // The stable endpoint at 10.42.42.1:18080 is reachable once the
@@ -696,6 +697,7 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
                     tunnel_iface: preserved_iface,
                     stable_ai_endpoint: a.stable_ai_endpoint.clone(),
                     stable_user_key: a.stable_user_key.clone(),
+                    gateway_token: None,
                 });
                 state.save();
                 if !json { eprintln!("✓ Default pod {} allocated", a.pod_id); }
@@ -1590,6 +1592,7 @@ async fn cmd_agent_install(
                         tunnel_iface: preserved_iface,
                         stable_ai_endpoint: a.stable_ai_endpoint.clone(),
                         stable_user_key: a.stable_user_key.clone(),
+                        gateway_token: None,
                     });
                     state.save();
                     if json {
@@ -1686,6 +1689,16 @@ async fn configure_agent_for_zero_auth(
     pod_id: &str,
     json: bool,
 ) -> Result<(), String> {
+    // 1. Patch allowedOrigins so the forwarder's per-pod localhost
+    //    port is trusted. Belt-and-suspenders with the request-time
+    //    Origin rewrite in cmd_ui.
+    // 2. Fetch the agent's gateway.auth.token — the agent regenerates
+    //    it on each cold start and it cannot reliably be disabled
+    //    (mode:"none" gets reset to "token" on restart). Instead we
+    //    fetch it and stash in state.json so the forwarder can
+    //    auto-inject `Authorization: Bearer <token>` on every
+    //    request. The browser never sees the token; the user never
+    //    sees the login form.
     let pod_num: u16 = pod_id.parse().unwrap_or(0);
     let fwd_port = 18700u16.saturating_add(pod_num);
     let script = format!(
@@ -1693,26 +1706,34 @@ async fn configure_agent_for_zero_auth(
          const p='/app/workspace/.openclaw/config.json';\
          try {{ const c=JSON.parse(fs.readFileSync(p,'utf8'));\
          c.gateway=c.gateway||{{}};\
-         c.gateway.auth={{mode:'none'}};\
          c.gateway.controlUi=c.gateway.controlUi||{{}};\
          const o=c.gateway.controlUi.allowedOrigins||[];\
          for (const h of ['http://localhost:{port}','http://127.0.0.1:{port}']) if (!o.includes(h)) o.push(h);\
          c.gateway.controlUi.allowedOrigins=o;\
          fs.writeFileSync(p, JSON.stringify(c,null,2));\
-         console.log('zero-config applied'); }} catch(e) {{ console.error('skip:', e.message); process.exit(0); }}\"",
+         console.log(c.gateway.auth && c.gateway.auth.token || ''); }} catch(e) {{ console.error(e.message); process.exit(1); }}\"",
         port = fwd_port,
     );
 
-    // Exec into the container to patch config.
     match atomek_pods::exec_in_agent(client, pod_id, &script, 15).await {
         Ok(r) if r.exit_code == 0 => {
-            // Restart so the new config takes effect. Non-fatal on failure.
+            let token = r.stdout.as_deref().unwrap_or("").trim().to_string();
+            if !token.is_empty() {
+                let mut state = CliState::load();
+                if let Some(p) = state.pods.iter_mut().find(|p| p.pod_id == pod_id) {
+                    p.gateway_token = Some(token.clone());
+                    state.save();
+                }
+            }
             if let Err(e) = atomek_pods::restart_agent(client, pod_id).await {
                 if !json { eprintln!("  (zero-config: restart failed: {})", e); }
                 return Err(e.to_string());
             }
             if !json {
-                println!("  Zero-config: gateway auth disabled, forwarder origin trusted.");
+                println!(
+                    "  Zero-config: allowedOrigins patched, gateway token cached ({} chars).",
+                    token.len()
+                );
             }
             Ok(())
         }
@@ -4255,14 +4276,30 @@ async fn cmd_ui(
     let cache_dir = std::path::PathBuf::from(format!("/tmp/tytus/ui-{}-cache", pod.pod_id));
     let _ = std::fs::create_dir_all(&cache_dir);
 
+    // Forwarder auto-injects the agent's gateway token on every
+    // request. The token was stashed into state.json's PodEntry
+    // during agent install (via configure_agent_for_zero_auth).
+    // Without this, the browser would see "unauthorized: gateway
+    // token missing" because OpenClaw's gateway enforces auth on
+    // the WebSocket upgrade and we never let the user paste it.
+    // Re-read state here so the most recent value (possibly just
+    // updated by a restart + reinstall) is used.
+    let gateway_token = {
+        let fresh = CliState::load();
+        fresh.pods.iter()
+            .find(|p| p.pod_id == pod.pod_id)
+            .and_then(|p| p.gateway_token.clone())
+    };
+
     let accept_loop = async move {
         loop {
             match listener.accept().await {
                 Ok((client, _addr)) => {
                     let upstream_addr = upstream_for_accept.clone();
                     let cache_dir = cache_dir.clone();
+                    let gateway_token = gateway_token.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_forwarder_connection(client, upstream_addr.clone(), cache_dir).await {
+                        if let Err(e) = handle_forwarder_connection(client, upstream_addr.clone(), cache_dir, gateway_token).await {
                             eprintln!("[tytus ui] connection error (upstream {}): {}", upstream_addr, e);
                         }
                     });
@@ -4373,6 +4410,7 @@ async fn handle_forwarder_connection(
     mut client: tokio::net::TcpStream,
     upstream_addr: String,
     cache_dir: std::path::PathBuf,
+    gateway_token: Option<String>,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -4404,7 +4442,7 @@ async fn handle_forwarder_connection(
         Some(v) => v,
         None => {
             // Unparseable — dump everything to upstream and bridge raw.
-            return raw_proxy(client, &buf, &upstream_addr).await;
+            return raw_proxy(client, &buf, &upstream_addr, gateway_token.as_deref()).await;
         }
     };
     let method = method.to_string();
@@ -4412,7 +4450,7 @@ async fn handle_forwarder_connection(
 
     let is_cacheable = method.eq_ignore_ascii_case("GET") && is_cacheable_asset(&path);
     if !is_cacheable {
-        return raw_proxy(client, &buf, &upstream_addr).await;
+        return raw_proxy(client, &buf, &upstream_addr, gateway_token.as_deref()).await;
     }
 
     // Cache lookup.
@@ -4447,19 +4485,37 @@ async fn handle_forwarder_connection(
     // `Host` is cosmetic for this path since the upstream is a raw
     // TCP socket already resolved, but we set it so agent log lines
     // aren't blank.
+    // Include the Authorization header so even cache-miss requests
+    // go through auth. Belt-and-suspenders; most cacheable assets
+    // don't require auth but the agent can be configured to require
+    // auth on /assets/* too and we'd never want to cache a 401.
+    let auth_line = match gateway_token.as_deref() {
+        Some(t) if !t.is_empty() => format!("Authorization: Bearer {}\r\n", t),
+        _ => String::new(),
+    };
     let synthetic_req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-        path, upstream_addr
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: */*\r\n{}Connection: close\r\n\r\n",
+        path, upstream_addr, auth_line,
     );
     upstream.write_all(synthetic_req.as_bytes()).await?;
     let _ = &buf; // we read the client's request head to parse it, but don't replay it
     let mut response: Vec<u8> = Vec::with_capacity(64 * 1024);
     upstream.read_to_end(&mut response).await?;
 
-    // Only cache 2xx responses. Everything else (403, 404, 5xx) should
-    // re-probe upstream on the next request — caching a transient failure
-    // would make it sticky.
-    if response_is_2xx(&response) && !response.is_empty() {
+    // Only cache 2xx responses that are COMPLETE. The completeness check
+    // matters: `upstream.read_to_end()` returns successfully even if the
+    // upstream socket closes mid-body (tunnel hiccup, agent restart in
+    // progress, WG re-keying glitch). Caching that truncated response
+    // then serving it with its original Content-Length header makes
+    // every subsequent browser request hang — the browser reads the
+    // bytes we have, then waits forever for the missing remainder.
+    // Observed 2026-04-19: main bundle cached at 111 KB with
+    // Content-Length: 689625 after agent restart → page permanently
+    // stuck at "loading".
+    let cacheable_ok = response_is_2xx(&response)
+        && !response.is_empty()
+        && response_is_complete(&response);
+    if cacheable_ok {
         // The cache dir may have been removed out from under us (user
         // deleted /tmp/tytus manually, periodic /tmp sweep, etc).
         // Re-create before the atomic write or we silently skip caching.
@@ -4487,9 +4543,48 @@ async fn handle_forwarder_connection(
         if path.ends_with(".js") || path.ends_with(".mjs") {
             spawn_chunk_prefetch(&response, cache_dir.clone(), upstream_addr.clone()).await;
         }
+    } else if response_is_2xx(&response) && !response.is_empty() {
+        eprintln!("[tytus ui] skipped caching truncated response for {}", path);
     }
     client.write_all(&response).await?;
     Ok(())
+}
+
+/// True when the response's body length matches its declared length.
+/// Rejects:
+///   - Content-Length header present but body shorter (truncation).
+///   - Transfer-Encoding: chunked (we don't dechunk; don't cache).
+/// Accepts:
+///   - Content-Length present AND body == declared length.
+///   - No length headers at all (rare; HTTP/1.0-style). We assume
+///     connection-close-delimited and the whole thing was read.
+fn response_is_complete(response: &[u8]) -> bool {
+    let head_end = match response.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(p) => p + 4,
+        None => return false,
+    };
+    let head = &response[..head_end];
+    let body_len = response.len() - head_end;
+
+    // Parse headers case-insensitively for Transfer-Encoding / Content-Length.
+    let head_str = match std::str::from_utf8(head) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let mut content_length: Option<usize> = None;
+    for line in head_str.split("\r\n") {
+        let lower = line.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("content-length:") {
+            content_length = v.trim().parse::<usize>().ok();
+        }
+        if let Some(v) = lower.strip_prefix("transfer-encoding:") {
+            if v.contains("chunked") { return false; }
+        }
+    }
+    match content_length {
+        Some(cl) => body_len == cl,
+        None => true,
+    }
 }
 
 /// Scan a just-cached JS response body for Vite-style hashed asset
@@ -4605,19 +4700,27 @@ async fn fetch_and_cache_asset(
 /// Raw TCP proxy path: forward the already-consumed request head to
 /// upstream, then bidirectional-copy until either side closes.
 ///
-/// Rewrites the Origin (and Referer) header to the upstream origin
-/// before forwarding. OpenClaw's gateway enforces a strict CORS
-/// allowedOrigins check on the WebSocket upgrade handshake, and the
-/// default config only trusts the pod's own endpoint
-/// (http://10.X.Y.1:3000). Without this rewrite, every browser
-/// connection through the forwarder gets rejected with "origin not
-/// allowed" and the control UI stays stuck on a red error banner.
-/// Rewriting at the forwarder lets any localhost:port just work
-/// without the user having to edit config.json inside the pod.
+/// Two header rewrites happen before forwarding:
+///
+///   1. Origin / Host / Referer → upstream host. OpenClaw's gateway
+///      enforces allowedOrigins on the WS upgrade; the default config
+///      only trusts the pod's own endpoint. Without this rewrite,
+///      every browser connection gets bounced with "origin not
+///      allowed".
+///
+///   2. Authorization: Bearer <gateway_token>. The agent's gateway
+///      token is mandatory (mode:"token" cannot be disabled — it
+///      gets regenerated on every cold start). The forwarder caches
+///      the token in state.json at install time and injects it on
+///      every request so the browser never sees the "paste token"
+///      login form. If the browser already sent its own
+///      Authorization header (e.g. user dev-tool adjustments), we
+///      preserve it.
 async fn raw_proxy(
     mut client: tokio::net::TcpStream,
     request_head: &[u8],
     upstream_addr: &str,
+    gateway_token: Option<&str>,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
@@ -4629,9 +4732,40 @@ async fn raw_proxy(
         }
     };
     let rewritten = rewrite_origin_headers(request_head, upstream_addr);
-    upstream.write_all(&rewritten).await?;
+    let with_auth = inject_auth_header(&rewritten, gateway_token);
+    upstream.write_all(&with_auth).await?;
     let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
     Ok(())
+}
+
+/// Insert `Authorization: Bearer <token>` into the request head if:
+///   - `gateway_token` is Some, non-empty, AND
+///   - the request doesn't already carry an Authorization header.
+/// Inserted just before the blank-line terminator so it's the last
+/// header parsed. Preserves CRLF style. No-op if token is empty.
+fn inject_auth_header(request_head: &[u8], gateway_token: Option<&str>) -> Vec<u8> {
+    let Some(token) = gateway_token else { return request_head.to_vec(); };
+    if token.is_empty() { return request_head.to_vec(); }
+    let text = match std::str::from_utf8(request_head) {
+        Ok(s) => s,
+        Err(_) => return request_head.to_vec(),
+    };
+    // If the browser already sent Authorization, don't override.
+    for line in text.split("\r\n") {
+        if line.to_ascii_lowercase().starts_with("authorization:") {
+            return request_head.to_vec();
+        }
+    }
+    // Insert before the terminator "\r\n\r\n" → split and glue.
+    if let Some(pos) = text.find("\r\n\r\n") {
+        let (head, tail) = text.split_at(pos);
+        let mut out = String::with_capacity(text.len() + 64);
+        out.push_str(head);
+        out.push_str(&format!("\r\nAuthorization: Bearer {}", token));
+        out.push_str(tail);
+        return out.into_bytes();
+    }
+    request_head.to_vec()
 }
 
 /// Rewrite `Origin:` and `Referer:` header values so they look like the
@@ -5641,6 +5775,7 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
                         tunnel_iface: None,
                         stable_ai_endpoint: None,
                         stable_user_key: None,
+                        gateway_token: None,
                     });
                 }
             }

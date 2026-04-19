@@ -42,6 +42,13 @@ pub struct PodEntry {
     pub stable_ai_endpoint: Option<String>,
     #[serde(default)]
     pub stable_user_key: Option<String>,
+    /// Agent's internal gateway auth token (e.g. OpenClaw's
+    /// `gateway.auth.token`). Fetched from the pod at agent install
+    /// time and cached here so the forwarder can auto-inject it on
+    /// every request — user never sees the "paste token" form.
+    /// Rotated when the agent is reinstalled (old token goes stale).
+    #[serde(default)]
+    pub gateway_token: Option<String>,
 }
 
 impl CliState {
