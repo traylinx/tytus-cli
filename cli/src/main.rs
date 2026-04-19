@@ -226,9 +226,13 @@ enum Commands {
         /// Pod ID (defaults to first connected pod)
         #[arg(short, long)]
         pod: Option<String>,
-        /// Local port to bind the forwarder on (default: 3000, falls back on conflict)
-        #[arg(short = 'P', long, default_value = "3000")]
-        port: u16,
+        /// Local port to bind the forwarder on. If omitted, defaults to
+        /// `18700 + pod_num` (pod 01 → 18701, pod 02 → 18702, …). Port
+        /// 3000 used to be the default but conflicted with every React /
+        /// Next / Rails dev server; the 18700s are a quiet neighborhood
+        /// and the per-pod offset makes URLs bookmarkable.
+        #[arg(short = 'P', long)]
+        port: Option<u16>,
         /// Don't open the browser automatically — just print the URL
         #[arg(long)]
         no_open: bool,
@@ -3822,7 +3826,7 @@ fn cmd_tray(action: TrayAction, _json: bool) {
 async fn cmd_ui(
     http: &atomek_core::HttpClient,
     pod_id: Option<String>,
-    mut local_port: u16,
+    port_override: Option<u16>,
     no_open: bool,
     json: bool,
 ) {
@@ -3976,19 +3980,49 @@ async fn cmd_ui(
         }
     }
 
-    // Bind the listener. If the requested port is taken, fall back to the next 5 ports.
+    // Port selection. In order:
+    //   1. Explicit --port / -P wins and is used as-is.
+    //   2. Derived port `18700 + pod_num` (pod 01 → 18701, pod 02 → 18702).
+    //      The 18700s are a quiet neighborhood free of React/Next/Rails
+    //      defaults, and the per-pod offset makes bookmarks deterministic.
+    //   3. On collision, try +100 / +200 / +300 / +400 — same pod offset,
+    //      walking up the decade. Preserves per-pod layout.
+    //   4. Last resort: kernel-assigned ephemeral (bind port 0). The
+    //      marker records whichever port we actually got.
+    let pod_num: u16 = pod.pod_id.parse().unwrap_or(0);
+    let derived_base: u16 = 18700u16.saturating_add(pod_num);
+    let candidates: Vec<u16> = match port_override {
+        Some(p) => vec![p],
+        None => vec![
+            derived_base,
+            derived_base.saturating_add(100),
+            derived_base.saturating_add(200),
+            derived_base.saturating_add(300),
+            derived_base.saturating_add(400),
+        ],
+    };
+
     let mut listener: Option<TcpListener> = None;
-    for attempt in 0..6u16 {
-        let p = local_port + attempt;
-        match TcpListener::bind(("127.0.0.1", p)).await {
+    let mut local_port: u16 = 0;
+    for p in &candidates {
+        if let Ok(l) = TcpListener::bind(("127.0.0.1", *p)).await {
+            local_port = *p;
+            listener = Some(l);
+            break;
+        }
+    }
+    if listener.is_none() {
+        // All preferred ports taken. Kernel ephemeral — still works, just
+        // not bookmarkable. The marker file + reuse path cover the
+        // "reopen to same URL" case, so the cost is only the first URL
+        // being e.g. localhost:49213 instead of localhost:18702.
+        match TcpListener::bind(("127.0.0.1", 0)).await {
             Ok(l) => {
-                local_port = p;
+                if let Ok(addr) = l.local_addr() { local_port = addr.port(); }
                 listener = Some(l);
-                break;
             }
-            Err(_) if attempt < 5 => continue,
             Err(e) => {
-                eprintln!("Could not bind 127.0.0.1:{} (all fallbacks failed): {}", local_port, e);
+                eprintln!("Could not bind any localhost port (preferred: {:?}): {}", candidates, e);
                 std::process::exit(1);
             }
         }

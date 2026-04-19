@@ -323,6 +323,16 @@ tytus ui [--pod NN] [-P PORT] [--no-open]
                                    forwarder down after 15s of
                                    unreachable upstream (tunnel dropped).
 
+                                   DEFAULT PORT: 18700 + pod_num, so
+                                   pod 01 → http://localhost:18701/,
+                                   pod 02 → http://localhost:18702/, …
+                                   Bookmarkable and stable. If that
+                                   exact port is taken it retries
+                                   +100/+200/+300/+400 before falling
+                                   back to a kernel-ephemeral port.
+                                   Override with `-P <port>` if you
+                                   really want a specific value.
+
 tytus ui --stop [--pod NN]         SIGTERM a running UI forwarder.
                                    Without --pod, stops every one.
                                    Cleans stale markers too.
