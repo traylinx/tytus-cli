@@ -4394,8 +4394,133 @@ async fn handle_forwarder_connection(
         if tokio::fs::write(&tmp_path, &response).await.is_ok() {
             let _ = tokio::fs::rename(&tmp_path, &cache_file).await;
         }
+
+        // Chunk-graph prefetch. Vite-built apps use dynamic `import()`
+        // for code-splitting; the main bundle holds a __vite__mapDeps
+        // table listing every chunk it may load at runtime, and those
+        // chunks are NOT referenced in the HTML. Without prefetching,
+        // the browser runs the main JS, hits an import(), and THAT
+        // triggers a fresh tunnel round-trip for 10+ KB of JS at
+        // ~3 KB/s — which is why the OpenClaw control UI stays blank
+        // for 30–60 s after a "cached" page load. Fix: every time we
+        // cache a JS response, scan the body for hashed-filename
+        // refs and enqueue background prefetches for anything not
+        // already on disk. Fire-and-forget, rate-limited by TCP.
+        if path.ends_with(".js") || path.ends_with(".mjs") {
+            spawn_chunk_prefetch(&response, cache_dir.clone(), upstream_addr.clone()).await;
+        }
     }
     client.write_all(&response).await?;
+    Ok(())
+}
+
+/// Scan a just-cached JS response body for Vite-style hashed asset
+/// references (e.g. `agents-Bg94Sj_g.js`, `channel-config-extras-
+/// VzujQvi4.js`) and fire-and-forget a background fetch for any that
+/// aren't already cached. Limits concurrency to 3 so we don't saturate
+/// the WireGuard tunnel and starve the foreground request.
+async fn spawn_chunk_prefetch(
+    response: &[u8],
+    cache_dir: std::path::PathBuf,
+    upstream_addr: String,
+) {
+    // Locate end of HTTP headers, then scan body for hashed filenames.
+    let idx = match response.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(i) => i + 4,
+        None => return,
+    };
+    let body = match std::str::from_utf8(&response[idx..]) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    // Hashed filename pattern: <name>-<8+ hash chars>.<ext>
+    // Kept deliberately permissive; the cache lookup below is the real
+    // filter (we only fetch if it's a known cacheable extension that
+    // isn't already on disk).
+    let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (start_idx, _) in body.match_indices(|c: char| c == '"' || c == '\'') {
+        let rest = &body[start_idx + 1..];
+        let end = match rest.find(|c: char| c == '"' || c == '\'') {
+            Some(e) => e,
+            None => continue,
+        };
+        let raw = &rest[..end];
+        // Vite emits module IDs as "./<name>-<hash>.<ext>"; strip any
+        // leading "./" or "/" so the rest of the filter sees a bare
+        // filename. Without this, every dynamic import fell through
+        // the "contains('/')" check and never prefetched.
+        let candidate = raw.trim_start_matches("./").trim_start_matches('/');
+        if !candidate.contains('-') { continue; }
+        if candidate.contains('/') { continue; } // still multi-path? skip
+        let ext = match candidate.rfind('.') { Some(p) => &candidate[p..], None => continue };
+        if !matches!(ext, ".js" | ".mjs" | ".css" | ".svg" | ".png" | ".woff2" | ".wasm") {
+            continue;
+        }
+        candidates.insert(candidate.to_string());
+    }
+
+    if candidates.is_empty() { return; }
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(candidates.len().max(1));
+    for c in candidates {
+        let _ = tx.send(c).await;
+    }
+    drop(tx);
+
+    // Pool of 3 workers. Each pulls from the queue and fetches any item
+    // that isn't yet cached. Fetch uses the same synthetic minimal GET
+    // we use for foreground misses.
+    let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
+    for _ in 0..3 {
+        let rx = rx.clone();
+        let cache_dir = cache_dir.clone();
+        let upstream_addr = upstream_addr.clone();
+        tokio::spawn(async move {
+            loop {
+                let name = {
+                    let mut guard = rx.lock().await;
+                    match guard.recv().await {
+                        Some(n) => n,
+                        None => return,
+                    }
+                };
+                let asset_path = format!("/assets/{}", name);
+                let cache_file = cache_dir.join(cache_key_for(&asset_path));
+                if cache_file.exists() { continue; }
+                let _ = fetch_and_cache_asset(&upstream_addr, &asset_path, &cache_file).await;
+            }
+        });
+    }
+}
+
+/// One prefetch round-trip: synthetic GET to upstream, write the full
+/// HTTP response to the cache file. Failures are swallowed — prefetch
+/// is best-effort; a miss just turns into a foreground fetch later.
+async fn fetch_and_cache_asset(
+    upstream_addr: &str,
+    path: &str,
+    cache_file: &std::path::Path,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut upstream = tokio::net::TcpStream::connect(upstream_addr).await?;
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        path, upstream_addr
+    );
+    upstream.write_all(req.as_bytes()).await?;
+    let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    upstream.read_to_end(&mut buf).await?;
+    if !response_is_2xx(&buf) || buf.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = cache_file.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let tmp = cache_file.with_extension("tmp");
+    if tokio::fs::write(&tmp, &buf).await.is_ok() {
+        let _ = tokio::fs::rename(&tmp, cache_file).await;
+    }
     Ok(())
 }
 
