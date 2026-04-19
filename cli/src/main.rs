@@ -4332,6 +4332,26 @@ async fn cmd_ui(
         }
     }
 
+    // Safety net for pods provisioned before the config.user.json overlay
+    // writer landed: check the live agent config for our forwarder port
+    // in `gateway.controlUi.allowedOrigins`; if missing, write the overlay
+    // and trigger one restart. Idempotent — on pods installed with the new
+    // code this is a cheap read-only probe.
+    //
+    // We do this in a background task so the forwarder starts serving the
+    // 302-redirect + asset cache immediately. First browser WS upgrade
+    // might race the restart by ~2 seconds; the UI's reconnect-with-
+    // backoff handles that gracefully.
+    {
+        let http2 = http.clone();
+        let pod_id2 = pod.pod_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = ensure_controlui_overlay(&http2, &pod_id2).await {
+                eprintln!("[tytus ui] overlay ensure: {e}");
+            }
+        });
+    }
+
     let accept_loop = async move {
         loop {
             match listener.accept().await {
@@ -4382,6 +4402,71 @@ async fn cmd_ui(
     // marker, but the reuse probe also checks `kill(pid, 0)` before
     // trusting it.
     let _ = std::fs::remove_file(&marker_path);
+}
+
+/// Ensures the pod's `config.user.json` overlay contains the forwarder's
+/// localhost port in `gateway.controlUi.allowedOrigins`. Without it, the
+/// browser's WS upgrade fails origin-check (even though Host + Origin are
+/// loopback) and silent local pairing can't fire.
+///
+/// Idempotent — does nothing if the overlay already has our entry.
+/// Restarts the agent only when the overlay had to be written or fixed,
+/// so "Open in Browser" on an already-provisioned pod is a no-op.
+async fn ensure_controlui_overlay(
+    http: &atomek_core::HttpClient,
+    pod_id: &str,
+) -> Result<(), String> {
+    let st = CliState::load();
+    let secret = st.secret_key.as_deref().ok_or("no secret_key in state")?;
+    let uid = st.agent_user_id.as_deref().ok_or("no agent_user_id in state")?;
+    let client = atomek_pods::TytusClient::new(http, secret, uid);
+    let pod_num: u16 = pod_id.parse().unwrap_or(0);
+    let fwd_port = 18700u16.saturating_add(pod_num);
+    let wanted = format!("http://localhost:{}", fwd_port);
+    let wanted2 = format!("http://127.0.0.1:{}", fwd_port);
+
+    // Probe the live config. If our origin is already in allowedOrigins,
+    // skip the write + restart.
+    let probe_cmd = "cat /app/workspace/.openclaw/config.json 2>/dev/null | node -e \
+         \"let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{\
+         try{const c=JSON.parse(d);process.stdout.write(JSON.stringify(c.gateway?.controlUi?.allowedOrigins||[]))}\
+         catch(e){process.stdout.write('[]')}})\"";
+    let probe = atomek_pods::exec_in_agent(&client, pod_id, probe_cmd, 10)
+        .await
+        .map_err(|e| e.to_string())?;
+    let origins: Vec<String> = serde_json::from_str(probe.stdout.as_deref().unwrap_or("[]"))
+        .unwrap_or_default();
+    if origins.iter().any(|o| o == &wanted) && origins.iter().any(|o| o == &wanted2) {
+        return Ok(());
+    }
+
+    // Missing — write the overlay and restart.
+    let overlay = serde_json::json!({
+        "gateway": {
+            "controlUi": {
+                "allowedOrigins": [
+                    "http://localhost:3000",
+                    "http://127.0.0.1:3000",
+                    format!("http://10.18.{}.1:3000", pod_num),
+                    wanted,
+                    wanted2,
+                ]
+            }
+        }
+    }).to_string();
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(overlay.as_bytes());
+    let write_cmd = format!(
+        "node -e \"require('fs').writeFileSync('/app/workspace/.openclaw/config.user.json', \
+         Buffer.from('{b64}','base64').toString('utf8'))\""
+    );
+    let _ = atomek_pods::exec_in_agent(&client, pod_id, &write_cmd, 10)
+        .await
+        .map_err(|e| e.to_string())?;
+    atomek_pods::restart_agent(&client, pod_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Best-effort fetch of the agent's current `gateway.auth.token` via
