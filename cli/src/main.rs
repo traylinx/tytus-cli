@@ -4570,10 +4570,17 @@ fn rewrite_origin_headers(request_head: &[u8], upstream_addr: &str) -> Vec<u8> {
     let mut out = String::with_capacity(body.len());
     for line in body.split_inclusive("\r\n") {
         let trimmed = line.trim_end_matches("\r\n");
-        // Match "Origin: …" or "Referer: …" case-insensitively.
+        // Match "Origin: …", "Referer: …", "Host: …" case-insensitively.
+        // Host matters for Node/Express-style apps that use req.hostname
+        // for routing or signed cookies; without rewriting, the upstream
+        // sees Host: localhost:18702 and a typo-prone fraction of apps
+        // refuse to serve. Origin is the CSRF gate (OpenClaw's
+        // allowedOrigins); Referer is a secondary hint some apps log.
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("origin:") {
             out.push_str(&format!("Origin: {}\r\n", upstream_origin));
+        } else if lower.starts_with("host:") {
+            out.push_str(&format!("Host: {}\r\n", upstream_addr));
         } else if lower.starts_with("referer:") {
             // Keep the original path component; only swap the scheme+host.
             // `Referer: http://localhost:18702/chat?session=main` →
@@ -5580,5 +5587,128 @@ fn print_human_status(state: &CliState) {
                 println!("  Tunnel:        {}", iface);
             }
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Unit tests for the forwarder's header + cache-key helpers.
+// The full integration test (real tunnel + browser) can't run in
+// CI; these tests cover the pure logic that has to stay correct
+// across every possible pod/IP/port combination.
+// ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod forwarder_tests {
+    use super::*;
+
+    #[test]
+    fn origin_header_rewritten_for_any_upstream() {
+        // Matrix: three pods across two droplets, two agent types.
+        let scenarios = [
+            ("10.18.1.1:3000",  "pod 01 on droplet 18, openclaw"),
+            ("10.18.2.1:3000",  "pod 02 on droplet 18, openclaw"),
+            ("10.18.2.1:8642",  "pod 02 on droplet 18, hermes"),
+            ("10.42.7.1:3000",  "pod 07 on droplet 42, openclaw"),
+            ("10.99.99.1:8642", "pod 99 on droplet 99, hermes"),
+        ];
+        for (upstream, desc) in scenarios {
+            let req = format!(
+                "GET /ws HTTP/1.1\r\n\
+                 Host: localhost:18702\r\n\
+                 Origin: http://localhost:18702\r\n\
+                 Referer: http://localhost:18702/chat?s=main\r\n\
+                 Connection: Upgrade\r\n\
+                 Upgrade: websocket\r\n\r\n"
+            );
+            let rewritten = rewrite_origin_headers(req.as_bytes(), upstream);
+            let text = std::str::from_utf8(&rewritten).expect("utf8");
+            let expected_origin = format!("Origin: http://{}", upstream);
+            let expected_host = format!("Host: {}", upstream);
+            let expected_referer = format!("Referer: http://{}/chat?s=main", upstream);
+            assert!(text.contains(&expected_origin), "{}: missing {}", desc, expected_origin);
+            assert!(text.contains(&expected_host),   "{}: missing {}", desc, expected_host);
+            assert!(text.contains(&expected_referer),"{}: missing {}", desc, expected_referer);
+            assert!(text.contains("Connection: Upgrade"), "{}: lost Connection header", desc);
+            assert!(text.contains("Upgrade: websocket"),  "{}: lost Upgrade header", desc);
+        }
+    }
+
+    #[test]
+    fn origin_rewrite_case_insensitive() {
+        let req = b"GET / HTTP/1.1\r\norigin: http://localhost:18702\r\nHOST: localhost:18702\r\n\r\n";
+        let rewritten = rewrite_origin_headers(req, "10.18.2.1:3000");
+        let text = std::str::from_utf8(&rewritten).unwrap();
+        assert!(text.contains("Origin: http://10.18.2.1:3000"));
+        assert!(text.contains("Host: 10.18.2.1:3000"));
+    }
+
+    #[test]
+    fn origin_rewrite_preserves_unrelated_headers() {
+        let req = b"GET / HTTP/1.1\r\nAccept: */*\r\nOrigin: http://localhost:18702\r\nCookie: session=abc\r\nUser-Agent: curl\r\n\r\n";
+        let rewritten = rewrite_origin_headers(req, "10.18.2.1:3000");
+        let text = std::str::from_utf8(&rewritten).unwrap();
+        assert!(text.contains("Accept: */*"));
+        assert!(text.contains("Cookie: session=abc"));
+        assert!(text.contains("User-Agent: curl"));
+        assert!(text.contains("Origin: http://10.18.2.1:3000"));
+    }
+
+    #[test]
+    fn origin_rewrite_noop_when_no_origin_header() {
+        let req = b"GET / HTTP/1.1\r\nHost: localhost:18702\r\nAccept: */*\r\n\r\n";
+        let rewritten = rewrite_origin_headers(req, "10.18.2.1:3000");
+        let text = std::str::from_utf8(&rewritten).unwrap();
+        // Host still rewritten, everything else preserved.
+        assert!(text.contains("Host: 10.18.2.1:3000"));
+        assert!(text.contains("Accept: */*"));
+        assert!(!text.contains("Origin:"));
+    }
+
+    #[test]
+    fn origin_rewrite_handles_forwarder_port_variants() {
+        // User might set --port, hit fallback 18800+, or land on ephemeral
+        // port. Rewrite just replaces the whole Origin value — source
+        // port doesn't matter.
+        for forwarder_port in [18701, 18702, 18799, 18802, 19102, 49213, 3000] {
+            let req = format!(
+                "GET / HTTP/1.1\r\nOrigin: http://localhost:{}\r\n\r\n",
+                forwarder_port
+            );
+            let rewritten = rewrite_origin_headers(req.as_bytes(), "10.18.2.1:3000");
+            let text = std::str::from_utf8(&rewritten).unwrap();
+            assert!(text.contains("Origin: http://10.18.2.1:3000"), "failed for fp={}", forwarder_port);
+            assert!(!text.contains(&format!("localhost:{}", forwarder_port)),
+                "leaked source port {} in rewritten request", forwarder_port);
+        }
+    }
+
+    #[test]
+    fn cache_key_is_deterministic_and_safe() {
+        assert_eq!(cache_key_for("/assets/index-Dts6VHgr.js"), "_assets_index-Dts6VHgr.js");
+        assert_eq!(cache_key_for("/assets/index-Dts6VHgr.js?v=2"), "_assets_index-Dts6VHgr.js");
+        assert_eq!(cache_key_for("/deep/path/with-hash-1A2B.css"), "_deep_path_with-hash-1A2B.css");
+        // No /, no weird chars
+        assert!(!cache_key_for("/anything").contains('/'));
+    }
+
+    #[test]
+    fn is_cacheable_asset_accepts_expected_extensions() {
+        for p in ["/x.js", "/x.mjs", "/x.css", "/x.svg", "/x.png", "/x.woff2", "/x.wasm"] {
+            assert!(is_cacheable_asset(p), "should cache {}", p);
+        }
+        for p in ["/api/foo", "/data.json", "/", "/chat", "/__openclaw/control-ui-config.json"] {
+            assert!(!is_cacheable_asset(p), "should NOT cache {}", p);
+        }
+    }
+
+    #[test]
+    fn response_2xx_detector() {
+        assert!(response_is_2xx(b"HTTP/1.1 200 OK\r\n\r\n"));
+        assert!(response_is_2xx(b"HTTP/1.1 204 No Content\r\n\r\n"));
+        assert!(response_is_2xx(b"HTTP/1.0 201 Created\r\n\r\n"));
+        assert!(!response_is_2xx(b"HTTP/1.1 404 Not Found\r\n\r\n"));
+        assert!(!response_is_2xx(b"HTTP/1.1 500 Internal Server Error\r\n\r\n"));
+        assert!(!response_is_2xx(b""));
+        assert!(!response_is_2xx(b"garbage"));
     }
 }
