@@ -734,7 +734,7 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
         }
         if pod.agent_endpoint.is_none() {
             if let (Some(ref ep), Some(ref at)) = (&pod.ai_endpoint, &pod.agent_type) {
-                let port = if at == "hermes" { 8642 } else { 3000 };
+                let port = agent_ui_port(at);
                 pod.agent_endpoint = ep.strip_suffix(":18080").map(|b| format!("{}:{}", b, port));
             }
         }
@@ -4154,7 +4154,7 @@ async fn cmd_ui(
         None => {
             match pod.ai_endpoint.as_deref() {
                 Some(ai) => {
-                    let default_port = if pod.agent_type.as_deref() == Some("hermes") { 8642 } else { 3000 };
+                    let default_port = agent_ui_port(pod.agent_type.as_deref().unwrap_or("nemoclaw"));
                     ai.strip_prefix("http://")
                         .and_then(|s| s.split(':').next())
                         .map(|host| format!("{}:{}", host, default_port))
@@ -4699,36 +4699,47 @@ async fn handle_forwarder_connection(
     let method = method.to_string();
     let path = path.to_string();
 
-    // Per-agent shell-route handling:
+    // Per-agent request handling. Two distinct shapes:
     //
-    // OpenClaw (nemoclaw): ships a browser chat UI at / and /chat. The UI
-    //   reads `?token=<T>` from the URL on first load, stashes it in
-    //   settings, then strips it. Without this seed we'd dead-end at
-    //   "gateway token missing". Solution: 302 redirect adding ?token=.
+    // OpenClaw (nemoclaw): single listener serves both the chat-UI
+    //   SPA and the WS RPC on the same port (3000). The UI reads
+    //   `?token=<T>` from the URL on first load, stashes it in
+    //   settings, then strips it via history.replaceState. Without
+    //   the seed the UI dead-ends at "gateway token missing" because
+    //   browsers can't set custom headers on `new WebSocket()`. So
+    //   we 302-redirect HTML shell GETs with `?token=<T>` appended.
     //
-    // Hermes: has NO browser UI — it's an OpenAI-compatible HTTP API.
-    //   GET / returns 404 upstream. We serve a locally-rendered landing
-    //   page with ready-to-paste curl / SDK snippets so "Open in Browser"
-    //   still lands on something useful. Every other method/path flows
-    //   through raw_proxy with Authorization: Bearer auto-injected.
+    // Hermes: two separate listeners inside the pod — `hermes gateway
+    //   run` on 8642 (OpenAI-compat API + cron) and `hermes dashboard`
+    //   on 9119 (Vite/React management SPA). We multiplex on path:
+    //     `/v1/*`, `/api/jobs*`, `/health*` → gateway (8642); inject
+    //       `Authorization: Bearer <API_SERVER_KEY>` so SDKs don't
+    //       need a key.
+    //     everything else → dashboard (9119); no auth injection —
+    //       the dashboard embeds its own ephemeral session token in
+    //       the HTML (`window.__HERMES_SESSION_TOKEN__`) and the SPA
+    //       reads it from there.
+    //   No landing page / 302 dance needed — the dashboard IS the
+    //   landing experience, self-contained.
     let head_bytes = &buf[..head_end];
     let is_ws_upgrade = is_websocket_upgrade(head_bytes);
     let path_has_token = path.contains("token=");
     let has_ext = is_cacheable_asset(&path);
 
-    if agent_type == "hermes"
-        && method.eq_ignore_ascii_case("GET")
-        && !is_ws_upgrade
-        && matches!(path.split('?').next().unwrap_or(""), "/" | "/help" | "/index.html")
-    {
-        let page = render_hermes_landing(local_port, pod_id, gateway_token.as_deref(), stable_user_key);
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
-            page.len(), page,
-        );
-        client.write_all(resp.as_bytes()).await?;
-        return Ok(());
-    }
+    // For Hermes: split upstream by path; only inject auth when we
+    // route to the gateway (API). Dashboard requests MUST pass through
+    // with whatever Authorization the SPA decides to send (its own
+    // session token) — overriding would 401 every /api/* call.
+    let (effective_upstream, should_inject_auth): (String, bool) = if agent_type == "hermes" {
+        if hermes_path_needs_api_upstream(&path) {
+            (with_port(&upstream_addr, agent_api_port(agent_type)), true)
+        } else {
+            (with_port(&upstream_addr, agent_ui_port(agent_type)), false)
+        }
+    } else {
+        (upstream_addr.clone(), true)
+    };
+    let forwarder_token = if should_inject_auth { gateway_token.as_deref() } else { None };
 
     if agent_type != "hermes"
         && method.eq_ignore_ascii_case("GET")
@@ -4750,9 +4761,14 @@ async fn handle_forwarder_connection(
         }
     }
 
+    // Silence "unused variable" warnings for args that are only read
+    // in the hermes landing path (which has now been removed — the
+    // dashboard supersedes it).
+    let _ = (local_port, pod_id, stable_user_key);
+
     let is_cacheable = method.eq_ignore_ascii_case("GET") && has_ext;
     if !is_cacheable {
-        return raw_proxy(client, &buf, &upstream_addr, gateway_token.as_deref()).await;
+        return raw_proxy(client, &buf, &effective_upstream, forwarder_token).await;
     }
 
     // Cache lookup.
@@ -5151,21 +5167,14 @@ fn rewrite_origin_headers(request_head: &[u8], upstream_addr: &str) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Render the local landing page served at GET / on a Hermes forwarder.
-///
-/// Hermes has no browser UI, so "Open in Browser" would otherwise dead-end
-/// at a 404 from the upstream. This page gives the user concrete, ready-
-/// to-copy snippets (curl, Python OpenAI SDK, Node OpenAI SDK) with the
-/// forwarder URL + their stable OPENAI_API_KEY — zero manual config.
-///
-/// The keys embedded here are:
-///   - `forwarder_key` (aka gateway_token): derived API_SERVER_KEY; the
-///     forwarder auto-injects it on every proxied request, so users
-///     typically don't even need it. We show it as a fallback for tools
-///     that bypass the forwarder.
-///   - `stable_user_key`: the user's cross-pod OPENAI_API_KEY for
-///     switchAILocal. Preferred for hitting `ail-compound` directly
-///     outside hermes.
+/// Kept as dead code after the Hermes dashboard-proxy landed. Before
+/// that change, Hermes pods had no browser UI so the forwarder served
+/// this local landing page at GET /. Now that the pod runs
+/// `hermes dashboard` on 9119 and we proxy to it, the function is
+/// superseded — but we keep the renderer around as a fallback in case
+/// we ever need to show SDK snippets from a pod that only runs the
+/// gateway (e.g. --gateway-only flag, minimal image variants).
+#[allow(dead_code)]
 fn render_hermes_landing(
     local_port: u16,
     pod_id: &str,
@@ -5236,6 +5245,47 @@ export OPENAI_API_KEY="{sdk_key}"</pre>
 /// Position of the \r\n\r\n header terminator + 4 (start of body), if any.
 fn find_crlf2(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+}
+
+/// Per-agent port convention. Two ports matter:
+///
+///   - UI port — where the browser lands when the user clicks
+///     "Open in Browser". This is what `agent_endpoint` in state.json
+///     points at and the default upstream for the forwarder.
+///   - API port — where OpenAI-compatible traffic (`/v1/*`) and other
+///     programmatic endpoints live. For single-listener agents this
+///     is the same port as the UI; for Hermes it's a separate server
+///     (hermes gateway run on 8642 alongside hermes dashboard on 9119).
+///
+/// Keeping these as pure functions (not state) means the convention
+/// lives in one place and the forwarder can multiplex without any
+/// provider/DAM round-trip.
+fn agent_ui_port(agent_type: &str) -> u16 {
+    match agent_type { "hermes" => 9119, _ => 3000 }
+}
+
+fn agent_api_port(agent_type: &str) -> u16 {
+    match agent_type { "hermes" => 8642, _ => 3000 }
+}
+
+/// For the given request path on a Hermes pod, decide which upstream
+/// the forwarder should target. OpenAI-compat routes and the gateway
+/// health probes go to the gateway; everything else (SPA, /api/* for
+/// dashboard config, static assets) goes to the dashboard.
+fn hermes_path_needs_api_upstream(path: &str) -> bool {
+    let p = path.split('?').next().unwrap_or(path);
+    p.starts_with("/v1/")
+        || p == "/health"
+        || p == "/health/detailed"
+        || p.starts_with("/api/jobs")
+}
+
+/// Swap the port component of a `host:port` upstream string.
+fn with_port(upstream: &str, port: u16) -> String {
+    match upstream.rfind(':') {
+        Some(i) => format!("{}:{}", &upstream[..i], port),
+        None => format!("{}:{}", upstream, port),
+    }
 }
 
 /// True if this request is a WebSocket upgrade (`Upgrade: websocket` +
