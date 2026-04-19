@@ -1601,6 +1601,10 @@ async fn cmd_agent_install(
                         println!("✓ {} installed on pod {}", name, a.pod_id);
                         println!("  Activate: tytus connect --pod {}", a.pod_id);
                     }
+                    // Zero-config hook: patch the agent to not demand a
+                    // gateway token. See `configure_agent_for_zero_auth`
+                    // for rationale. Best-effort, non-fatal on failure.
+                    let _ = configure_agent_for_zero_auth(&client, &a.pod_id, json).await;
                     Some(returned_pod_id)
                 }
                 Err(e) => {
@@ -1643,6 +1647,7 @@ async fn cmd_agent_install(
                     } else {
                         println!("✓ {} installed on pod {}", name, pid);
                     }
+                    let _ = configure_agent_for_zero_auth(&client, &pid, json).await;
                     Some(pid)
                 }
                 Err(e) => {
@@ -1650,6 +1655,77 @@ async fn cmd_agent_install(
                     std::process::exit(1);
                 }
             }
+        }
+    }
+}
+
+/// Zero-config hook run after every successful `tytus agent install`.
+///
+/// OpenClaw's default config requires a per-install random token that
+/// the user has to manually paste into the web UI's login form. Since
+/// the pod is only reachable through the user's private WireGuard
+/// tunnel, that extra token is redundant at the threat-model level
+/// (nothing else on the network can even route to 10.X.Y.1:3000), but
+/// the friction derails the "click Open in Browser → use it" flow.
+/// Additionally, allowedOrigins defaults to the pod's own IP and
+/// localhost:3000 — not our forwarder's per-pod port.
+///
+/// This hook (a) flips `gateway.auth.mode` to `"none"` so the WebSocket
+/// upgrade accepts any client, and (b) expands allowedOrigins to
+/// include `http://localhost:187NN` + `http://127.0.0.1:187NN` so
+/// future port changes don't re-introduce the origin-not-allowed
+/// bounce. Both live-patch the in-container config.json then restart
+/// the agent so the new config takes effect.
+///
+/// Best-effort: on any failure (container still starting, provider
+/// unreachable, script parse error) we log a warning and leave the
+/// user to deal with the default auth manually. We never abort the
+/// install for this.
+async fn configure_agent_for_zero_auth(
+    client: &atomek_pods::TytusClient,
+    pod_id: &str,
+    json: bool,
+) -> Result<(), String> {
+    let pod_num: u16 = pod_id.parse().unwrap_or(0);
+    let fwd_port = 18700u16.saturating_add(pod_num);
+    let script = format!(
+        "node -e \"const fs=require('fs');\
+         const p='/app/workspace/.openclaw/config.json';\
+         try {{ const c=JSON.parse(fs.readFileSync(p,'utf8'));\
+         c.gateway=c.gateway||{{}};\
+         c.gateway.auth={{mode:'none'}};\
+         c.gateway.controlUi=c.gateway.controlUi||{{}};\
+         const o=c.gateway.controlUi.allowedOrigins||[];\
+         for (const h of ['http://localhost:{port}','http://127.0.0.1:{port}']) if (!o.includes(h)) o.push(h);\
+         c.gateway.controlUi.allowedOrigins=o;\
+         fs.writeFileSync(p, JSON.stringify(c,null,2));\
+         console.log('zero-config applied'); }} catch(e) {{ console.error('skip:', e.message); process.exit(0); }}\"",
+        port = fwd_port,
+    );
+
+    // Exec into the container to patch config.
+    match atomek_pods::exec_in_agent(client, pod_id, &script, 15).await {
+        Ok(r) if r.exit_code == 0 => {
+            // Restart so the new config takes effect. Non-fatal on failure.
+            if let Err(e) = atomek_pods::restart_agent(client, pod_id).await {
+                if !json { eprintln!("  (zero-config: restart failed: {})", e); }
+                return Err(e.to_string());
+            }
+            if !json {
+                println!("  Zero-config: gateway auth disabled, forwarder origin trusted.");
+            }
+            Ok(())
+        }
+        Ok(r) => {
+            let err = r.stderr.as_deref().unwrap_or("").trim().to_string();
+            if !json {
+                eprintln!("  (zero-config: script exit {}: {})", r.exit_code, err);
+            }
+            Err(format!("exit {}: {}", r.exit_code, err))
+        }
+        Err(e) => {
+            if !json { eprintln!("  (zero-config: exec failed: {})", e); }
+            Err(e.to_string())
         }
     }
 }
@@ -1973,13 +2049,15 @@ async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
         // a Disconnect leaves localhost:3000 bound to a dead upstream,
         // and the next browser click errors silently.
         stop_ui_forwarder(pod_num);
-        // Wipe the forwarder's static-asset cache. If the pod comes back
-        // with a different agent (install openclaw → uninstall → install
-        // hermes), serving the previous agent's cached JS/CSS would be
-        // wrong. Disconnect is the bright-line "assume everything may
-        // change" event. Best-effort — cache loss just costs the next
-        // page load its initial tunnel hit.
-        let _ = std::fs::remove_dir_all(format!("/tmp/tytus/ui-{}-cache", pod_num));
+        // Intentionally do NOT wipe /tmp/tytus/ui-<pod>-cache here —
+        // every disconnect+reconnect cycle would then force a 2–3 minute
+        // full bundle re-download through the slow tunnel. Vite-built
+        // apps use content-hashed filenames, so a different agent
+        // version naturally produces different /assets/<hash>.js URLs
+        // and misses cache cleanly. Cache eviction belongs to the
+        // agent-lifecycle commands (install/uninstall/revoke), not the
+        // tunnel-lifecycle ones. Discovered 2026-04-19 after user hit
+        // 2+ minute loads on every reconnect.
     }
     state.save();
 
