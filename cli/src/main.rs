@@ -232,6 +232,11 @@ enum Commands {
         /// Don't open the browser automatically — just print the URL
         #[arg(long)]
         no_open: bool,
+        /// Stop an already-running forwarder for this pod instead of starting one.
+        /// Reads /tmp/tytus/ui-<pod>.port and sends SIGTERM to the pid. With no
+        /// --pod, stops every live forwarder.
+        #[arg(long)]
+        stop: bool,
     },
     /// Run diagnostics: check auth, tunnel, gateway connectivity
     Doctor,
@@ -328,7 +333,10 @@ async fn main() {
         Some(Commands::Restart { pod }) => cmd_restart(&http, pod, cli.json).await,
         Some(Commands::Exec { command, pod, timeout }) => cmd_exec(&http, command, pod, timeout, cli.json).await,
         Some(Commands::Autostart { action }) => cmd_autostart(action, cli.json),
-        Some(Commands::Ui { pod, port, no_open }) => cmd_ui(&http, pod, port, no_open, cli.json).await,
+        Some(Commands::Ui { pod, port, no_open, stop }) => {
+            if stop { cmd_ui_stop(pod, cli.json).await; }
+            else    { cmd_ui(&http, pod, port, no_open, cli.json).await; }
+        }
         Some(Commands::Doctor) => cmd_doctor(&http, cli.json).await,
         Some(Commands::Daemon { action }) => cmd_daemon(action, cli.json).await,
         Some(Commands::Tray { action }) => cmd_tray(action, cli.json),
@@ -4016,10 +4024,21 @@ async fn cmd_ui(
     // Tell the compiler http is used (it's held for future needs — token fetch, etc.)
     let _ = http;
 
+    // We want the forwarder to outlive the Terminal (or detached
+    // spawn_detached) that started it. That means graceful shutdown on
+    // BOTH SIGINT (user pressed Ctrl+C in Terminal) AND SIGTERM (the
+    // "Stop Forwarder" menu item in the tray sends one). Without SIGTERM
+    // in the select!, `tytus ui stop` would have to `kill -9` us and the
+    // marker file would leak.
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigterm = signal(SignalKind::terminate()).ok();
     tokio::select! {
         _ = accept_loop => {}
         _ = tokio::signal::ctrl_c() => {
             if !json { println!("\n✓ Forwarder stopped."); }
+        }
+        _ = async { if let Some(ref mut s) = sigterm { s.recv().await; } else { std::future::pending::<()>().await } } => {
+            if !json { println!("\n✓ Forwarder stopped (SIGTERM)."); }
         }
     }
 
@@ -4028,6 +4047,69 @@ async fn cmd_ui(
     // marker, but the reuse probe also checks `kill(pid, 0)` before
     // trusting it.
     let _ = std::fs::remove_file(&marker_path);
+}
+
+/// `tytus ui --stop [--pod N]`: send SIGTERM to any running UI forwarder
+/// so the browser tab stays the address of record until the user chooses
+/// to shut the forwarder down. Reads /tmp/tytus/ui-*.port markers to
+/// discover pids. With --pod, acts on that one pod; without, stops them
+/// all.
+async fn cmd_ui_stop(pod_id: Option<String>, json: bool) {
+    let dir = std::path::PathBuf::from("/tmp/tytus");
+    let mut stopped: Vec<(String, i32)> = Vec::new();
+    let mut stale: Vec<String> = Vec::new();
+
+    let markers: Vec<std::path::PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                n.starts_with("ui-") && n.ends_with(".port")
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    for path in markers {
+        let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let pod = fname.trim_start_matches("ui-").trim_end_matches(".port").to_string();
+        if let Some(ref want) = pod_id {
+            if &pod != want { continue; }
+        }
+        let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => continue };
+        let v: serde_json::Value = match serde_json::from_str(&raw) { Ok(v) => v, Err(_) => {
+            let _ = std::fs::remove_file(&path); stale.push(pod); continue;
+        }};
+        let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as i32;
+        if pid <= 0 || unsafe { libc::kill(pid, 0) } != 0 {
+            let _ = std::fs::remove_file(&path);
+            stale.push(pod);
+            continue;
+        }
+        unsafe { libc::kill(pid, libc::SIGTERM); }
+        // Give it a moment to clean up its own marker; if it's stuck, we
+        // remove the file ourselves so the tray doesn't reuse it.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            let _ = std::fs::remove_file(&path);
+        }
+        stopped.push((pod, pid));
+    }
+
+    if json {
+        println!("{}", serde_json::json!({
+            "stopped": stopped.iter().map(|(p, pid)| serde_json::json!({"pod_id": p, "pid": pid})).collect::<Vec<_>>(),
+            "stale_markers_cleaned": stale,
+        }));
+    } else {
+        if stopped.is_empty() && stale.is_empty() {
+            match pod_id {
+                Some(p) => println!("No forwarder running for pod {}", p),
+                None    => println!("No forwarders running"),
+            }
+        }
+        for (p, pid) in &stopped { println!("✓ Stopped forwarder for pod {} (pid {})", p, pid); }
+        for p in &stale { println!("→ Cleaned stale marker for pod {}", p); }
+    }
 }
 
 // ── Doctor (diagnostics) ────────────────────────────────────

@@ -616,10 +616,22 @@ fn build_menu(state: &TrayState) -> Menu {
                 // isn't. Per user request 2026-04-19 "we need to be able
                 // to reach always the tytus pod openclaw or hermes agent
                 // via the browser".
+                let forwarder_live = existing_ui_forwarder(&p.pod_id).is_some();
+                let open_label = if forwarder_live {
+                    "  Open in Browser  (forwarder running)".to_string()
+                } else {
+                    "  Open in Browser".to_string()
+                };
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_{}_open", p.pod_id),
-                    "  Open in Browser", true, None,
+                    &open_label, true, None,
                 ));
+                if forwarder_live {
+                    let _ = pods_sub.append(&MenuItem::with_id(
+                        format!("pod_{}_stop_forwarder", p.pod_id),
+                        "  Stop Forwarder", true, None,
+                    ));
+                }
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_{}_restart", p.pod_id),
                     "  Restart Agent", true, None,
@@ -954,28 +966,54 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             single_instance::release();
             std::process::exit(0);
         }
-        // Open the pod's agent web UI via a localhost forwarder. `tytus
-        // ui` binds 127.0.0.1:3000 (or next free) → pod's agent port,
-        // opens the default browser, blocks until Ctrl+C. Run it in
-        // Terminal so the forwarder stays alive and the user sees the
-        // URL + "Press Ctrl+C to stop" hint. Closing the Terminal stops
-        // the forwarder.
+        // Open the pod's agent web UI.
         //
-        // Fast path: if an existing forwarder for this pod is already
-        // running (marker file /tmp/tytus/ui-<pod>.port with live pid
-        // + listening port), skip the Terminal entirely and just reopen
-        // the browser to the existing localhost URL. Keeps the second,
-        // third, fourth click from piling up Terminal windows.
+        // Reuse path: if a forwarder is already running (marker file
+        // /tmp/tytus/ui-<pod>.port with live pid + bound port), just
+        // re-open the browser to the existing URL.
+        //
+        // Fresh path: spawn `tytus ui --pod N --no-open` DETACHED (no
+        // Terminal, no TTY) so the forwarder survives the user closing
+        // any window. Log to /tmp/tytus/ui-<pod>.log. Then poll the
+        // marker up to ~3s for the port to come up, then `open` the
+        // browser. The forwarder is stopped explicitly via the per-pod
+        // "Stop Forwarder" menu item (or `tytus ui --stop --pod N`),
+        // NOT by closing a Terminal that no longer exists.
         other if other.starts_with("pod_") && other.ends_with("_open") => {
-            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open");
-            if let Some(existing_url) = existing_ui_forwarder(pod_id) {
+            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open").to_string();
+            if let Some(existing_url) = existing_ui_forwarder(&pod_id) {
                 let _ = std::process::Command::new("open").arg(&existing_url).spawn();
             } else {
-                open_in_terminal_simple(&format!(
-                    "tytus ui --pod {}; echo; echo 'Press Enter to close…'; read _",
-                    shell_escape(pod_id),
-                ));
+                spawn_detached_ui(&pod_id);
+                // Poll the marker up to 3s, then open whatever URL it landed on.
+                let pod_for_poll = pod_id.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..30 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        if let Some(url) = existing_ui_forwarder(&pod_for_poll) {
+                            let _ = std::process::Command::new("open").arg(&url).spawn();
+                            return;
+                        }
+                    }
+                    // Timed out — the forwarder may need the tunnel swap path
+                    // (sudo elevation dialog). Fall back to Terminal so the
+                    // user can see what's happening.
+                    let _ = std::process::Command::new("osascript")
+                        .arg("-e")
+                        .arg(format!(
+                            "display notification \"Forwarder for pod {} didn't come up in 3s — opening Terminal for diagnostics.\" with title \"Tytus\"",
+                            pod_for_poll
+                        ))
+                        .spawn();
+                });
             }
+        }
+        // Stop the per-pod forwarder daemon.
+        other if other.starts_with("pod_") && other.ends_with("_stop_forwarder") => {
+            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_stop_forwarder").to_string();
+            // Run via CLI so we get the same marker cleanup + exit code path
+            // that CLI users see. Detached — no Terminal window for this.
+            spawn_detached("tytus", &["ui", "--stop", "--pod", &pod_id]);
         }
         // Agent container restart (no state loss).
         other if other.starts_with("pod_") && other.ends_with("_restart") => {
@@ -1073,6 +1111,32 @@ fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// Start `tytus ui --pod <pod_id> --no-open` as a fully detached
+/// background process. No TTY, no Terminal window. Output is appended
+/// to /tmp/tytus/ui-<pod>.log so diagnostics survive without needing a
+/// visible shell. The tray just launches it and forgets — the forwarder
+/// stays alive until SIGTERM'd via "Stop Forwarder" or `tytus ui --stop`.
+fn spawn_detached_ui(pod_id: &str) {
+    use std::process::Stdio;
+    let log_path = format!("/tmp/tytus/ui-{}.log", pod_id);
+    let log = std::fs::OpenOptions::new()
+        .create(true).append(true).open(&log_path);
+    let stdout: Stdio = match &log {
+        Ok(f) => Stdio::from(f.try_clone().unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap())),
+        Err(_) => Stdio::null(),
+    };
+    let stderr: Stdio = match log {
+        Ok(f) => Stdio::from(f),
+        Err(_) => Stdio::null(),
+    };
+    let _ = std::process::Command::new("tytus")
+        .args(["ui", "--pod", pod_id, "--no-open"])
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn();
 }
 
 fn shell_escape(s: &str) -> String {
