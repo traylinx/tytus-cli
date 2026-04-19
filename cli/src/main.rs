@@ -4499,8 +4499,31 @@ async fn handle_forwarder_connection(
     );
     upstream.write_all(synthetic_req.as_bytes()).await?;
     let _ = &buf; // we read the client's request head to parse it, but don't replay it
+
+    // Stream upstream → client in 16 KB chunks while accumulating the
+    // full body in memory for the cache write at EOF. Previously we
+    // buffered the entire response before writing anything to the
+    // client: for a 689 KB bundle at ~5 KB/s that's 130 s of zero
+    // browser progress followed by a burst. Browsers interpret long
+    // silence as "stuck" and keep the spinner running forever even
+    // though bytes would eventually arrive. Streaming lets the parser
+    // start on the head of the JS while the tail is still on the wire.
     let mut response: Vec<u8> = Vec::with_capacity(64 * 1024);
-    upstream.read_to_end(&mut response).await?;
+    let mut chunk = [0u8; 16 * 1024];
+    let mut client_abandoned = false;
+    loop {
+        let n = upstream.read(&mut chunk).await?;
+        if n == 0 { break; }
+        response.extend_from_slice(&chunk[..n]);
+        if !client_abandoned {
+            if client.write_all(&chunk[..n]).await.is_err() {
+                // Client closed mid-stream. Keep reading upstream so
+                // the cache file can still be complete for the next
+                // request — no wasted work.
+                client_abandoned = true;
+            }
+        }
+    }
 
     // Only cache 2xx responses that are COMPLETE. The completeness check
     // matters: `upstream.read_to_end()` returns successfully even if the
@@ -4546,7 +4569,8 @@ async fn handle_forwarder_connection(
     } else if response_is_2xx(&response) && !response.is_empty() {
         eprintln!("[tytus ui] skipped caching truncated response for {}", path);
     }
-    client.write_all(&response).await?;
+    // Response was already streamed to the client during the read loop.
+    // Nothing more to send.
     Ok(())
 }
 
