@@ -306,6 +306,27 @@ tytus tray start                   Open /Applications/Tytus.app (or fall
                                    back to ~/bin/tytus-tray). Useful from
                                    scripts after a `quit`.
 
+tytus ui [--pod NN] [-P PORT] [--no-open]
+                                   Start a 127.0.0.1 → pod agent TCP
+                                   forwarder so the browser sees the
+                                   OpenClaw / Hermes UI on localhost
+                                   (WebCrypto + Service Workers require
+                                   HTTPS or localhost). Runs detached
+                                   when spawned by the tray — survives
+                                   closing any Terminal. Reuses an
+                                   existing forwarder if one is already
+                                   live for the same pod (marker file
+                                   `/tmp/tytus/ui-<pod>.port`). Auto-
+                                   swaps the tunnel if it isn't routing
+                                   to the requested pod. An internal
+                                   5-second upstream probe shuts the
+                                   forwarder down after 15s of
+                                   unreachable upstream (tunnel dropped).
+
+tytus ui --stop [--pod NN]         SIGTERM a running UI forwarder.
+                                   Without --pod, stops every one.
+                                   Cleans stale markers too.
+
 tytus llm-docs                     Print THIS document.
 ```
 

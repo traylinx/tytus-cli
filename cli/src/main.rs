@@ -1899,6 +1899,10 @@ async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
         if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == *pod_num) {
             pod.tunnel_iface = None;
         }
+        // A2: tear down any UI forwarder for this pod too. Without this,
+        // a Disconnect leaves localhost:3000 bound to a dead upstream,
+        // and the next browser click errors silently.
+        stop_ui_forwarder(pod_num);
     }
     state.save();
 
@@ -2033,6 +2037,14 @@ async fn cmd_exec(http: &atomek_core::HttpClient, command: Vec<String>, pod_id: 
 
 async fn cmd_logout(http: &atomek_core::HttpClient, json: bool) {
     let mut state = CliState::load();
+
+    // A3: kill every live UI forwarder before we revoke pods. Otherwise
+    // logout leaves orphan forwarders bound to 127.0.0.1 ports pointing
+    // at endpoints that no longer exist, and subsequent fresh logins get
+    // "stale marker" warnings.
+    for pod in list_ui_forwarder_pods() {
+        stop_ui_forwarder(&pod);
+    }
 
     if state.is_logged_in() {
         if let (Some(ref sk), Some(ref auid)) = (&state.secret_key, &state.agent_user_id) {
@@ -3965,6 +3977,18 @@ async fn cmd_ui(
     });
     let _ = std::fs::write(&marker_path, marker_body.to_string());
 
+    // C1: cap the forwarder log at 1 MB. Since the tray starts cmd_ui
+    // detached with stderr piped to /tmp/tytus/ui-<pod>.log, a long-lived
+    // session + a per-request eprintln (upstream failure spam) can grow
+    // the file unbounded. Truncate on startup — we'd rather lose old
+    // diagnostics than leak disk.
+    let log_path = std::path::PathBuf::from(format!("/tmp/tytus/ui-{}.log", pod.pod_id));
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > 1_048_576 {
+            let _ = std::fs::File::create(&log_path);
+        }
+    }
+
     let url = format!("http://localhost:{}/", local_port);
     let upstream_clone = upstream.clone();
 
@@ -3995,6 +4019,37 @@ async fn cmd_ui(
         #[cfg(target_os = "linux")]
         let _ = Command::new("xdg-open").arg(&url).spawn();
     }
+
+    // A1: upstream health monitor. TCP-probe the upstream every 5s;
+    // after 3 consecutive failures, assume the tunnel is gone (disconnect,
+    // agent restart lost its port, etc.) and shut down cleanly. Without
+    // this, a dead forwarder keeps binding 127.0.0.1:3000 and every
+    // browser click hangs with "ERR_EMPTY_RESPONSE".
+    let upstream_probe = upstream_clone.clone();
+    let (health_tx, mut health_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let mut consecutive_fails: u32 = 0;
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        tick.tick().await; // burn the immediate tick; first real probe at 5s
+        loop {
+            tick.tick().await;
+            let probe = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                TcpStream::connect(&upstream_probe),
+            ).await;
+            match probe {
+                Ok(Ok(_)) => { consecutive_fails = 0; }
+                _ => {
+                    consecutive_fails += 1;
+                    if consecutive_fails >= 3 {
+                        eprintln!("[tytus ui] upstream {} unreachable for 15s — shutting down forwarder", upstream_probe);
+                        let _ = health_tx.send(());
+                        return;
+                    }
+                }
+            }
+        }
+    });
 
     let upstream_for_accept = upstream_clone.clone();
     let accept_loop = async move {
@@ -4040,6 +4095,9 @@ async fn cmd_ui(
         _ = async { if let Some(ref mut s) = sigterm { s.recv().await; } else { std::future::pending::<()>().await } } => {
             if !json { println!("\n✓ Forwarder stopped (SIGTERM)."); }
         }
+        _ = &mut health_rx => {
+            if !json { println!("\n✓ Forwarder stopped (upstream lost)."); }
+        }
     }
 
     // Clear our port marker so the next click doesn't try to reuse a
@@ -4047,6 +4105,43 @@ async fn cmd_ui(
     // marker, but the reuse probe also checks `kill(pid, 0)` before
     // trusting it.
     let _ = std::fs::remove_file(&marker_path);
+}
+
+/// Send SIGTERM to the UI forwarder for one pod (if running). Best-effort:
+/// silently returns if no marker or dead pid. Used by A2 (`cmd_disconnect`
+/// teardown) and A3 (`cmd_logout` teardown) to keep the forwarder's
+/// lifecycle bound to the tunnel's / session's.
+fn stop_ui_forwarder(pod_id: &str) {
+    let path = format!("/tmp/tytus/ui-{}.port", pod_id);
+    let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => return };
+    let v: serde_json::Value = match serde_json::from_str(&raw) { Ok(v) => v, Err(_) => {
+        let _ = std::fs::remove_file(&path); return;
+    }};
+    let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as i32;
+    if pid > 0 && unsafe { libc::kill(pid, 0) } == 0 {
+        unsafe { libc::kill(pid, libc::SIGTERM); }
+    }
+    // Let cmd_ui clean its own marker on SIGTERM exit. Give it 250 ms;
+    // if still there, remove to keep the tray from reusing a zombie.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    if std::path::Path::new(&path).exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Enumerate pod_ids of every currently-running forwarder.
+fn list_ui_forwarder_pods() -> Vec<String> {
+    let mut pods = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/tmp/tytus") {
+        for entry in rd.flatten() {
+            let n = entry.file_name();
+            let name = n.to_string_lossy();
+            if let Some(pod) = name.strip_prefix("ui-").and_then(|s| s.strip_suffix(".port")) {
+                pods.push(pod.to_string());
+            }
+        }
+    }
+    pods
 }
 
 /// `tytus ui --stop [--pod N]`: send SIGTERM to any running UI forwarder
@@ -4225,6 +4320,34 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
                 }
             }
         }
+    }
+
+    // C2: UI forwarders — show what localhost:port → pod mappings are
+    // currently bound. Orphaned forwarders from previous sessions show
+    // up here, so the user can kill them with `tytus ui --stop`.
+    let fwd_pods = list_ui_forwarder_pods();
+    if fwd_pods.is_empty() {
+        checks.push(("ui_forwarders", true, "None running".into()));
+    } else {
+        let mut lines: Vec<String> = Vec::new();
+        let mut any_stale = false;
+        for pod in &fwd_pods {
+            let path = format!("/tmp/tytus/ui-{}.port", pod);
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as i32;
+                    let port = v.get("port").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let alive = pid > 0 && unsafe { libc::kill(pid, 0) == 0 };
+                    if alive {
+                        lines.push(format!("pod {} → 127.0.0.1:{} (pid {})", pod, port, pid));
+                    } else {
+                        any_stale = true;
+                        lines.push(format!("pod {} → STALE marker (pid {} dead)", pod, pid));
+                    }
+                }
+            }
+        }
+        checks.push(("ui_forwarders", !any_stale, lines.join("; ")));
     }
 
     // 8. MCP server

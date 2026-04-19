@@ -617,14 +617,19 @@ fn build_menu(state: &TrayState) -> Menu {
                 // to reach always the tytus pod openclaw or hermes agent
                 // via the browser".
                 let forwarder_live = existing_ui_forwarder(&p.pod_id).is_some();
-                let open_label = if forwarder_live {
-                    "  Open in Browser  (forwarder running)".to_string()
-                } else {
-                    "  Open in Browser".to_string()
+                let tunnel_live = tunnel_reaches_pod(&p.pod_id);
+                // B1: label reflects ground truth so the user knows
+                // whether a click will (a) just open a tab, (b) start a
+                // forwarder, or (c) also swap the tunnel (Touch ID prompt
+                // possible). Three-state rendering keeps the menu honest.
+                let open_label = match (forwarder_live, tunnel_live) {
+                    (true, _)      => "  Open in Browser  ✓",
+                    (false, true)  => "  Open in Browser",
+                    (false, false) => "  Connect & Open in Browser",
                 };
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_{}_open", p.pod_id),
-                    &open_label, true, None,
+                    open_label, true, None,
                 ));
                 if forwarder_live {
                     let _ = pods_sub.append(&MenuItem::with_id(
@@ -1111,6 +1116,18 @@ fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// True if a WireGuard tunnel is currently up for this pod. We check
+/// `/tmp/tytus/tunnel-<pod>.pid` — written by cmd_tunnel_up under the
+/// elevated helper — AND verify the pid is actually alive. The pidfile
+/// lingering without a running daemon is a known failure mode (crash
+/// before cleanup), so liveness matters.
+fn tunnel_reaches_pod(pod_id: &str) -> bool {
+    let path = format!("/tmp/tytus/tunnel-{}.pid", pod_id);
+    let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => return false };
+    let pid: i32 = match raw.trim().parse() { Ok(p) => p, Err(_) => return false };
+    pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
 }
 
 /// Start `tytus ui --pod <pod_id> --no-open` as a fully detached
