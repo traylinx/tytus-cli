@@ -4282,14 +4282,33 @@ async fn cmd_ui(
     // Without this, the browser would see "unauthorized: gateway
     // token missing" because OpenClaw's gateway enforces auth on
     // the WebSocket upgrade and we never let the user paste it.
-    // Re-read state here so the most recent value (possibly just
-    // updated by a restart + reinstall) is used.
-    let gateway_token = {
+    //
+    // Self-heal: if state.json has no gateway_token (old state file,
+    // manual edit, user wiped ~/.config/tytus, etc.), fetch the
+    // current token directly from the agent via Provider /pod/agent/
+    // exec. Provider A2A headers (secret_key + agent_user_id) live in
+    // state.json and do NOT require the keychain refresh token — so
+    // this path works even when keychain is broken (dev rebuilds,
+    // background processes that can't show the approval dialog). On
+    // success we persist the token back so the next start is instant.
+    let mut gateway_token = {
         let fresh = CliState::load();
         fresh.pods.iter()
             .find(|p| p.pod_id == pod.pod_id)
             .and_then(|p| p.gateway_token.clone())
     };
+    if gateway_token.as_deref().map(|t| t.is_empty()).unwrap_or(true) {
+        if let Some(t) = fetch_gateway_token_via_provider(http, &pod.pod_id).await {
+            if !t.is_empty() {
+                gateway_token = Some(t.clone());
+                let mut st = CliState::load();
+                for p in st.pods.iter_mut() {
+                    if p.pod_id == pod.pod_id { p.gateway_token = Some(t.clone()); }
+                }
+                st.save();
+            }
+        }
+    }
 
     let accept_loop = async move {
         loop {
@@ -4341,6 +4360,30 @@ async fn cmd_ui(
     // marker, but the reuse probe also checks `kill(pid, 0)` before
     // trusting it.
     let _ = std::fs::remove_file(&marker_path);
+}
+
+/// Best-effort fetch of the agent's current `gateway.auth.token` via
+/// Provider's `/pod/agent/exec` route, using the A2A creds that already
+/// live in state.json (`secret_key` + `agent_user_id`). No keychain /
+/// refresh-token path involved — so this works even when keychain ACLs
+/// are broken (typical for background-spawned forwarders that can't
+/// show the macOS approval dialog). Returns None on any failure.
+async fn fetch_gateway_token_via_provider(
+    http: &atomek_core::HttpClient,
+    pod_id: &str,
+) -> Option<String> {
+    let st = CliState::load();
+    let secret = st.secret_key.as_deref()?;
+    let user_id = st.agent_user_id.as_deref()?;
+    let client = atomek_pods::TytusClient::new(http, secret, user_id);
+    let script = "cat /app/workspace/.openclaw/config.json 2>/dev/null | \
+                  node -e \"let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{\
+                  try{const c=JSON.parse(d);\
+                  process.stdout.write((c.gateway&&c.gateway.auth&&c.gateway.auth.token)||'');}\
+                  catch(e){process.exit(0);}})\"";
+    let res = atomek_pods::exec_in_agent(&client, pod_id, script, 10).await.ok()?;
+    let token = res.stdout.unwrap_or_default().trim().to_string();
+    if token.is_empty() { None } else { Some(token) }
 }
 
 /// Send SIGTERM to the UI forwarder for one pod (if running). Best-effort:
@@ -4448,7 +4491,48 @@ async fn handle_forwarder_connection(
     let method = method.to_string();
     let path = path.to_string();
 
-    let is_cacheable = method.eq_ignore_ascii_case("GET") && is_cacheable_asset(&path);
+    // Token-seeding redirect for HTML shell requests.
+    //
+    // OpenClaw's gateway ONLY accepts the auth token via the WebSocket
+    // connect frame — not an HTTP `Authorization:` header. Browsers also
+    // can't set custom headers on `new WebSocket(...)`. The control UI
+    // bundle reads the token from `?token=<T>` (or `#token=<T>`) on
+    // initial page load, stores it in settings, then strips it from the
+    // URL with `history.replaceState`. After that, the WS client uses
+    // the stored token — no user paste required. Without this seed, the
+    // dashboard loads and the user sees "unauthorized: gateway token
+    // missing (open the dashboard URL and paste the token…)".
+    //
+    // Strategy: when the browser requests an HTML shell route (GET, no
+    // `Upgrade: websocket`, no file extension, no `token=` already in
+    // the query), reply with a 302 that appends `?token=<T>`. The UI
+    // consumes it on load and cleans the URL. The tests of path shape
+    // below are deliberately conservative so we don't rewrite API /
+    // asset / WS traffic.
+    let head_bytes = &buf[..head_end];
+    let is_ws_upgrade = is_websocket_upgrade(head_bytes);
+    let path_has_token = path.contains("token=");
+    let has_ext = is_cacheable_asset(&path);
+    if method.eq_ignore_ascii_case("GET")
+        && !is_ws_upgrade
+        && !has_ext
+        && !path_has_token
+    {
+        if let Some(ref t) = gateway_token {
+            if !t.is_empty() {
+                let sep = if path.contains('?') { '&' } else { '?' };
+                let location = format!("{}{}token={}", path, sep, t);
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+                    location,
+                );
+                client.write_all(resp.as_bytes()).await?;
+                return Ok(());
+            }
+        }
+    }
+
+    let is_cacheable = method.eq_ignore_ascii_case("GET") && has_ext;
     if !is_cacheable {
         return raw_proxy(client, &buf, &upstream_addr, gateway_token.as_deref()).await;
     }
@@ -4838,6 +4922,34 @@ fn rewrite_origin_headers(request_head: &[u8], upstream_addr: &str) -> Vec<u8> {
 /// Position of the \r\n\r\n header terminator + 4 (start of body), if any.
 fn find_crlf2(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+}
+
+/// True if this request is a WebSocket upgrade (`Upgrade: websocket` +
+/// `Connection: upgrade`, case-insensitive, possibly with other tokens in
+/// Connection like `keep-alive, Upgrade`). We must NOT serve a 302
+/// redirect for these: WS clients don't follow HTTP redirects, the
+/// handshake just fails.
+fn is_websocket_upgrade(head: &[u8]) -> bool {
+    let s = match std::str::from_utf8(head) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let mut has_ws_upgrade = false;
+    let mut has_conn_upgrade = false;
+    for line in s.split("\r\n") {
+        let lower = line.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("upgrade:") {
+            if v.trim() == "websocket" {
+                has_ws_upgrade = true;
+            }
+        }
+        if let Some(v) = lower.strip_prefix("connection:") {
+            if v.split(',').any(|tok| tok.trim() == "upgrade") {
+                has_conn_upgrade = true;
+            }
+        }
+    }
+    has_ws_upgrade && has_conn_upgrade
 }
 
 /// Parse `METHOD path HTTP/1.1\r\n…` → (method, path). Returns None for
