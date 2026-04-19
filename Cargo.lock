@@ -158,6 +158,7 @@ dependencies = [
  "atomek-core",
  "atomek-pods",
  "atomek-tunnel",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "console",

@@ -1689,30 +1689,52 @@ async fn configure_agent_for_zero_auth(
     pod_id: &str,
     json: bool,
 ) -> Result<(), String> {
-    // 1. Patch allowedOrigins so the forwarder's per-pod localhost
-    //    port is trusted. Belt-and-suspenders with the request-time
-    //    Origin rewrite in cmd_ui.
-    // 2. Fetch the agent's gateway.auth.token — the agent regenerates
-    //    it on each cold start and it cannot reliably be disabled
-    //    (mode:"none" gets reset to "token" on restart). Instead we
-    //    fetch it and stash in state.json so the forwarder can
-    //    auto-inject `Authorization: Bearer <token>` on every
-    //    request. The browser never sees the token; the user never
-    //    sees the login form.
+    // 1. Write a `config.user.json` overlay that adds the forwarder's
+    //    per-pod localhost port to `gateway.controlUi.allowedOrigins`.
+    //    Critical: the previous implementation patched `config.json`
+    //    directly, but nemoclaw-configure.sh REGENERATES that file
+    //    from scratch on every container restart — wiping our patch.
+    //    The overlay pattern (`config.user.json`) is deep-merged on
+    //    top on every restart, so the origins stick forever.
+    // 2. Fetch the agent's gateway.auth.token — the agent keeps its
+    //    token across restarts (deterministic from AIL_API_KEY) so
+    //    this is stable. Stash in state.json so the forwarder can
+    //    seed it into the browser URL and skip the "paste token"
+    //    form on first load.
+    //
+    // The controlUi origins must include both `localhost:<port>` AND
+    // `127.0.0.1:<port>` — browsers differ on which they use when the
+    // user hits `http://localhost:...`. Silent local pairing fires
+    // when origin + host BOTH resolve to loopback (see
+    // isControlUiBrowserContainerLocalEquivalent in server.impl).
     let pod_num: u16 = pod_id.parse().unwrap_or(0);
     let fwd_port = 18700u16.saturating_add(pod_num);
+    let overlay_json = serde_json::json!({
+        "gateway": {
+            "controlUi": {
+                "allowedOrigins": [
+                    "http://localhost:3000",
+                    "http://127.0.0.1:3000",
+                    format!("http://10.18.{}.1:3000", pod_num),
+                    format!("http://localhost:{}", fwd_port),
+                    format!("http://127.0.0.1:{}", fwd_port),
+                ]
+            }
+        }
+    }).to_string();
+    // Base64 the overlay to sidestep every shell-quoting pitfall (single
+    // quotes inside shell commands, heredoc delimiter choice, JSON with
+    // embedded backslashes). The node side decodes once and writes the
+    // file atomically. On success we print the current gateway.auth.token
+    // from config.json so the caller can stash it in state.json.
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(overlay_json.as_bytes());
     let script = format!(
-        "node -e \"const fs=require('fs');\
-         const p='/app/workspace/.openclaw/config.json';\
-         try {{ const c=JSON.parse(fs.readFileSync(p,'utf8'));\
-         c.gateway=c.gateway||{{}};\
-         c.gateway.controlUi=c.gateway.controlUi||{{}};\
-         const o=c.gateway.controlUi.allowedOrigins||[];\
-         for (const h of ['http://localhost:{port}','http://127.0.0.1:{port}']) if (!o.includes(h)) o.push(h);\
-         c.gateway.controlUi.allowedOrigins=o;\
-         fs.writeFileSync(p, JSON.stringify(c,null,2));\
-         console.log(c.gateway.auth && c.gateway.auth.token || ''); }} catch(e) {{ console.error(e.message); process.exit(1); }}\"",
-        port = fwd_port,
+        "node -e \"const fs=require('fs'); \
+         fs.writeFileSync('/app/workspace/.openclaw/config.user.json', Buffer.from('{b64}','base64').toString('utf8')); \
+         const c=JSON.parse(fs.readFileSync('/app/workspace/.openclaw/config.json','utf8')); \
+         process.stdout.write((c.gateway&&c.gateway.auth&&c.gateway.auth.token)||'')\"",
+        b64 = b64,
     );
 
     match atomek_pods::exec_in_agent(client, pod_id, &script, 15).await {

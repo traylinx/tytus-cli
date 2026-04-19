@@ -39,6 +39,7 @@ crossterm.workspace = true
 # Tytus.app icon set from a procedurally-drawn T glyph. No image-processing
 # pipeline — we emit raw RGBA buffers and let macOS' `sips` resize them.
 png = "0.17"
+base64.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
