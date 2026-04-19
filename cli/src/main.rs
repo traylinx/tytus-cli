@@ -208,6 +208,23 @@ enum Commands {
         #[arg(short, long, default_value = "30")]
         timeout: u32,
     },
+    /// Drive a pod-hosted agent (OpenClaw, Hermes, …) as a lope teammate.
+    /// Thin shim around `python3 -m tytus_sdk` — the SDK is the source of
+    /// truth for the WS + Ed25519 protocol. See docs/DESIGN-TYTUS-LOPE-
+    /// TEAMMATES.md.
+    Lope {
+        /// Subcommand: ask | install | uninstall | list | identity | lope_validate
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// HarveyBridge — the reverse channel (pod agent → Harvey's brain).
+    /// Starts an HTTP listener + per-pod outbox pollers.
+    /// Subcommands: run | status | rotate-token | test.
+    /// Thin shim around `python3 -m tytus_sdk bridge`.
+    Bridge {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Install/uninstall/check the auto-start-on-boot hook so your tunnel
     /// re-establishes automatically when you log back in after a reboot.
     /// Your apps configured with the stable `http://10.42.42.1:18080` +
@@ -336,6 +353,8 @@ async fn main() {
         Some(Commands::Mcp { format }) => cmd_mcp(&format, cli.json),
         Some(Commands::Restart { pod }) => cmd_restart(&http, pod, cli.json).await,
         Some(Commands::Exec { command, pod, timeout }) => cmd_exec(&http, command, pod, timeout, cli.json).await,
+        Some(Commands::Lope { args }) => cmd_lope_passthrough("lope", args, cli.json).await,
+        Some(Commands::Bridge { args }) => cmd_lope_passthrough("bridge", args, cli.json).await,
         Some(Commands::Autostart { action }) => cmd_autostart(action, cli.json),
         Some(Commands::Ui { pod, port, no_open, stop }) => {
             if stop { cmd_ui_stop(pod, cli.json).await; }
@@ -3222,6 +3241,62 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
 /// auto-start, the LaunchAgent/systemd unit runs `tytus connect` at login
 /// and the same URLs/keys just work.
 ///
+/// Thin pass-through to `python3 -m tytus_sdk`. The SDK handles the OpenClaw
+/// WebSocket + Ed25519 handshake, session lifecycle, and reply collection.
+/// See docs/DESIGN-TYTUS-LOPE-TEAMMATES.md for architecture and
+/// tytus_sdk/adapters/openclaw.py for wire details.
+///
+/// `kind` is "lope" (for `tytus lope ask/install/...`) or "bridge" (for
+/// `tytus bridge run/...`). For "lope" we shell through to the SDK's top-
+/// level subcommands directly (the SDK exposes ask/install/identity at
+/// top level). For "bridge" we prepend "bridge" so `tytus bridge run` →
+/// `python3 -m tytus_sdk bridge run`.
+async fn cmd_lope_passthrough(kind: &str, args: Vec<String>, _json: bool) {
+    // Locate the SDK. In a dev checkout it lives next to the cli/ crate at
+    // the workspace root. In a distributed binary, it would be under
+    // ~/.tytus/sdk/ or installed site-packages. For v0.5.0-alpha we only
+    // support the dev-checkout path.
+    let exe = std::env::current_exe().ok();
+    let sdk_root = exe
+        .as_ref()
+        .and_then(|p| p.parent())   // target/release
+        .and_then(|p| p.parent())   // target
+        .and_then(|p| p.parent())   // workspace root
+        .map(|p| p.to_path_buf())
+        .or_else(|| {
+            // Fallback: look in the known dev path.
+            let cwd = std::env::current_dir().ok()?;
+            Some(cwd)
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let sdk_dir = sdk_root.join("tytus_sdk");
+    let pythonpath = if sdk_dir.exists() {
+        sdk_root.as_os_str().to_os_string()
+    } else {
+        // Installed path — trust PYTHONPATH / site-packages.
+        std::env::var_os("PYTHONPATH").unwrap_or_default()
+    };
+
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg("-m").arg("tytus_sdk");
+    if kind == "bridge" {
+        cmd.arg("bridge");
+    }
+    cmd.args(&args).env("PYTHONPATH", &pythonpath);
+    let status = cmd.status();
+
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!("Failed to invoke python3 -m tytus_sdk: {}", e);
+            eprintln!("Ensure Python 3.9+ is installed with: pip install websockets cryptography httpx");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// macOS: ~/Library/LaunchAgents/com.traylinx.tytus.plist + launchctl load
 /// Linux: ~/.config/systemd/user/tytus.service + systemctl --user enable --now
 fn cmd_autostart(action: AutostartAction, json: bool) {
@@ -4313,33 +4388,32 @@ async fn cmd_ui(
         let _ = Command::new("xdg-open").arg(&url).spawn();
     }
 
-    // A1: upstream health monitor. TCP-probe the upstream every 5s;
-    // after 3 consecutive failures, assume the tunnel is gone (disconnect,
-    // agent restart lost its port, etc.) and shut down cleanly. Without
-    // this, a dead forwarder keeps binding 127.0.0.1:3000 and every
-    // browser click hangs with "ERR_EMPTY_RESPONSE".
+    // A1: upstream health monitor. TCP-probe the upstream every 10s and
+    // log transitions (healthy ↔ unreachable). We intentionally do NOT
+    // shut the forwarder down on upstream failure: a userspace WireGuard
+    // tunnel at ~5 KB/s drops probes regularly under load, and a brief
+    // pod restart is not a reason to kill the listener. Keeping the
+    // socket bound means the browser's reconnect loop survives the blip;
+    // per-request upstream errors surface as 502 which the UI handles.
     let upstream_probe = upstream_clone.clone();
-    let (health_tx, mut health_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        let mut consecutive_fails: u32 = 0;
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-        tick.tick().await; // burn the immediate tick; first real probe at 5s
+        let mut last_healthy: bool = true;
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+        tick.tick().await; // burn the immediate tick; first real probe at 10s
         loop {
             tick.tick().await;
             let probe = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(3),
                 TcpStream::connect(&upstream_probe),
             ).await;
-            match probe {
-                Ok(Ok(_)) => { consecutive_fails = 0; }
-                _ => {
-                    consecutive_fails += 1;
-                    if consecutive_fails >= 3 {
-                        eprintln!("[tytus ui] upstream {} unreachable for 15s — shutting down forwarder", upstream_probe);
-                        let _ = health_tx.send(());
-                        return;
-                    }
+            let healthy = matches!(probe, Ok(Ok(_)));
+            if healthy != last_healthy {
+                if healthy {
+                    eprintln!("[tytus ui] upstream {} reachable again", upstream_probe);
+                } else {
+                    eprintln!("[tytus ui] upstream {} transient probe fail — forwarder staying up", upstream_probe);
                 }
+                last_healthy = healthy;
             }
         }
     });
@@ -4465,9 +4539,6 @@ async fn cmd_ui(
         }
         _ = async { if let Some(ref mut s) = sigterm { s.recv().await; } else { std::future::pending::<()>().await } } => {
             if !json { println!("\n✓ Forwarder stopped (SIGTERM)."); }
-        }
-        _ = &mut health_rx => {
-            if !json { println!("\n✓ Forwarder stopped (upstream lost)."); }
         }
     }
 
