@@ -56,6 +56,46 @@ fn apply_tray_update(dot: HealthDot, tooltip: String) {
     });
 }
 
+/// Cheap fingerprint of the state — covers everything that changes
+/// menu content. If this is unchanged between two poll ticks, the
+/// rendered menu would be identical, so we skip the main-thread
+/// rebuild and save a few ms of dispatch.
+fn menu_signature(s: &TrayState) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(format!("gw={}", s.gateway_reachable));
+    parts.push(format!("login={}", s.logged_in));
+    parts.push(format!("tier={}", s.tier));
+    parts.push(format!("tun={}", s.tunnel_active));
+    parts.push(format!("uu={}/{}", s.units_used, s.units_limit));
+    for p in &s.pods {
+        let fwd_live = existing_ui_forwarder(&p.pod_id).is_some();
+        let tun_live = tunnel_reaches_pod(&p.pod_id);
+        parts.push(format!("{}:{}:{}:{}", p.pod_id, p.agent_type, fwd_live as u8, tun_live as u8));
+    }
+    parts.join("|")
+}
+
+/// Rebuild the menu from the latest state and install it on the tray.
+/// Without this, the menu is frozen at whatever `build_menu` produced at
+/// startup — so a user who ran `tytus disconnect` from another shell
+/// would still see "Disconnect" and a green dot until restarting the
+/// tray. Called alongside `apply_tray_update` on every poll tick.
+///
+/// Called from any thread; must marshal onto the main thread because
+/// TrayIcon / NSMenu are single-threaded on macOS.
+#[cfg(target_os = "macos")]
+fn apply_menu_rebuild(state: TrayState) {
+    use dispatch2::Queue;
+    Queue::main().exec_sync(move || {
+        TRAY_CELL.with(|c| {
+            if let Some(tray) = c.borrow().as_ref() {
+                let menu = build_menu(&state);
+                let _ = tray.set_menu(Some(Box::new(menu)));
+            }
+        });
+    });
+}
+
 // ── State ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
@@ -311,27 +351,36 @@ fn main() {
     #[cfg(not(target_os = "macos"))]
     let _tray = tray;
 
-    // Poll thread pushes `(HealthDot, tooltip)` updates to the main thread
-    // whenever the dot actually changes. De-duping means we don't hammer
-    // NSStatusItem for identical icons every 5s.
+    // Poll thread pushes `(HealthDot, tooltip, menu)` updates to the
+    // main thread. Every 2 seconds we fully rebuild the menu so items
+    // like "Disconnect ↔ Connect", "Open in Browser ✓", "Stop Forwarder"
+    // reflect ground truth within 2s of state change (disconnecting
+    // from another shell, tunnel dying, forwarder starting, etc.).
+    //
+    // Fast path: if a cheap state signature is unchanged since the last
+    // tick, skip the main-thread hop entirely — no NSMenu churn.
     let poll_state = state.clone();
     std::thread::spawn(move || {
-        let mut last_dot: Option<HealthDot> = None;
+        let mut last_sig: Option<(HealthDot, String)> = None;
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_secs(2));
             let new_state = socket::poll_daemon_status();
             let new_dot = HealthDot::from_state(&new_state);
             let new_tooltip = tooltip_for(&new_state);
-            *poll_state.lock().unwrap() = new_state;
+            let new_sig = menu_signature(&new_state);
+            *poll_state.lock().unwrap() = new_state.clone();
 
-            if last_dot == Some(new_dot) {
+            let sig_key = (new_dot, new_sig);
+            if last_sig.as_ref() == Some(&sig_key) {
                 continue;
             }
-            last_dot = Some(new_dot);
+            last_sig = Some(sig_key);
 
             #[cfg(target_os = "macos")]
-            apply_tray_update(new_dot, new_tooltip);
-
+            {
+                apply_tray_update(new_dot, new_tooltip);
+                apply_menu_rebuild(new_state);
+            }
             #[cfg(not(target_os = "macos"))]
             let _ = new_tooltip;
         }
