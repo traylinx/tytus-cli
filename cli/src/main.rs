@@ -1607,7 +1607,7 @@ async fn cmd_agent_install(
                     // Zero-config hook: patch the agent to not demand a
                     // gateway token. See `configure_agent_for_zero_auth`
                     // for rationale. Best-effort, non-fatal on failure.
-                    let _ = configure_agent_for_zero_auth(&client, &a.pod_id, json).await;
+                    let _ = configure_agent_for_zero_auth(&client, &a.pod_id, name, json).await;
                     Some(returned_pod_id)
                 }
                 Err(e) => {
@@ -1650,7 +1650,7 @@ async fn cmd_agent_install(
                     } else {
                         println!("✓ {} installed on pod {}", name, pid);
                     }
-                    let _ = configure_agent_for_zero_auth(&client, &pid, json).await;
+                    let _ = configure_agent_for_zero_auth(&client, &pid, name, json).await;
                     Some(pid)
                 }
                 Err(e) => {
@@ -1685,6 +1685,63 @@ async fn cmd_agent_install(
 /// user to deal with the default auth manually. We never abort the
 /// install for this.
 async fn configure_agent_for_zero_auth(
+    client: &atomek_pods::TytusClient,
+    pod_id: &str,
+    agent_type: &str,
+    json: bool,
+) -> Result<(), String> {
+    match agent_type {
+        "hermes" => configure_hermes_for_zero_auth(client, pod_id, json).await,
+        // nemoclaw is the default; other values fall through to the
+        // openclaw-style path since they're all likely OpenClaw-derived.
+        _ => configure_nemoclaw_for_zero_auth(client, pod_id, json).await,
+    }
+}
+
+/// Zero-config hook for Hermes pods. Hermes is OpenAI-compatible HTTP
+/// (no pairing, no browser chat UI) and auth is a single shared secret
+/// in the `API_SERVER_KEY` env var. The updated entrypoint.sh derives
+/// that key deterministically from `AIL_API_KEY + TYTUS_POD_ID` and
+/// writes it to `/app/workspace/.hermes/api_server_key`. We read that
+/// file here and stash it in state.json as `gateway_token` so the
+/// forwarder can inject `Authorization: Bearer <key>` on every SDK /
+/// curl request — user never pastes it.
+async fn configure_hermes_for_zero_auth(
+    client: &atomek_pods::TytusClient,
+    pod_id: &str,
+    json: bool,
+) -> Result<(), String> {
+    let script = "cat /app/workspace/.hermes/api_server_key 2>/dev/null";
+    match atomek_pods::exec_in_agent(client, pod_id, script, 10).await {
+        Ok(r) if r.exit_code == 0 => {
+            let key = r.stdout.as_deref().unwrap_or("").trim().to_string();
+            if key.is_empty() {
+                if !json { eprintln!("  (hermes zero-config: API_SERVER_KEY file empty — is this an older image?)"); }
+                return Err("api_server_key file empty".into());
+            }
+            let mut state = CliState::load();
+            if let Some(p) = state.pods.iter_mut().find(|p| p.pod_id == pod_id) {
+                p.gateway_token = Some(key.clone());
+                state.save();
+            }
+            if !json {
+                println!("  Zero-config: Hermes API key cached ({} chars). Use any OpenAI SDK against localhost:187NN.", key.len());
+            }
+            Ok(())
+        }
+        Ok(r) => {
+            let err = r.stderr.as_deref().unwrap_or("").trim().to_string();
+            if !json { eprintln!("  (hermes zero-config: exec exit {}: {})", r.exit_code, err); }
+            Err(format!("exit {}: {}", r.exit_code, err))
+        }
+        Err(e) => {
+            if !json { eprintln!("  (hermes zero-config: exec failed: {})", e); }
+            Err(e.to_string())
+        }
+    }
+}
+
+async fn configure_nemoclaw_for_zero_auth(
     client: &atomek_pods::TytusClient,
     pod_id: &str,
     json: bool,
@@ -4352,6 +4409,11 @@ async fn cmd_ui(
         });
     }
 
+    let agent_type_for_accept = pod.agent_type.clone().unwrap_or_else(|| "nemoclaw".into());
+    let stable_user_key_for_accept = pod.stable_user_key.clone();
+    let pod_id_for_accept = pod.pod_id.clone();
+    let local_port_for_accept = local_port;
+
     let accept_loop = async move {
         loop {
             match listener.accept().await {
@@ -4359,8 +4421,20 @@ async fn cmd_ui(
                     let upstream_addr = upstream_for_accept.clone();
                     let cache_dir = cache_dir.clone();
                     let gateway_token = gateway_token.clone();
+                    let agent_type = agent_type_for_accept.clone();
+                    let stable_user_key = stable_user_key_for_accept.clone();
+                    let pod_id = pod_id_for_accept.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_forwarder_connection(client, upstream_addr.clone(), cache_dir, gateway_token).await {
+                        if let Err(e) = handle_forwarder_connection(
+                            client,
+                            upstream_addr.clone(),
+                            cache_dir,
+                            gateway_token,
+                            &agent_type,
+                            &pod_id,
+                            local_port_for_accept,
+                            stable_user_key.as_deref(),
+                        ).await {
                             eprintln!("[tytus ui] connection error (upstream {}): {}", upstream_addr, e);
                         }
                     });
@@ -4417,6 +4491,14 @@ async fn ensure_controlui_overlay(
     pod_id: &str,
 ) -> Result<(), String> {
     let st = CliState::load();
+    // Skip for non-OpenClaw agents: Hermes has no browser UI, no
+    // allowedOrigins gate, and doesn't care about Origin headers —
+    // silent-pairing locality logic is OpenClaw-specific.
+    let agent_type = st.pods.iter().find(|p| p.pod_id == pod_id)
+        .and_then(|p| p.agent_type.clone()).unwrap_or_default();
+    if agent_type == "hermes" || agent_type == "none" {
+        return Ok(());
+    }
     let secret = st.secret_key.as_deref().ok_or("no secret_key in state")?;
     let uid = st.agent_user_id.as_deref().ok_or("no agent_user_id in state")?;
     let client = atomek_pods::TytusClient::new(http, secret, uid);
@@ -4469,12 +4551,19 @@ async fn ensure_controlui_overlay(
     Ok(())
 }
 
-/// Best-effort fetch of the agent's current `gateway.auth.token` via
-/// Provider's `/pod/agent/exec` route, using the A2A creds that already
-/// live in state.json (`secret_key` + `agent_user_id`). No keychain /
-/// refresh-token path involved — so this works even when keychain ACLs
-/// are broken (typical for background-spawned forwarders that can't
-/// show the macOS approval dialog). Returns None on any failure.
+/// Best-effort fetch of the agent's current auth token via Provider's
+/// `/pod/agent/exec` route, using the A2A creds that already live in
+/// state.json (`secret_key` + `agent_user_id`). No keychain / refresh-
+/// token path involved — so this works even when keychain ACLs are
+/// broken (typical for background-spawned forwarders that can't show
+/// the macOS approval dialog). Returns None on any failure.
+///
+/// Branches on agent_type:
+///   nemoclaw: reads gateway.auth.token from /app/workspace/.openclaw/
+///             config.json (JSON, key regenerated on each restart from
+///             a deterministic formula so it's always present).
+///   hermes:   reads /app/workspace/.hermes/api_server_key (plain file
+///             with the 48-hex API_SERVER_KEY the entrypoint derived).
 async fn fetch_gateway_token_via_provider(
     http: &atomek_core::HttpClient,
     pod_id: &str,
@@ -4482,12 +4571,20 @@ async fn fetch_gateway_token_via_provider(
     let st = CliState::load();
     let secret = st.secret_key.as_deref()?;
     let user_id = st.agent_user_id.as_deref()?;
+    let agent_type = st.pods.iter()
+        .find(|p| p.pod_id == pod_id)
+        .and_then(|p| p.agent_type.clone())
+        .unwrap_or_else(|| "nemoclaw".into());
     let client = atomek_pods::TytusClient::new(http, secret, user_id);
-    let script = "cat /app/workspace/.openclaw/config.json 2>/dev/null | \
-                  node -e \"let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{\
-                  try{const c=JSON.parse(d);\
-                  process.stdout.write((c.gateway&&c.gateway.auth&&c.gateway.auth.token)||'');}\
-                  catch(e){process.exit(0);}})\"";
+    let script = if agent_type == "hermes" {
+        "cat /app/workspace/.hermes/api_server_key 2>/dev/null"
+    } else {
+        "cat /app/workspace/.openclaw/config.json 2>/dev/null | \
+         node -e \"let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{\
+         try{const c=JSON.parse(d);\
+         process.stdout.write((c.gateway&&c.gateway.auth&&c.gateway.auth.token)||'');}\
+         catch(e){process.exit(0);}})\""
+    };
     let res = atomek_pods::exec_in_agent(&client, pod_id, script, 10).await.ok()?;
     let token = res.stdout.unwrap_or_default().trim().to_string();
     if token.is_empty() { None } else { Some(token) }
@@ -4561,6 +4658,10 @@ async fn handle_forwarder_connection(
     upstream_addr: String,
     cache_dir: std::path::PathBuf,
     gateway_token: Option<String>,
+    agent_type: &str,
+    pod_id: &str,
+    local_port: u16,
+    stable_user_key: Option<&str>,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -4598,29 +4699,39 @@ async fn handle_forwarder_connection(
     let method = method.to_string();
     let path = path.to_string();
 
-    // Token-seeding redirect for HTML shell requests.
+    // Per-agent shell-route handling:
     //
-    // OpenClaw's gateway ONLY accepts the auth token via the WebSocket
-    // connect frame — not an HTTP `Authorization:` header. Browsers also
-    // can't set custom headers on `new WebSocket(...)`. The control UI
-    // bundle reads the token from `?token=<T>` (or `#token=<T>`) on
-    // initial page load, stores it in settings, then strips it from the
-    // URL with `history.replaceState`. After that, the WS client uses
-    // the stored token — no user paste required. Without this seed, the
-    // dashboard loads and the user sees "unauthorized: gateway token
-    // missing (open the dashboard URL and paste the token…)".
+    // OpenClaw (nemoclaw): ships a browser chat UI at / and /chat. The UI
+    //   reads `?token=<T>` from the URL on first load, stashes it in
+    //   settings, then strips it. Without this seed we'd dead-end at
+    //   "gateway token missing". Solution: 302 redirect adding ?token=.
     //
-    // Strategy: when the browser requests an HTML shell route (GET, no
-    // `Upgrade: websocket`, no file extension, no `token=` already in
-    // the query), reply with a 302 that appends `?token=<T>`. The UI
-    // consumes it on load and cleans the URL. The tests of path shape
-    // below are deliberately conservative so we don't rewrite API /
-    // asset / WS traffic.
+    // Hermes: has NO browser UI — it's an OpenAI-compatible HTTP API.
+    //   GET / returns 404 upstream. We serve a locally-rendered landing
+    //   page with ready-to-paste curl / SDK snippets so "Open in Browser"
+    //   still lands on something useful. Every other method/path flows
+    //   through raw_proxy with Authorization: Bearer auto-injected.
     let head_bytes = &buf[..head_end];
     let is_ws_upgrade = is_websocket_upgrade(head_bytes);
     let path_has_token = path.contains("token=");
     let has_ext = is_cacheable_asset(&path);
-    if method.eq_ignore_ascii_case("GET")
+
+    if agent_type == "hermes"
+        && method.eq_ignore_ascii_case("GET")
+        && !is_ws_upgrade
+        && matches!(path.split('?').next().unwrap_or(""), "/" | "/help" | "/index.html")
+    {
+        let page = render_hermes_landing(local_port, pod_id, gateway_token.as_deref(), stable_user_key);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
+            page.len(), page,
+        );
+        client.write_all(resp.as_bytes()).await?;
+        return Ok(());
+    }
+
+    if agent_type != "hermes"
+        && method.eq_ignore_ascii_case("GET")
         && !is_ws_upgrade
         && !has_ext
         && !path_has_token
@@ -4947,11 +5058,21 @@ async fn raw_proxy(
     Ok(())
 }
 
-/// Insert `Authorization: Bearer <token>` into the request head if:
-///   - `gateway_token` is Some, non-empty, AND
-///   - the request doesn't already carry an Authorization header.
-/// Inserted just before the blank-line terminator so it's the last
-/// header parsed. Preserves CRLF style. No-op if token is empty.
+/// Set `Authorization: Bearer <token>` on the request — removing any
+/// existing Authorization header first so user-supplied dummies (SDK
+/// defaults like `api_key="any-string"`) get replaced with the real
+/// forwarder-injected credential.
+///
+/// Override semantics matter for the Hermes flow: the OpenAI Python /
+/// Node SDKs refuse to construct a client without an api_key, so users
+/// pass `api_key="sk-placeholder"`. If we preserved that, the upstream
+/// (Hermes with API_SERVER_KEY auth) would reject every request with
+/// "Invalid API key". Override means the SDK argument is cosmetic — the
+/// forwarder is the source of truth.
+///
+/// No-op if `gateway_token` is None or empty; in that case the original
+/// head passes through untouched so users with their own auth story
+/// (e.g. plain wss proxy) aren't clobbered.
 fn inject_auth_header(request_head: &[u8], gateway_token: Option<&str>) -> Vec<u8> {
     let Some(token) = gateway_token else { return request_head.to_vec(); };
     if token.is_empty() { return request_head.to_vec(); }
@@ -4959,22 +5080,26 @@ fn inject_auth_header(request_head: &[u8], gateway_token: Option<&str>) -> Vec<u
         Ok(s) => s,
         Err(_) => return request_head.to_vec(),
     };
-    // If the browser already sent Authorization, don't override.
-    for line in text.split("\r\n") {
-        if line.to_ascii_lowercase().starts_with("authorization:") {
-            return request_head.to_vec();
-        }
-    }
-    // Insert before the terminator "\r\n\r\n" → split and glue.
-    if let Some(pos) = text.find("\r\n\r\n") {
-        let (head, tail) = text.split_at(pos);
-        let mut out = String::with_capacity(text.len() + 64);
-        out.push_str(head);
-        out.push_str(&format!("\r\nAuthorization: Bearer {}", token));
-        out.push_str(tail);
-        return out.into_bytes();
-    }
-    request_head.to_vec()
+    // Drop any existing Authorization line(s), then append ours before
+    // the blank-line terminator.
+    let mut body_sep = match text.find("\r\n\r\n") {
+        Some(p) => p,
+        None => return request_head.to_vec(),
+    };
+    let (head_text, tail_text) = text.split_at(body_sep);
+    let filtered_head: String = head_text
+        .split("\r\n")
+        .filter(|line| !line.to_ascii_lowercase().starts_with("authorization:"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    // Recompute body separator position after filtering.
+    body_sep = filtered_head.len();
+    let mut out = String::with_capacity(text.len() + 64);
+    out.push_str(&filtered_head);
+    out.push_str(&format!("\r\nAuthorization: Bearer {}", token));
+    out.push_str(tail_text);
+    let _ = body_sep;
+    out.into_bytes()
 }
 
 /// Rewrite `Origin:` and `Referer:` header values so they look like the
@@ -5024,6 +5149,88 @@ fn rewrite_origin_headers(request_head: &[u8], upstream_addr: &str) -> Vec<u8> {
         }
     }
     out.into_bytes()
+}
+
+/// Render the local landing page served at GET / on a Hermes forwarder.
+///
+/// Hermes has no browser UI, so "Open in Browser" would otherwise dead-end
+/// at a 404 from the upstream. This page gives the user concrete, ready-
+/// to-copy snippets (curl, Python OpenAI SDK, Node OpenAI SDK) with the
+/// forwarder URL + their stable OPENAI_API_KEY — zero manual config.
+///
+/// The keys embedded here are:
+///   - `forwarder_key` (aka gateway_token): derived API_SERVER_KEY; the
+///     forwarder auto-injects it on every proxied request, so users
+///     typically don't even need it. We show it as a fallback for tools
+///     that bypass the forwarder.
+///   - `stable_user_key`: the user's cross-pod OPENAI_API_KEY for
+///     switchAILocal. Preferred for hitting `ail-compound` directly
+///     outside hermes.
+fn render_hermes_landing(
+    local_port: u16,
+    pod_id: &str,
+    forwarder_key: Option<&str>,
+    stable_user_key: Option<&str>,
+) -> String {
+    let base = format!("http://localhost:{}", local_port);
+    // The forwarder injects Authorization on every request, so from the
+    // user's side any non-empty placeholder works. Show a real hint if
+    // we have one though, in case they want to bypass the forwarder.
+    let sdk_key = "sk-any-string-the-forwarder-injects-the-real-one";
+    let fwd = forwarder_key.unwrap_or("(not cached yet — restart the agent)");
+    let stable = stable_user_key.unwrap_or("(no stable key — run `tytus env`)");
+    format!(r#"<!doctype html><html><head><meta charset="utf-8">
+<title>Tytus · Hermes · pod {pod}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{{font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:780px;margin:40px auto;padding:0 24px;background:#0b0d10;color:#d8dee4}}
+h1{{font-size:22px;margin:0 0 8px;color:#fff}}
+h2{{font-size:15px;text-transform:uppercase;letter-spacing:.04em;color:#8a99ab;margin:32px 0 10px;font-weight:600}}
+p{{color:#b7c2d0}}
+code,pre{{font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;background:#151a20;border:1px solid #222a33;border-radius:8px}}
+code{{padding:2px 6px;color:#e9eef5}}
+pre{{padding:14px 16px;overflow-x:auto;color:#e9eef5;margin:8px 0}}
+.k{{color:#6cb;user-select:all}}
+.dim{{color:#7d8896}}
+.card{{background:#11151a;border:1px solid #222a33;border-radius:10px;padding:18px 20px;margin:14px 0}}
+a{{color:#7cbff0}}
+</style></head><body>
+<h1>⚕ Hermes on Tytus pod {pod}</h1>
+<p>OpenAI-compatible gateway proxied on <code>{base}</code>. No chat UI — point any OpenAI SDK here and it just works. The forwarder injects auth on every request; SDKs only need a non-empty <code>api_key</code>.</p>
+
+<h2>curl</h2>
+<pre>curl {base}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{{"model":"ail-compound","messages":[{{"role":"user","content":"hello"}}]}}'</pre>
+
+<h2>Python (openai)</h2>
+<pre>from openai import OpenAI
+client = OpenAI(base_url="{base}/v1", api_key="{sdk_key}")
+r = client.chat.completions.create(model="ail-compound", messages=[{{"role":"user","content":"hi"}}])
+print(r.choices[0].message.content)</pre>
+
+<h2>Node (openai)</h2>
+<pre>import OpenAI from "openai";
+const client = new OpenAI({{ baseURL: "{base}/v1", apiKey: "{sdk_key}" }});
+const r = await client.chat.completions.create({{
+  model: "ail-compound",
+  messages: [{{ role: "user", content: "hi" }}],
+}});
+console.log(r.choices[0].message.content);</pre>
+
+<h2>Env vars (for any tool)</h2>
+<pre>export OPENAI_BASE_URL="{base}/v1"
+export OPENAI_API_KEY="{sdk_key}"</pre>
+
+<div class="card">
+<h2 style="margin-top:0">Fallback / direct access</h2>
+<p class="dim">The forwarder handles auth for you. If you need to bypass it:</p>
+<p class="dim">Hermes API key (forwarder-injected): <code class="k">{fwd}</code></p>
+<p class="dim">SwitchAILocal stable key (any pod): <code class="k">{stable}</code></p>
+</div>
+
+<p class="dim">Stop the forwarder: <code>tytus ui --pod {pod} --stop</code> · Docs: <code>tytus llm-docs</code></p>
+</body></html>"#, pod = pod_id, base = base, sdk_key = sdk_key, fwd = fwd, stable = stable)
 }
 
 /// Position of the \r\n\r\n header terminator + 4 (start of body), if any.
