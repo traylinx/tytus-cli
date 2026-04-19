@@ -152,9 +152,27 @@ impl CliState {
         self.save();
     }
 
+    /// True when we have a usable Tytus session — either a refresh token
+    /// (we can mint fresh access tokens) OR a still-valid access token
+    /// (we can call APIs until it expires, at which point the daemon
+    /// will try to refresh).
+    ///
+    /// Falling back to a valid-AT-only state matters at cold boot: on
+    /// macOS, the keychain ACL can take a few seconds to approve after
+    /// login, and the LaunchAgent's `get_refresh_token` times out in
+    /// 3s. If we insisted on the refresh token being present, autostart
+    /// would silently fail even though we have a perfectly good access
+    /// token in state.json that lasts ~1h. The daemon will keep
+    /// retrying the keychain in the background; once it unblocks, the
+    /// refresh token is recovered and normal flow resumes.
+    ///
+    /// Semantically: "logged in" means "has email + means to call the
+    /// API". RT and a current AT both satisfy that; only the absence
+    /// of BOTH means the user really needs to `tytus login`.
     pub fn is_logged_in(&self) -> bool {
-        self.email.as_ref().is_some_and(|e| !e.is_empty())
-            && self.refresh_token.as_ref().is_some_and(|t| !t.is_empty())
+        let has_email = self.email.as_ref().is_some_and(|e| !e.is_empty());
+        let has_rt = self.refresh_token.as_ref().is_some_and(|t| !t.is_empty());
+        has_email && (has_rt || self.has_valid_token())
     }
 
     pub fn has_valid_token(&self) -> bool {
