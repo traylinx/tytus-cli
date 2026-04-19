@@ -76,10 +76,16 @@ echo "$OPENAI_API_KEY"    # → sk-tytus-user-<32hex>            (stable per use
 | Operator | 4 |
 
 ### Agents (runnable INSIDE a pod via `tytus connect --agent <name>`)
-| Agent | Cost | Gateway port | Description |
-|---|---|---|---|
-| `nemoclaw` | 1 unit | 3000 | OpenClaw runtime with the NemoClaw sandboxing blueprint |
-| `hermes`   | 2 units | 8642 | Nous Research Hermes gateway |
+| Agent | Cost | UI port | API port | Description |
+|---|---|---|---|---|
+| `nemoclaw` | 1 unit | 3000 | 3000 | OpenClaw runtime with the NemoClaw sandboxing blueprint; browser chat UI |
+| `hermes`   | 2 units | 9119 | 8642 | Nous Research Hermes; `hermes dashboard` on 9119 + gateway on 8642, tytus forwarder multiplexes |
+
+Both agents get zero-config auth: the tytus forwarder auto-injects
+`Authorization: Bearer <per-pod-secret>` so SDK clients and browsers
+never see or paste a token. Run `tytus llm-docs` for full details on
+the overlay files (`config.user.json` / `config.user.yaml`),
+`is_logged_in` AT-only fallback, and the forwarder's path multiplex.
 
 ### Models on the pod gateway (SwitchAILocal)
 These are the **only** models available. Do not pass any other model id — it will fail.

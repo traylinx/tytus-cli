@@ -50,14 +50,24 @@ only — they never see prompts or responses.
 
 Agents cost units when allocated:
 
-| Agent | Image | Cost | Gateway port | Health path |
-|---|---|---|---|---|
-| nemoclaw | `tytus-nemoclaw:latest` (OpenClaw + NemoClaw blueprint) | 1 unit | 3000 | `/healthz` |
-| hermes | `tytus-hermes:latest` (Nous Research) | 2 units | 8642 | `/health` |
+| Agent | Image | Cost | UI port | API port | Health path |
+|---|---|---|---|---|---|
+| nemoclaw | `tytus-nemoclaw:latest` (OpenClaw + NemoClaw blueprint) | 1 unit | 3000 | 3000 | `/healthz` |
+| hermes | `tytus-hermes:latest` (Nous Research) | 2 units | 9119 | 8642 | `/health` |
 
 `tytus connect --agent <name>` is rejected by the control plane if the
 user would exceed their unit budget. The check is atomic in Scalesys
 (`BEGIN IMMEDIATE` transaction).
+
+**Two-port Hermes pods.** Hermes runs two HTTP servers inside the pod:
+the gateway (port 8642, OpenAI-compatible `/v1/*` + `/api/jobs*`) and
+the dashboard (port 9119, Vite/React management SPA with Config, Env,
+Sessions, Skills, Logs, Cron, Analytics, Status pages). nemoclaw runs
+one server that serves both UI and API on 3000. The tytus forwarder
+**multiplexes** on hermes pods: requests matching `/v1/*`,
+`/api/jobs*`, or `/health*` go to the gateway (:8642), everything else
+goes to the dashboard (:9119). From the user's side it's still one
+URL (`http://localhost:18700+pod_num/`).
 
 ## 4. Models on the SwitchAILocal gateway
 
@@ -134,6 +144,63 @@ gateway. Properties:
 When users ask "how do I just call your models without setting up an
 agent", the answer is: they already can — right after `tytus login`,
 the default pod + stable env pair from §5 just work.
+
+## 5c. Zero-config auth — no token pasting, ever
+
+Both agent types use a **deterministic per-pod shared secret** the CLI
+forwarder injects automatically. Users never see or paste a token.
+
+| Agent | Secret name | Derivation | Where it's read |
+|---|---|---|---|
+| nemoclaw | `gateway.auth.token` | generated in `nemoclaw-configure.sh` from `sha256(AIL_API_KEY + TYTUS_POD_ID)[:48]`; written into `config.json` | `/app/workspace/.openclaw/config.json` |
+| hermes | `API_SERVER_KEY` | same formula, set as env var by `hermes/entrypoint.sh` when not injected externally | `/app/workspace/.hermes/api_server_key` |
+
+The forwarder (`tytus ui --pod NN`, or the tray's "Open in Browser"
+action) fetches this secret via Provider's `/pod/agent/exec` using A2A
+creds from `state.json` (secret_key + agent_user_id — no keychain
+round-trip needed) and stashes it in `state.json`'s `gateway_token`
+field. On every proxied request, the forwarder **overrides** any
+client-side Authorization header with `Bearer <gateway_token>` — so
+SDK placeholders like `OpenAI(api_key="any-string")` work out of the
+box on hermes pods, and OpenClaw silent-local-pairing fires on
+nemoclaw without the browser ever seeing the token form.
+
+## 5d. Agent config overlays (survive container restart)
+
+Both agents support a deep-merge overlay file next to their generated
+config. On every container restart the auto-generator regenerates the
+base config, then merges the overlay on top. Add only the fields you
+want to change.
+
+| Agent | Base (regenerated) | User overlay | Format |
+|---|---|---|---|
+| nemoclaw | `/app/workspace/.openclaw/config.json` | `/app/workspace/.openclaw/config.user.json` | JSON |
+| hermes | `/app/workspace/config.yaml` | `/app/workspace/config.user.yaml` | YAML |
+
+Precedence: **overlay wins on conflicts** for scalars; for arrays and
+maps, it's a recursive deep-merge (maps merge key-wise, arrays are
+replaced wholesale — not appended).
+
+The CLI writes `config.user.json` on nemoclaw at agent-install time
+to add the forwarder's `http://localhost:18700+N` origin to
+`gateway.controlUi.allowedOrigins` so the browser's WS upgrade passes
+origin-check AND satisfies silent-local-pairing (requires loopback
+`Host` + `Origin`). For hermes, no CLI-side overlay is needed today
+— configure with `tytus configure` or edit `config.user.yaml` directly
+to customize `model.default`, `terminal.timeout`, etc.
+
+## 5e. `is_logged_in` semantics
+
+A user is "logged in" (`CliState::is_logged_in` returns true) when
+their state has an email AND **either** a refresh token **or** a
+currently-valid access token. This matters at macOS cold boot: the
+keychain ACL can take a few seconds to approve after login, and the
+`get_refresh_token` call times out in 3s. The autostart LaunchAgent
+falls through to AT-only mode — the existing access token keeps pod
+ops working while the daemon retries the keychain in the background.
+`tytus doctor` surfaces RT presence distinctly, so a user with
+AT-only coverage sees a warning ("keychain not readable — re-run
+`tytus login` if this persists") rather than a red fail.
 
 ## 6. Full command reference
 
