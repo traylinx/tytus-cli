@@ -56,6 +56,101 @@ fn apply_tray_update(dot: HealthDot, tooltip: String) {
     });
 }
 
+// ── Live refresh plumbing ───────────────────────────────────
+//
+// The poll loop waits on a (Mutex<bool>, Condvar) pair. Anyone can
+// wake it by setting the bool true and calling notify_one. We stash
+// a clone of the Arc in a thread_local on the main thread so menu-
+// event handlers (and any future code) can trigger an immediate
+// refresh without threading the pair through every function.
+
+thread_local! {
+    static REFRESH_PAIR: std::cell::RefCell<Option<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>>
+        = const { std::cell::RefCell::new(None) };
+}
+
+/// Wake the poll loop RIGHT NOW. Safe to call from any thread via the
+/// `trigger_refresh_any_thread` variant; this one only works from the
+/// main thread because REFRESH_PAIR is a thread_local. Used by main-
+/// thread code that has the NSApp runloop.
+#[allow(dead_code)]
+fn trigger_refresh_from_main() {
+    REFRESH_PAIR.with(|cell| {
+        if let Some(pair) = cell.borrow().as_ref() {
+            let (lock, cvar) = &**pair;
+            *lock.lock().unwrap() = true;
+            cvar.notify_one();
+        }
+    });
+}
+
+/// Global-accessible variant: stashes the Arc in a once-initialized
+/// static so background threads (menu event handlers, action-refresh
+/// timers) can wake the poll loop from any context.
+static REFRESH_GLOBAL: std::sync::OnceLock<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>
+    = std::sync::OnceLock::new();
+
+fn trigger_refresh() {
+    if let Some(pair) = REFRESH_GLOBAL.get() {
+        let (lock, cvar) = &**pair;
+        *lock.lock().unwrap() = true;
+        cvar.notify_one();
+    }
+}
+
+/// After a menu action runs, schedule refreshes at 300 ms, 1 s, 3 s.
+/// Catches both snappy actions (stop forwarder is essentially instant)
+/// and slow ones (connect needs to spawn Terminal, run `tytus connect`,
+/// pop Touch ID, bring tunnel up — often 2–4 s end to end).
+fn schedule_refresh_after_action() {
+    for delay_ms in [300u64, 1000, 3000] {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            trigger_refresh();
+        });
+    }
+}
+
+/// Cheap fingerprint of the filesystem state — JUST the things that
+/// can change without network: tunnel pidfiles, ui-marker files, and
+/// state.json's mtime. Used by the 200 ms watcher to wake the main
+/// poll loop on external changes.
+fn filesystem_signature() -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/tmp/tytus") {
+        let mut entries: Vec<String> = rd
+            .flatten()
+            .filter_map(|e| {
+                let n = e.file_name();
+                let name = n.to_string_lossy().to_string();
+                if !(name.starts_with("tunnel-") || name.starts_with("ui-")) {
+                    return None;
+                }
+                let m = e.metadata().ok()?;
+                let size = m.len();
+                let mtime = m.modified().ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Some(format!("{}|{}|{}", name, size, mtime))
+            })
+            .collect();
+        entries.sort();
+        parts.extend(entries);
+    }
+    if let Some(config) = dirs::config_dir() {
+        let p = config.join("tytus").join("state.json");
+        if let Ok(m) = std::fs::metadata(&p) {
+            let mtime = m.modified().ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            parts.push(format!("state|{}|{}", m.len(), mtime));
+        }
+    }
+    parts.join(";")
+}
+
 /// Cheap fingerprint of the state — covers everything that changes
 /// menu content. If this is unchanged between two poll ticks, the
 /// rendered menu would be identical, so we skip the main-thread
@@ -351,19 +446,67 @@ fn main() {
     #[cfg(not(target_os = "macos"))]
     let _tray = tray;
 
-    // Poll thread pushes `(HealthDot, tooltip, menu)` updates to the
-    // main thread. Every 2 seconds we fully rebuild the menu so items
-    // like "Disconnect ↔ Connect", "Open in Browser ✓", "Stop Forwarder"
-    // reflect ground truth within 2s of state change (disconnecting
-    // from another shell, tunnel dying, forwarder starting, etc.).
+    // Live refresh architecture — three threads, one shared shoot-now
+    // Condvar.
     //
-    // Fast path: if a cheap state signature is unchanged since the last
-    // tick, skip the main-thread hop entirely — no NSMenu churn.
+    // 1) Fast FS watcher (200 ms): reads filesystem-only signatures
+    //    (pidfiles, marker files, state.json mtime). No network. On
+    //    change, wakes the main poll loop immediately. Covers external
+    //    events: another shell runs `tytus disconnect`, forwarder self-
+    //    terminates on upstream loss, agent restart writes new markers.
+    //
+    // 2) Main poll loop: blocks on a Condvar with a 1.5 s timeout.
+    //    Wakes on either the timer OR a REFRESH signal (from FS
+    //    watcher, menu action, or external code). Does a full poll
+    //    including the gateway probe, rebuilds the menu if signature
+    //    changed, updates the icon.
+    //
+    // 3) Menu-action handler (already exists): each click now calls
+    //    `schedule_refresh_after_action` which fires REFRESH signals
+    //    at 300 ms, 1 s, 3 s to catch the action's async completion
+    //    regardless of how long Terminal takes to spawn.
+    //
+    // Zero noticeable lag when the user clicks anything in the tray,
+    // and ~200 ms detection of external state changes.
+    let refresh_pair = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+
+    // Install globals so background threads (menu event handlers,
+    // action-timer threads, FS watcher) can wake the poll loop from
+    // any context without having to thread the Arc through every
+    // function signature.
+    let _ = REFRESH_GLOBAL.set(refresh_pair.clone());
+    REFRESH_PAIR.with(|cell| *cell.borrow_mut() = Some(refresh_pair.clone()));
+
+    // Fast FS watcher.
+    let fs_pair = refresh_pair.clone();
+    std::thread::spawn(move || {
+        let mut last_fs_sig = String::new();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let fs_sig = filesystem_signature();
+            if fs_sig != last_fs_sig {
+                last_fs_sig = fs_sig;
+                let (lock, cvar) = &*fs_pair;
+                *lock.lock().unwrap() = true;
+                cvar.notify_one();
+            }
+        }
+    });
+
+    // Main poll loop.
     let poll_state = state.clone();
+    let poll_pair = refresh_pair.clone();
     std::thread::spawn(move || {
         let mut last_sig: Option<(HealthDot, String)> = None;
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            // Wait up to 1.5 s or until someone signals REFRESH.
+            let (lock, cvar) = &*poll_pair;
+            {
+                let guard = lock.lock().unwrap();
+                let (mut guard, _) = cvar.wait_timeout(guard, std::time::Duration::from_millis(1500)).unwrap();
+                *guard = false;
+            }
+
             let new_state = socket::poll_daemon_status();
             let new_dot = HealthDot::from_state(&new_state);
             let new_tooltip = tooltip_for(&new_state);
@@ -833,6 +976,13 @@ fn format_uptime(secs: u64) -> String {
 // ── Menu event handler ──────────────────────────────────────
 
 fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
+    // Every menu action gets followed by a refresh fan-out (300 ms /
+    // 1 s / 3 s). That catches the action's actual completion across
+    // the full latency range: stop-forwarder completes in <100 ms,
+    // connect/disconnect typically 1–3 s once Terminal spawns and sudo
+    // prompts resolve. Without this the user would see the menu
+    // frozen on pre-click state for up to 1.5 s (next poll tick).
+    schedule_refresh_after_action();
     match id {
         "connect" => {
             // Connect needs to run in a Terminal so the osascript/sudo
