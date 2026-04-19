@@ -3888,6 +3888,47 @@ async fn cmd_ui(
         }
     };
 
+    // Reuse an existing forwarder for this same pod if one is already
+    // running. Without this check, every click of "Open in Browser"
+    // spawned a fresh `tytus ui`, the old port 3000 was still held, and
+    // the new one bound 3001 → user had to track N browser tabs.
+    // Marker format: /tmp/tytus/ui-<pod>.port = JSON {"pid":N,"port":P}.
+    // Stale markers (dead pid OR nothing listening on port) are ignored.
+    let marker_path = std::path::PathBuf::from(format!("/tmp/tytus/ui-{}.port", pod.pod_id));
+    if let Ok(raw) = std::fs::read_to_string(&marker_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0);
+            let port = v.get("port").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
+            let pid_alive = pid > 0 && unsafe { libc::kill(pid as i32, 0) == 0 };
+            let port_alive = port > 0 && TcpStream::connect(("127.0.0.1", port)).await.is_ok();
+            if pid_alive && port_alive {
+                let existing_url = format!("http://localhost:{}/", port);
+                if json {
+                    println!("{}", serde_json::json!({
+                        "local_url": existing_url,
+                        "upstream": upstream,
+                        "pod_id": pod.pod_id,
+                        "status": "reused",
+                        "forwarder_pid": pid,
+                    }));
+                } else {
+                    println!("→ Forwarder for pod {} is already running (pid {}) on {}", pod.pod_id, pid, existing_url);
+                    println!("  Reusing it — close the other Terminal window to stop it.");
+                }
+                if !no_open {
+                    #[cfg(target_os = "macos")]
+                    let _ = Command::new("open").arg(&existing_url).spawn();
+                    #[cfg(target_os = "linux")]
+                    let _ = Command::new("xdg-open").arg(&existing_url).spawn();
+                }
+                return;
+            } else {
+                // Stale marker — remove so we don't keep tripping on it.
+                let _ = std::fs::remove_file(&marker_path);
+            }
+        }
+    }
+
     // Bind the listener. If the requested port is taken, fall back to the next 5 ports.
     let mut listener: Option<TcpListener> = None;
     for attempt in 0..6u16 {
@@ -3906,6 +3947,15 @@ async fn cmd_ui(
         }
     }
     let listener = listener.expect("listener bound above");
+
+    // Publish our port marker so the next `tytus ui --pod N` click
+    // discovers us instead of spawning a fresh forwarder on port+1.
+    let marker_body = serde_json::json!({
+        "pid": std::process::id(),
+        "port": local_port,
+        "upstream": upstream,
+    });
+    let _ = std::fs::write(&marker_path, marker_body.to_string());
 
     let url = format!("http://localhost:{}/", local_port);
     let upstream_clone = upstream.clone();
@@ -3972,6 +4022,12 @@ async fn cmd_ui(
             if !json { println!("\n✓ Forwarder stopped."); }
         }
     }
+
+    // Clear our port marker so the next click doesn't try to reuse a
+    // forwarder that's about to exit. Best-effort — a crash leaves the
+    // marker, but the reuse probe also checks `kill(pid, 0)` before
+    // trusting it.
+    let _ = std::fs::remove_file(&marker_path);
 }
 
 // ── Doctor (diagnostics) ────────────────────────────────────
