@@ -960,12 +960,22 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // Terminal so the forwarder stays alive and the user sees the
         // URL + "Press Ctrl+C to stop" hint. Closing the Terminal stops
         // the forwarder.
+        //
+        // Fast path: if an existing forwarder for this pod is already
+        // running (marker file /tmp/tytus/ui-<pod>.port with live pid
+        // + listening port), skip the Terminal entirely and just reopen
+        // the browser to the existing localhost URL. Keeps the second,
+        // third, fourth click from piling up Terminal windows.
         other if other.starts_with("pod_") && other.ends_with("_open") => {
             let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open");
-            open_in_terminal_simple(&format!(
-                "tytus ui --pod {}; echo; echo 'Press Enter to close…'; read _",
-                shell_escape(pod_id),
-            ));
+            if let Some(existing_url) = existing_ui_forwarder(pod_id) {
+                let _ = std::process::Command::new("open").arg(&existing_url).spawn();
+            } else {
+                open_in_terminal_simple(&format!(
+                    "tytus ui --pod {}; echo; echo 'Press Enter to close…'; read _",
+                    shell_escape(pod_id),
+                ));
+            }
         }
         // Agent container restart (no state loss).
         other if other.starts_with("pod_") && other.ends_with("_restart") => {
@@ -1035,6 +1045,36 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
 /// Minimal shell single-quote escaper. Safe for the restricted set of
 /// strings we splice into the `.command` script (pod ids: `\d{2}`, agent
 /// names: `[a-z]+`). We still escape defensively in case IDs change format.
+/// If `tytus ui --pod <pod_id>` is already running for this pod, return
+/// the URL the user should be sent to (so we can skip spawning a fresh
+/// Terminal on repeat clicks of "Open in Browser"). Marker format is
+/// written by cmd_ui in cli/src/main.rs:
+///   /tmp/tytus/ui-<pod>.port = {"pid":N,"port":P, "upstream":"..."}
+/// We trust the marker only when the pid is alive AND the port still
+/// accepts a TCP connect. Anything else = stale → return None and let
+/// the caller spawn a fresh forwarder.
+fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
+    let path = format!("/tmp/tytus/ui-{}.port", pod_id);
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let pid = v.get("pid").and_then(|x| x.as_u64())? as i32;
+    let port = v.get("port").and_then(|x| x.as_u64())? as u16;
+
+    let pid_alive = unsafe { libc::kill(pid, 0) == 0 };
+    if !pid_alive {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+    match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)) {
+        Ok(_) => Some(format!("http://localhost:{}/", port)),
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            None
+        }
+    }
+}
+
 fn shell_escape(s: &str) -> String {
     let mut out = String::from("'");
     for c in s.chars() {
