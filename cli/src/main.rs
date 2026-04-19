@@ -4785,14 +4785,44 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
         else { format!("{} pod(s)", state.pods.len()) }
     ));
 
-    // 6. Tunnel
-    let has_tunnel = state.pods.iter().any(|p| p.tunnel_iface.is_some());
+    // 6. Tunnel — union of state.json's tunnel_iface + live pidfiles
+    // under /tmp/tytus/tunnel-*.pid. state.json alone misreports "Not
+    // running" whenever tunnel_iface didn't get preserved across a
+    // login/install cycle; the pidfile is the authoritative signal for
+    // "daemon alive".
+    let mut live_tunnel_pods: Vec<String> = Vec::new();
+    let mut live_tunnel_ifaces: Vec<String> = Vec::new();
+    for pod in &state.pods {
+        let mut tunnel_ok = pod.tunnel_iface.is_some();
+        if !tunnel_ok {
+            let pidfile = format!("/tmp/tytus/tunnel-{}.pid", pod.pod_id);
+            if let Ok(raw) = std::fs::read_to_string(&pidfile) {
+                if let Ok(pid) = raw.trim().parse::<i32>() {
+                    let alive = pid > 1 && unsafe {
+                        if libc::kill(pid, 0) == 0 { true }
+                        else { *libc::__error() == libc::EPERM }
+                    };
+                    if alive { tunnel_ok = true; }
+                }
+            }
+        }
+        if tunnel_ok {
+            live_tunnel_pods.push(pod.pod_id.clone());
+            if let Some(ref iface) = pod.tunnel_iface {
+                live_tunnel_ifaces.push(iface.clone());
+            } else if let Ok(iface) = std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.iface", pod.pod_id)) {
+                live_tunnel_ifaces.push(iface.trim().to_string());
+            }
+        }
+    }
+    let has_tunnel = !live_tunnel_pods.is_empty();
     checks.push(("tunnel", has_tunnel,
         if has_tunnel {
-            let ifaces: Vec<&str> = state.pods.iter()
-                .filter_map(|p| p.tunnel_iface.as_deref())
-                .collect();
-            format!("Active on {}", ifaces.join(", "))
+            if live_tunnel_ifaces.is_empty() {
+                format!("Active for pod(s) {}", live_tunnel_pods.join(", "))
+            } else {
+                format!("Active on {}", live_tunnel_ifaces.join(", "))
+            }
         } else if !state.pods.is_empty() {
             "Not running. Run: tytus connect --pod <id>".into()
         } else {
