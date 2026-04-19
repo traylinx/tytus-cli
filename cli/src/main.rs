@@ -4808,22 +4808,17 @@ async fn fetch_and_cache_asset(
 /// Raw TCP proxy path: forward the already-consumed request head to
 /// upstream, then bidirectional-copy until either side closes.
 ///
-/// Two header rewrites happen before forwarding:
-///
-///   1. Origin / Host / Referer → upstream host. OpenClaw's gateway
-///      enforces allowedOrigins on the WS upgrade; the default config
-///      only trusts the pod's own endpoint. Without this rewrite,
-///      every browser connection gets bounced with "origin not
-///      allowed".
-///
-///   2. Authorization: Bearer <gateway_token>. The agent's gateway
-///      token is mandatory (mode:"token" cannot be disabled — it
-///      gets regenerated on every cold start). The forwarder caches
-///      the token in state.json at install time and injects it on
-///      every request so the browser never sees the "paste token"
-///      login form. If the browser already sent its own
-///      Authorization header (e.g. user dev-tool adjustments), we
-///      preserve it.
+/// Only the Authorization header is injected. We deliberately do NOT
+/// rewrite Host / Origin / Referer: OpenClaw's gateway requires a
+/// loopback `Host` and `Origin` to grant "silent local pairing" for
+/// browser Control UI clients (see isControlUiBrowserContainerLocal-
+/// Equivalent and isLoopbackHost in server.impl). If we rewrote them
+/// to the pod's `10.X.Y.1:3000`, origin-check would pass but pairing
+/// would require a manual approval step that blocks the zero-config
+/// flow. Instead we add `http://localhost:187NN` and
+/// `http://127.0.0.1:187NN` to `gateway.controlUi.allowedOrigins` at
+/// agent-install time, which gets BOTH the origin check AND silent
+/// pairing through in one pass.
 async fn raw_proxy(
     mut client: tokio::net::TcpStream,
     request_head: &[u8],
@@ -4839,8 +4834,7 @@ async fn raw_proxy(
             return Ok(());
         }
     };
-    let rewritten = rewrite_origin_headers(request_head, upstream_addr);
-    let with_auth = inject_auth_header(&rewritten, gateway_token);
+    let with_auth = inject_auth_header(request_head, gateway_token);
     upstream.write_all(&with_auth).await?;
     let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
     Ok(())
@@ -4881,6 +4875,12 @@ fn inject_auth_header(request_head: &[u8], gateway_token: Option<&str>) -> Vec<u
 /// Case-insensitive header match, preserves the line terminator style
 /// (\r\n). Operates on raw bytes to avoid UTF-8 re-encoding the entire
 /// request. Non-HTTP / malformed requests fall through with no change.
+///
+/// NOTE: no longer called by raw_proxy. Kept for the unit tests that
+/// cover its behavior, and for a possible future code path that needs
+/// the rewrite (e.g. a non-OpenClaw agent that doesn't do silent-local
+/// pairing and only checks allowedOrigins). Delete if we're sure.
+#[allow(dead_code)]
 fn rewrite_origin_headers(request_head: &[u8], upstream_addr: &str) -> Vec<u8> {
     let body = match std::str::from_utf8(request_head) {
         Ok(s) => s,
