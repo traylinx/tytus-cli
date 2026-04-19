@@ -4526,6 +4526,16 @@ async fn fetch_and_cache_asset(
 
 /// Raw TCP proxy path: forward the already-consumed request head to
 /// upstream, then bidirectional-copy until either side closes.
+///
+/// Rewrites the Origin (and Referer) header to the upstream origin
+/// before forwarding. OpenClaw's gateway enforces a strict CORS
+/// allowedOrigins check on the WebSocket upgrade handshake, and the
+/// default config only trusts the pod's own endpoint
+/// (http://10.X.Y.1:3000). Without this rewrite, every browser
+/// connection through the forwarder gets rejected with "origin not
+/// allowed" and the control UI stays stuck on a red error banner.
+/// Rewriting at the forwarder lets any localhost:port just work
+/// without the user having to edit config.json inside the pod.
 async fn raw_proxy(
     mut client: tokio::net::TcpStream,
     request_head: &[u8],
@@ -4540,9 +4550,46 @@ async fn raw_proxy(
             return Ok(());
         }
     };
-    upstream.write_all(request_head).await?;
+    let rewritten = rewrite_origin_headers(request_head, upstream_addr);
+    upstream.write_all(&rewritten).await?;
     let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
     Ok(())
+}
+
+/// Rewrite `Origin:` and `Referer:` header values so they look like the
+/// request came from the upstream agent, not from localhost:<port>.
+/// Case-insensitive header match, preserves the line terminator style
+/// (\r\n). Operates on raw bytes to avoid UTF-8 re-encoding the entire
+/// request. Non-HTTP / malformed requests fall through with no change.
+fn rewrite_origin_headers(request_head: &[u8], upstream_addr: &str) -> Vec<u8> {
+    let body = match std::str::from_utf8(request_head) {
+        Ok(s) => s,
+        Err(_) => return request_head.to_vec(),
+    };
+    let upstream_origin = format!("http://{}", upstream_addr);
+    let mut out = String::with_capacity(body.len());
+    for line in body.split_inclusive("\r\n") {
+        let trimmed = line.trim_end_matches("\r\n");
+        // Match "Origin: …" or "Referer: …" case-insensitively.
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("origin:") {
+            out.push_str(&format!("Origin: {}\r\n", upstream_origin));
+        } else if lower.starts_with("referer:") {
+            // Keep the original path component; only swap the scheme+host.
+            // `Referer: http://localhost:18702/chat?session=main` →
+            // `Referer: http://10.18.2.1:3000/chat?session=main`.
+            let val = trimmed["referer:".len()..].trim_start();
+            if let Some(path_start) = val.find("://").and_then(|i| val[i + 3..].find('/')) {
+                let i = val.find("://").unwrap() + 3 + path_start;
+                out.push_str(&format!("Referer: {}{}\r\n", upstream_origin, &val[i..]));
+            } else {
+                out.push_str(&format!("Referer: {}\r\n", upstream_origin));
+            }
+        } else {
+            out.push_str(line);
+        }
+    }
+    out.into_bytes()
 }
 
 /// Position of the \r\n\r\n header terminator + 4 (start of body), if any.
