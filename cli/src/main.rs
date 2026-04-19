@@ -1973,6 +1973,13 @@ async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
         // a Disconnect leaves localhost:3000 bound to a dead upstream,
         // and the next browser click errors silently.
         stop_ui_forwarder(pod_num);
+        // Wipe the forwarder's static-asset cache. If the pod comes back
+        // with a different agent (install openclaw → uninstall → install
+        // hermes), serving the previous agent's cached JS/CSS would be
+        // wrong. Disconnect is the bright-line "assume everything may
+        // change" event. Best-effort — cache loss just costs the next
+        // page load its initial tunnel hit.
+        let _ = std::fs::remove_dir_all(format!("/tmp/tytus/ui-{}-cache", pod_num));
     }
     state.save();
 
@@ -3870,12 +3877,20 @@ async fn cmd_ui(
     json: bool,
 ) {
     use std::process::Command;
-    use tokio::io::copy_bidirectional;
     use tokio::net::{TcpListener, TcpStream};
 
     let state = CliState::load();
-    if !state.is_logged_in() {
-        eprintln!("Not logged in. Run: tytus login");
+    // cmd_ui is a pure TCP forwarder — it never calls any Sentinel API,
+    // so it doesn't actually need a valid refresh token. Checking only
+    // `email + pods` lets the forwarder stay useful even when the
+    // keychain ACL has lapsed (new code signature, rebuilt binary) and
+    // the RT couldn't be loaded. Everything the forwarder touches —
+    // tunnel iface, agent endpoint, upstream port — is in state.json
+    // directly. If the tunnel has actually dropped, the upstream probe
+    // (A1) cleans the forwarder up within ~15s.
+    let has_email = state.email.as_deref().map(|e| !e.is_empty()).unwrap_or(false);
+    if !has_email || state.pods.is_empty() {
+        eprintln!("Not logged in or no pods configured. Run: tytus login && tytus connect");
         std::process::exit(1);
     }
 
@@ -4152,19 +4167,25 @@ async fn cmd_ui(
     });
 
     let upstream_for_accept = upstream_clone.clone();
+    // Per-pod static-asset cache. First fetch of a hashed-filename
+    // bundle (Vite immutable /assets/<hash>.js) goes through the tunnel;
+    // every subsequent fetch is served from /tmp/tytus/ui-<pod>-cache/.
+    // Throughput over userspace WireGuard on macOS is ~3 KB/s sustained
+    // for the 689 KB bundle OpenClaw ships — that's ~4 minutes for the
+    // initial paint, every single tab reload. Disk cache makes the
+    // second-and-beyond experience effectively instant (~0ms).
+    let cache_dir = std::path::PathBuf::from(format!("/tmp/tytus/ui-{}-cache", pod.pod_id));
+    let _ = std::fs::create_dir_all(&cache_dir);
+
     let accept_loop = async move {
         loop {
             match listener.accept().await {
-                Ok((mut client, _addr)) => {
+                Ok((client, _addr)) => {
                     let upstream_addr = upstream_for_accept.clone();
+                    let cache_dir = cache_dir.clone();
                     tokio::spawn(async move {
-                        match TcpStream::connect(&upstream_addr).await {
-                            Ok(mut upstream_sock) => {
-                                let _ = copy_bidirectional(&mut client, &mut upstream_sock).await;
-                            }
-                            Err(e) => {
-                                eprintln!("[tytus ui] upstream connect to {} failed: {}", upstream_addr, e);
-                            }
+                        if let Err(e) = handle_forwarder_connection(client, upstream_addr.clone(), cache_dir).await {
+                            eprintln!("[tytus ui] connection error (upstream {}): {}", upstream_addr, e);
                         }
                     });
                 }
@@ -4249,6 +4270,216 @@ fn list_ui_forwarder_pods() -> Vec<String> {
 /// to shut the forwarder down. Reads /tmp/tytus/ui-*.port markers to
 /// discover pids. With --pod, acts on that one pod; without, stops them
 /// all.
+/// Handle one incoming client connection on the forwarder.
+///
+/// Reads the request head, decides "cacheable static asset GET" vs
+/// "everything else", and dispatches accordingly:
+///
+///   - Cacheable GET: SHA-like path-to-filename translation → lookup in
+///     cache_dir. On hit, serve bytes verbatim (we already wrote a full
+///     HTTP/1.1 response when caching). On miss, open an upstream TCP
+///     socket, forward the request, stream the response to the browser,
+///     and — if status is 2xx — atomically persist the full response to
+///     the cache. Connection closes after the response (no keep-alive on
+///     the cache path; browsers handle this fine by opening new TCPs).
+///
+///   - Anything else (POST, WS upgrade, HTML root, API JSON, etc.):
+///     fall through to the old raw-TCP copy_bidirectional path. We
+///     already consumed the client's request head, so we replay it
+///     verbatim to upstream before wiring the two sockets together.
+///
+/// Error handling: on any io error, the client connection is dropped.
+/// Cache write failures are swallowed silently — we'd rather serve a
+/// correct but uncached response than fail the request.
+async fn handle_forwarder_connection(
+    mut client: tokio::net::TcpStream,
+    upstream_addr: String,
+    cache_dir: std::path::PathBuf,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    // Read the request head (up to \r\n\r\n) with a bounded buffer so a
+    // malformed client can't OOM us. 16 KB covers any realistic HTTP/1.1
+    // headers — browsers cap at ~8 KB in practice.
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 2048];
+    let head_end = loop {
+        if let Some(pos) = find_crlf2(&buf) {
+            break pos;
+        }
+        if buf.len() >= 16 * 1024 {
+            return Ok(()); // headers too large, drop the connection
+        }
+        let n = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.read(&mut tmp),
+        ).await {
+            Ok(Ok(n)) if n > 0 => n,
+            _ => return Ok(()), // timeout or EOF before head complete
+        };
+        buf.extend_from_slice(&tmp[..n]);
+    };
+
+    // Parse the request line: `METHOD /path HTTP/1.1\r\n`.
+    let (method, path) = match parse_request_line(&buf[..head_end]) {
+        Some(v) => v,
+        None => {
+            // Unparseable — dump everything to upstream and bridge raw.
+            return raw_proxy(client, &buf, &upstream_addr).await;
+        }
+    };
+    let method = method.to_string();
+    let path = path.to_string();
+
+    let is_cacheable = method.eq_ignore_ascii_case("GET") && is_cacheable_asset(&path);
+    if !is_cacheable {
+        return raw_proxy(client, &buf, &upstream_addr).await;
+    }
+
+    // Cache lookup.
+    let cache_file = cache_dir.join(cache_key_for(&path));
+    if let Ok(cached) = tokio::fs::read(&cache_file).await {
+        client.write_all(&cached).await?;
+        return Ok(());
+    }
+
+    // Cache miss — open upstream, forward request, stream response,
+    // buffer response to cache for next time.
+    let mut upstream = match TcpStream::connect(&upstream_addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            let body = format!("upstream connect failed: {}", e);
+            let resp = format!(
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = client.write_all(resp.as_bytes()).await;
+            return Ok(());
+        }
+    };
+    // Synthesise a minimal HTTP/1.1 request with `Connection: close`
+    // rather than replaying the browser's raw bytes. Two reasons:
+    //   1. The browser sent `Connection: keep-alive`; with keep-alive
+    //      upstream will hold the socket open for its 5s timeout after
+    //      sending the body. `read_to_end` then blocks for that 5s
+    //      extra per request — meaningful when the user is reloading.
+    //   2. We're caching; we don't need cookies / Accept-Encoding / UA
+    //      quirks to vary the response.
+    // `Host` is cosmetic for this path since the upstream is a raw
+    // TCP socket already resolved, but we set it so agent log lines
+    // aren't blank.
+    let synthetic_req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        path, upstream_addr
+    );
+    upstream.write_all(synthetic_req.as_bytes()).await?;
+    let _ = &buf; // we read the client's request head to parse it, but don't replay it
+    let mut response: Vec<u8> = Vec::with_capacity(64 * 1024);
+    upstream.read_to_end(&mut response).await?;
+
+    // Only cache 2xx responses. Everything else (403, 404, 5xx) should
+    // re-probe upstream on the next request — caching a transient failure
+    // would make it sticky.
+    if response_is_2xx(&response) && !response.is_empty() {
+        // The cache dir may have been removed out from under us (user
+        // deleted /tmp/tytus manually, periodic /tmp sweep, etc).
+        // Re-create before the atomic write or we silently skip caching.
+        if let Some(parent) = cache_file.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        // Atomic write: tmp file in same dir → rename. Avoids half-written
+        // cache entries being served after a crash mid-write.
+        let tmp_path = cache_file.with_extension("tmp");
+        if tokio::fs::write(&tmp_path, &response).await.is_ok() {
+            let _ = tokio::fs::rename(&tmp_path, &cache_file).await;
+        }
+    }
+    client.write_all(&response).await?;
+    Ok(())
+}
+
+/// Raw TCP proxy path: forward the already-consumed request head to
+/// upstream, then bidirectional-copy until either side closes.
+async fn raw_proxy(
+    mut client: tokio::net::TcpStream,
+    request_head: &[u8],
+    upstream_addr: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+    let mut upstream = match TcpStream::connect(upstream_addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[tytus ui] upstream connect to {} failed: {}", upstream_addr, e);
+            return Ok(());
+        }
+    };
+    upstream.write_all(request_head).await?;
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    Ok(())
+}
+
+/// Position of the \r\n\r\n header terminator + 4 (start of body), if any.
+fn find_crlf2(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+}
+
+/// Parse `METHOD path HTTP/1.1\r\n…` → (method, path). Returns None for
+/// malformed input. The trailing CRLF is guaranteed by find_crlf2's
+/// caller contract.
+fn parse_request_line(head: &[u8]) -> Option<(&str, &str)> {
+    let line_end = head.iter().position(|&b| b == b'\r')?;
+    let line = std::str::from_utf8(&head[..line_end]).ok()?;
+    let mut parts = line.splitn(3, ' ');
+    let method = parts.next()?;
+    let path = parts.next()?;
+    Some((method, path))
+}
+
+/// True if `path` points at a cacheable static asset.  Vite and similar
+/// bundlers embed a content hash in the filename (e.g.
+/// /assets/index-Dts6VHgr.js), so content for a given path is
+/// effectively immutable — caching forever is safe. We deliberately
+/// skip .json: an app API endpoint could return JSON at an arbitrary
+/// path (/api/sessions.json would match otherwise).
+fn is_cacheable_asset(path: &str) -> bool {
+    let p = path.split('?').next().unwrap_or(path);
+    let ext = match p.rfind('.') {
+        Some(pos) => &p[pos..],
+        None => return false,
+    };
+    matches!(ext,
+        ".js" | ".mjs" | ".css" | ".svg" | ".png" | ".jpg" | ".jpeg" |
+        ".gif" | ".webp" | ".ico" | ".woff" | ".woff2" | ".ttf" | ".otf" |
+        ".map" | ".wasm"
+    )
+}
+
+/// URL path → deterministic, filesystem-safe cache filename.
+/// `/assets/index-Dts6VHgr.js` becomes `_assets_index-Dts6VHgr.js`,
+/// readable in `ls` for easy debugging. Query string is dropped (asset
+/// URLs with ?v=… busting are rare and would only fragment the cache).
+fn cache_key_for(path: &str) -> String {
+    let p = path.split('?').next().unwrap_or(path);
+    p.chars()
+        .map(|c| match c {
+            '/' => '_',
+            c if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' => c,
+            _ => '-',
+        })
+        .collect()
+}
+
+/// True if response starts with "HTTP/1.1 2xx" (or HTTP/1.0 2xx).
+fn response_is_2xx(response: &[u8]) -> bool {
+    // "HTTP/1.1 200 OK\r\n…"
+    if response.len() < 12 { return false; }
+    // Find the status code — three digits starting at byte 9.
+    let code = &response[9..12];
+    code[0] == b'2' && code[1].is_ascii_digit() && code[2].is_ascii_digit()
+}
+
 async fn cmd_ui_stop(pod_id: Option<String>, json: bool) {
     let dir = std::path::PathBuf::from("/tmp/tytus");
     let mut stopped: Vec<(String, i32)> = Vec::new();

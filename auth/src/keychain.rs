@@ -24,13 +24,38 @@ impl KeychainStore {
         Ok(())
     }
 
-    /// Retrieve refresh token from OS keychain
+    /// Retrieve refresh token from OS keychain.
+    ///
+    /// Wraps the keyring call in a thread + 3-second deadline. macOS
+    /// re-prompts for keychain ACL approval every time the binary's code
+    /// signature changes (dev rebuilds, unsigned installs, Apple code-
+    /// sign rotation). The GUI dialog is invisible to non-interactive
+    /// / non-TTY callers — status, doctor, forwarder, daemon, anything
+    /// spawned detached from the tray — so the call would block forever
+    /// waiting for a button nobody can see. After 3s we give up and
+    /// return NotFound; callers fall back to "no refresh token, treat
+    /// as logged out", which is honest + recoverable via `tytus login`.
     pub fn get_refresh_token(email: &str) -> Result<String, KeychainError> {
-        let entry = keyring::Entry::new(SERVICE_NAME, email)
-            .map_err(|e| KeychainError::Keychain(e.to_string()))?;
-        entry
-            .get_password()
-            .map_err(|_| KeychainError::NotFound)
+        let email = email.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result: Result<String, KeychainError> = (|| {
+                let entry = keyring::Entry::new(SERVICE_NAME, &email)
+                    .map_err(|e| KeychainError::Keychain(e.to_string()))?;
+                entry.get_password().map_err(|_| KeychainError::NotFound)
+            })();
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(res) => res,
+            Err(_) => {
+                tracing::warn!(
+                    "keychain get_refresh_token timed out after 3s — likely a user-approval dialog is pending. \
+                     Falling back to NotFound. Re-run `tytus login` to refresh after approving the dialog."
+                );
+                Err(KeychainError::NotFound)
+            }
+        }
     }
 
     /// Delete refresh token from OS keychain
