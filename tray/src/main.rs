@@ -1123,11 +1123,26 @@ fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
 /// elevated helper — AND verify the pid is actually alive. The pidfile
 /// lingering without a running daemon is a known failure mode (crash
 /// before cleanup), so liveness matters.
+///
+/// The tunnel daemon runs as root. A user-space `kill(pid, 0)` against
+/// a root process returns -1 with errno=EPERM (not ESRCH), so we'd
+/// incorrectly treat the process as dead. Fix: accept EPERM as "alive"
+/// — we couldn't signal it but it definitely exists. Discovered
+/// 2026-04-19 smoke test: tray always labelled pod rows "Connect & Open
+/// in Browser" because this function returned false even with utun4
+/// actively routing packets.
 fn tunnel_reaches_pod(pod_id: &str) -> bool {
     let path = format!("/tmp/tytus/tunnel-{}.pid", pod_id);
     let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => return false };
     let pid: i32 = match raw.trim().parse() { Ok(p) => p, Err(_) => return false };
-    pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
+    if pid <= 1 { return false; }
+    unsafe {
+        if libc::kill(pid, 0) == 0 { return true; }
+    }
+    // libc::kill failed. Alive-but-EPERM means the daemon is running
+    // under a different uid (root), which is the normal happy path.
+    let errno = unsafe { *libc::__error() };
+    errno == libc::EPERM
 }
 
 /// Start `tytus ui --pod <pod_id> --no-open` as a fully detached

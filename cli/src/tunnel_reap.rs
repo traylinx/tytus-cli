@@ -196,6 +196,43 @@ fn pid_is_alive(pid: i32) -> bool {
 /// Returning `Option` keeps the existing FIX-3 call shape — a garbled
 /// file is indistinguishable from "nothing to reap" at the caller level,
 /// and `reap_tunnel_for_pod` sweeps the junk before reporting `NoPidfile`.
+/// Scan `ps` for an orphan tunnel daemon matching
+/// `tytus tunnel-up /tmp/tytus/tunnel-<pod_num>.json`. Returns the pid
+/// if found. Used when the pidfile vanished but the daemon is still
+/// running — we still want `tytus disconnect` to recover the state
+/// rather than silently leaving a root process behind.
+///
+/// Safety: the only pids this function returns are processes whose argv
+/// literally says `tytus tunnel-up /tmp/tytus/tunnel-<pod>.json`. The
+/// `<pod>` is already validated against `is_safe_pod_num` by the caller,
+/// so the shell-interpolation surface is just `[0-9A-Za-z_-]` characters.
+fn find_orphan_tunnel_daemon(pod_num: &str) -> Option<i32> {
+    let needle = format!("tunnel-up /tmp/tytus/tunnel-{}.json", pod_num);
+    // `ps -ax -o pid=,command=` — pid col then full argv, no header.
+    let output = std::process::Command::new("ps")
+        .args(["-ax", "-o", "pid=,command="])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if !line.contains(&needle) { continue; }
+        // Line begins with whitespace + pid + space + command
+        let trimmed = line.trim_start();
+        let pid_str: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(pid) = pid_str.parse::<i32>() {
+            // Skip the sudo wrapper — we want the real tytus tunnel-up,
+            // not its "sudo -n" parent. The sudo wrapper forwards SIGTERM
+            // to the child anyway, but killing the child directly is the
+            // cleaner idiom.
+            let full = &trimmed[pid_str.len()..];
+            if full.contains("tytus tunnel-up") && !full.contains("sudo") {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
 fn read_pid_from_file(pod_num: &str) -> Option<i32> {
     let path = pidfile_path(pod_num);
     let contents = std::fs::read_to_string(&path).ok()?;
@@ -237,6 +274,34 @@ pub fn list_pod_pidfiles() -> Vec<(String, PathBuf)> {
         out.push((pod_num.to_string(), path));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Scan `ps` for every `tytus tunnel-up /tmp/tytus/tunnel-<pod>.json`
+/// process and return the unique `pod` values. Complements
+/// `list_pod_pidfiles` so that a bare `tytus disconnect` also reaps
+/// daemons whose pidfiles vanished (orphan recovery).
+pub fn list_orphan_tunnel_pods() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let output = match std::process::Command::new("ps")
+        .args(["-ax", "-o", "command="])
+        .output() { Ok(o) => o, Err(_) => return out };
+    if !output.status.success() { return out; }
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        // Look for ".../tunnel-<pod>.json" in the argv. Skip the sudo
+        // wrapper line — we only want the actual tytus tunnel-up child.
+        if line.contains("sudo") { continue; }
+        if !line.contains("tytus tunnel-up") { continue; }
+        if let Some(start) = line.find("/tmp/tytus/tunnel-") {
+            let rest = &line[start + "/tmp/tytus/tunnel-".len()..];
+            if let Some(end) = rest.find(".json") {
+                let pod = &rest[..end];
+                if is_safe_pod_num(pod) && !out.iter().any(|p| p == pod) {
+                    out.push(pod.to_string());
+                }
+            }
+        }
+    }
     out
 }
 
@@ -305,10 +370,39 @@ pub fn reap_tunnel_for_pod(pod_num: &str) -> ReapOutcome {
         };
     }
 
-    let Some(pid) = read_pid_from_file(pod_num) else {
-        // Pidfile absent OR garbled. Sweep any junk and report NoPidfile.
-        cleanup_files(pod_num);
-        return ReapOutcome::NoPidfile;
+    let pid = match read_pid_from_file(pod_num) {
+        Some(p) => p,
+        None => {
+            // Pidfile missing or garbled. Before reporting NoPidfile,
+            // scan for an orphan tunnel daemon whose argv matches
+            // "tytus tunnel-up /tmp/tytus/tunnel-<pod>.json". Discovered
+            // during 2026-04-19 smoke test: when the pidfile is deleted
+            // or never written (e.g. sprint migration, /tmp cleaned by
+            // periodic-daily) the daemon keeps running, the interface
+            // stays up, and the user has no way to stop it without
+            // manual `sudo kill`. Orphan recovery closes that hole.
+            if let Some(orphan_pid) = find_orphan_tunnel_daemon(pod_num) {
+                // Materialize a pidfile so the sudoers-scoped tunnel-down
+                // helper can validate against it. We write 0644 so both
+                // the user and the root helper can read — same convention
+                // as the cmd_tunnel_up post-fix permissions.
+                let path = pidfile_path(pod_num);
+                if std::fs::write(&path, format!("{}", orphan_pid)).is_ok() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+                    }
+                    orphan_pid
+                } else {
+                    cleanup_files(pod_num);
+                    return ReapOutcome::NoPidfile;
+                }
+            } else {
+                cleanup_files(pod_num);
+                return ReapOutcome::NoPidfile;
+            }
+        }
     };
 
     if !pid_is_alive(pid) {

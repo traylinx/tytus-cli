@@ -1219,15 +1219,32 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
         Ok(mut handle) => {
             let iface = handle.interface_name.clone();
 
-            // Write PID file so `tytus disconnect` can find and stop us
+            // Write PID file so `tytus disconnect` can find and stop us.
+            // 0644 (NOT 0600): the tunnel daemon runs as root, but the
+            // user-space `tytus disconnect` and `tytus-tray` read this
+            // file to locate + SIGTERM the daemon. With 0600 root:wheel
+            // the read_to_string silently fails (permission denied), the
+            // reap function reports "NoPidfile" and the daemon lingers
+            // forever. Pid isn't secret — `ps` exposes every pid on the
+            // machine. Discovered 2026-04-19 during sprint smoke test:
+            // disconnect said "nothing to reap" yet utun5 kept routing
+            // + a root boringtun process kept running.
             let pid_file = pid_dir.join(format!("tunnel-{}.pid", pod_id));
             let _ = std::fs::write(&pid_file, format!("{}", std::process::id()));
-            secure_chmod_600(&pid_file);
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&pid_file, std::fs::Permissions::from_mode(0o644));
+            }
 
-            // Write interface name so parent process can read it
+            // Write interface name so parent process can read it.
+            // Same 0644 reasoning — interface name is advertised by
+            // ifconfig already, no secrecy value.
             let iface_file = pid_dir.join(format!("tunnel-{}.iface", pod_id));
             let _ = std::fs::write(&iface_file, &iface);
-            secure_chmod_600(&iface_file);
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&iface_file, std::fs::Permissions::from_mode(0o644));
+            }
 
             // Signal to parent that tunnel is ready (print to stdout for capture)
             println!("TUNNEL_READY iface={} pid={}", iface, std::process::id());
@@ -1831,6 +1848,16 @@ async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
         for pod in &state.pods {
             if !candidates.iter().any(|c| c == &pod.pod_id) {
                 candidates.push(pod.pod_id.clone());
+            }
+        }
+        // Orphan scan: any `tytus tunnel-up /tmp/tytus/tunnel-<pod>.json`
+        // process whose pidfile has vanished AND whose pod isn't in state
+        // (e.g. revoke wiped state while daemon kept running). Without
+        // this, a bare `tytus disconnect` silently leaves the daemon +
+        // tunnel iface behind forever.
+        for pod_num in tunnel_reap::list_orphan_tunnel_pods() {
+            if !candidates.iter().any(|c| c == &pod_num) {
+                candidates.push(pod_num);
             }
         }
     }
