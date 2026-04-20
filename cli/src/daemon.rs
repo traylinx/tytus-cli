@@ -428,6 +428,12 @@ async fn dispatch_command(
                     "tunnel_iface": p.tunnel_iface,
                     "stable_ai_endpoint": p.stable_ai_endpoint,
                     "stable_user_key": p.stable_user_key,
+                    // Phase 4: edge URL fields. The slug + public_url come
+                    // from /pod/user-key on Provider when EDGE_PATH_ENABLED=1.
+                    // The tray uses these to skip the localhost forwarder
+                    // and open the public URL directly.
+                    "edge_slug": p.edge_slug,
+                    "edge_public_url": p.edge_public_url,
                 })
             }).collect();
             let last_refresh = ds.last_refresh.map(|t| t.elapsed().as_secs());

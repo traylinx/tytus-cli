@@ -304,9 +304,22 @@ pub struct PodInfo {
     /// Per-user stable API key (sk-tytus-user-<32hex>). Survives pod
     /// revocation/reallocation and agent swaps.
     pub stable_user_key: Option<String>,
+    /// Phase 4: per-user public-edge subdomain
+    /// (`<slug>.tytus.traylinx.com`). Empty when EDGE_PATH_ENABLED=0 on
+    /// Provider — falls back to the legacy WG path.
+    pub edge_public_url: Option<String>,
 }
 
 impl PodInfo {
+    /// Build the user-visible public URL for this pod's gateway, or `None`
+    /// when the edge isn't wired up. Includes the `/p/<NN>` path prefix so
+    /// callers can append `/v1/...` directly.
+    pub fn public_pod_url(&self) -> Option<String> {
+        self.edge_public_url
+            .as_ref()
+            .map(|u| format!("{}/p/{}", u.trim_end_matches('/'), self.pod_id))
+    }
+
     /// Unit cost — mirrors Scalesys: NemoClaw=1, Hermes=2, Default pod=0.
     pub fn units(&self) -> u32 {
         match self.agent_type.as_str() {
@@ -860,29 +873,36 @@ fn build_menu(state: &TrayState) -> Menu {
 
     // ── AIL Connection Info ▸ ─────────────────────────────────
     //
-    // Surfaces the stable endpoint + key so users can paste them into
-    // Claude Code, Cursor, OpenCode, Codex — any OpenAI-compatible tool
-    // — without running a terminal round-trip. Visible whenever the user
-    // is logged in and has at least one pod (doesn't require the tunnel
-    // to be up: users often pre-configure clients).
+    // Surfaces the user's connection pair so they can paste it into
+    // Claude Code, Cursor, OpenCode, Codex — any OpenAI-compatible tool —
+    // without running a terminal round-trip. Visible whenever the user is
+    // logged in and has at least one pod (does not require an active
+    // tunnel — the public-edge URL works straight from any network).
     //
-    // Pulls values from the first pod with stable fields (all pods on a
-    // user share the same stable endpoint + key, so the first one is
-    // representative). Falls back to the canonical 10.42.42.1 URL if the
-    // daemon hasn't yet populated the state.
+    // URL preference (Phase 4 cutover):
+    //   1. Public edge URL (`https://<slug>.tytus.traylinx.com/p/<NN>/v1`)
+    //      — works from anywhere, no tunnel needed.
+    //   2. Stable WG URL (`http://10.42.42.1:18080/v1`) — only reachable
+    //      while the WireGuard tunnel is up.
     if state.logged_in {
         let primary = state.pods.iter().find(|p| p.stable_user_key.is_some());
-        let endpoint = primary
+        let public_url = primary.and_then(|p| p.public_pod_url());
+        let wg_endpoint = primary
             .and_then(|p| p.stable_ai_endpoint.clone())
             .unwrap_or_else(|| "http://10.42.42.1:18080".to_string());
+        let endpoint = public_url.clone().unwrap_or_else(|| wg_endpoint.clone());
         let key = primary.and_then(|p| p.stable_user_key.clone());
 
         let info_sub = Submenu::new("AIL Connection Info", true);
 
         // Display-only rows so the user can see what they'd copy.
+        let url_label = match &public_url {
+            Some(_) => format!("URL: {}/v1  (public)", endpoint),
+            None    => format!("URL: {}/v1  (tunnel)", endpoint),
+        };
         let _ = info_sub.append(&MenuItem::with_id(
             "ail_info_url",
-            format!("URL: {}/v1", endpoint),
+            url_label,
             false, None,
         ));
         if let Some(ref k) = key {
@@ -966,29 +986,50 @@ fn build_menu(state: &TrayState) -> Menu {
                     format!("pod_header_{}", p.pod_id),
                     &header, false, None,
                 ));
-                // Open the agent's web UI via tytus ui (localhost forwarder
-                // + browser launch). Only meaningful for agents that
-                // actually expose a web UI on the pod — currently both
-                // OpenClaw (port 3000) and Hermes (port 8642). The tunnel
-                // must be up; the handler prints a clear message if it
-                // isn't. Per user request 2026-04-19 "we need to be able
-                // to reach always the tytus pod openclaw or hermes agent
-                // via the browser".
+                // Open the agent's web UI in the browser.
+                //
+                // Phase 4 cutover: when the pod has a public-edge URL we
+                // open it DIRECTLY — no localhost forwarder, no tunnel
+                // requirement, no Touch ID. One click = one HTTPS GET.
+                //
+                // When the user explicitly wants the legacy WG path
+                // (network blocks outbound HTTPS, deeper privacy, etc),
+                // they can fall back to "Open via Tunnel ▸" which still
+                // spins the localhost forwarder and routes via WireGuard.
+                let public_pod_url = p.public_pod_url();
                 let forwarder_live = existing_ui_forwarder(&p.pod_id).is_some();
                 let tunnel_live = tunnel_reaches_pod(&p.pod_id);
-                // B1: label reflects ground truth so the user knows
-                // whether a click will (a) just open a tab, (b) start a
-                // forwarder, or (c) also swap the tunnel (Touch ID prompt
-                // possible). Three-state rendering keeps the menu honest.
-                let open_label = match (forwarder_live, tunnel_live) {
-                    (true, _)      => "  Open in Browser  ✓",
-                    (false, true)  => "  Open in Browser",
-                    (false, false) => "  Connect & Open in Browser",
-                };
-                let _ = pods_sub.append(&MenuItem::with_id(
-                    format!("pod_{}_open", p.pod_id),
-                    open_label, true, None,
-                ));
+
+                if public_pod_url.is_some() {
+                    // Edge path is live — single, fast action.
+                    let _ = pods_sub.append(&MenuItem::with_id(
+                        format!("pod_{}_open", p.pod_id),
+                        "  Open in Browser", true, None,
+                    ));
+                    // Optional fallback for users who want the tunnel.
+                    let tunnel_label = match (forwarder_live, tunnel_live) {
+                        (true, _)      => "  Open via Tunnel  ✓",
+                        (false, true)  => "  Open via Tunnel",
+                        (false, false) => "  Connect & Open via Tunnel",
+                    };
+                    let _ = pods_sub.append(&MenuItem::with_id(
+                        format!("pod_{}_open_tunnel", p.pod_id),
+                        tunnel_label, true, None,
+                    ));
+                } else {
+                    // No public URL yet (provider hasn't refreshed user-key,
+                    // or EDGE_PATH_ENABLED=0) — keep the legacy 3-state
+                    // tunnel-only label. B1 ground-truth labelling.
+                    let open_label = match (forwarder_live, tunnel_live) {
+                        (true, _)      => "  Open in Browser  ✓",
+                        (false, true)  => "  Open in Browser",
+                        (false, false) => "  Connect & Open in Browser",
+                    };
+                    let _ = pods_sub.append(&MenuItem::with_id(
+                        format!("pod_{}_open", p.pod_id),
+                        open_label, true, None,
+                    ));
+                }
                 if forwarder_live {
                     let _ = pods_sub.append(&MenuItem::with_id(
                         format!("pod_{}_stop_forwarder", p.pod_id),
@@ -1502,33 +1543,35 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // browser. The forwarder is stopped explicitly via the per-pod
         // "Stop Forwarder" menu item (or `tytus ui --stop --pod N`),
         // NOT by closing a Terminal that no longer exists.
+        other if other.starts_with("pod_") && other.ends_with("_open_tunnel") => {
+            // Explicit "Open via Tunnel" — keeps the legacy forwarder path
+            // available even when public_url is set. Same code as the old
+            // _open handler.
+            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open_tunnel").to_string();
+            open_pod_via_forwarder(&pod_id);
+        }
         other if other.starts_with("pod_") && other.ends_with("_open") => {
+            // Phase 4: prefer the public-edge URL when populated. Single
+            // GET to https://<slug>.tytus.traylinx.com/p/<NN>/ — no
+            // forwarder, no tunnel, no Touch ID dialog.
             let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open").to_string();
-            if let Some(existing_url) = existing_ui_forwarder(&pod_id) {
-                let _ = std::process::Command::new("open").arg(&existing_url).spawn();
-            } else {
-                spawn_detached_ui(&pod_id);
-                // Poll the marker up to 3s, then open whatever URL it landed on.
-                let pod_for_poll = pod_id.clone();
-                std::thread::spawn(move || {
-                    for _ in 0..30 {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        if let Some(url) = existing_ui_forwarder(&pod_for_poll) {
-                            let _ = std::process::Command::new("open").arg(&url).spawn();
-                            return;
-                        }
-                    }
-                    // Timed out — the forwarder may need the tunnel swap path
-                    // (sudo elevation dialog). Fall back to Terminal so the
-                    // user can see what's happening.
-                    let _ = std::process::Command::new("osascript")
-                        .arg("-e")
-                        .arg(format!(
-                            "display notification \"Forwarder for pod {} didn't come up in 3s — opening Terminal for diagnostics.\" with title \"Tytus\"",
-                            pod_for_poll
-                        ))
-                        .spawn();
-                });
+            let public_url = {
+                let s = state.lock().unwrap();
+                s.pods.iter()
+                    .find(|p| p.pod_id == pod_id)
+                    .and_then(|p| p.public_pod_url())
+            };
+            match public_url {
+                Some(url) => {
+                    // Append `/` so the pod gateway routes to its index
+                    // (most agents redirect / → /agent/dashboard etc).
+                    let target = format!("{}/", url);
+                    let _ = std::process::Command::new("open").arg(&target).spawn();
+                }
+                None => {
+                    // No edge URL — fall back to the legacy forwarder path.
+                    open_pod_via_forwarder(&pod_id);
+                }
             }
         }
         // Stop the per-pod forwarder daemon.
@@ -1676,6 +1719,37 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         }
         _ => {}
     }
+}
+
+/// Open the pod's web UI through the legacy localhost forwarder
+/// (WireGuard tunnel required). Spun off from the click handlers so both
+/// the explicit "Open via Tunnel" action and the public-URL fallback path
+/// share one body. Reuse a live forwarder when the marker file says one
+/// is healthy; otherwise spawn `tytus ui --pod N --no-open` detached and
+/// poll the marker for ~3s before launching the browser.
+fn open_pod_via_forwarder(pod_id: &str) {
+    if let Some(existing_url) = existing_ui_forwarder(pod_id) {
+        let _ = std::process::Command::new("open").arg(&existing_url).spawn();
+        return;
+    }
+    spawn_detached_ui(pod_id);
+    let pod_for_poll = pod_id.to_string();
+    std::thread::spawn(move || {
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Some(url) = existing_ui_forwarder(&pod_for_poll) {
+                let _ = std::process::Command::new("open").arg(&url).spawn();
+                return;
+            }
+        }
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "display notification \"Forwarder for pod {} didn't come up in 3s — opening Terminal for diagnostics.\" with title \"Tytus\"",
+                pod_for_poll
+            ))
+            .spawn();
+    });
 }
 
 /// Minimal shell single-quote escaper. Safe for the restricted set of
@@ -2075,19 +2149,24 @@ fn chrono_now_iso() -> String {
     }
 }
 
-/// Pull the stable (URL, API key) pair from TrayState.
+/// Pull the user-facing (URL, API key) pair from TrayState.
 ///
 /// All of a user's pods share the same stable pair (it's per-user, not
-/// per-pod), so we return the first pod with the key populated. If the
-/// state is sparse — e.g. the user is logged in but the daemon hasn't
-/// yet hydrated stable fields — we fall back to the canonical URL and
-/// return `None` for the key so the caller can surface a "run tytus
-/// login" hint instead of copying an empty string.
+/// per-pod), so we return the first pod with the key populated.
+///
+/// URL preference (Phase 4):
+///   1. Public-edge URL (`https://<slug>.tytus.traylinx.com/p/<NN>/v1`)
+///      — works from any network, no tunnel needed.
+///   2. Stable WG URL (`http://10.42.42.1:18080`) — only with tunnel.
+///
+/// If state is sparse (no key yet), return None for the key so the
+/// caller can show a "run tytus login" hint instead of copying empty.
 fn connection_pair(state: &Arc<Mutex<TrayState>>) -> (String, Option<String>) {
     let s = state.lock().unwrap();
     let primary = s.pods.iter().find(|p| p.stable_user_key.is_some());
     let url = primary
-        .and_then(|p| p.stable_ai_endpoint.clone())
+        .and_then(|p| p.public_pod_url())
+        .or_else(|| primary.and_then(|p| p.stable_ai_endpoint.clone()))
         .unwrap_or_else(|| "http://10.42.42.1:18080".to_string());
     let key = primary.and_then(|p| p.stable_user_key.clone());
     (url, key)

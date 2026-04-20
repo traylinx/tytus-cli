@@ -139,6 +139,7 @@ fn daemon_status() -> Option<DaemonSnap> {
         tunnel_active: p.get("tunnel_iface").and_then(|v| v.as_str()).is_some(),
         stable_ai_endpoint: p.get("stable_ai_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
         stable_user_key: p.get("stable_user_key").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        edge_public_url: p.get("edge_public_url").and_then(|v| v.as_str()).map(|s| s.to_string()),
     }).collect();
     Some(DaemonSnap {
         daemon_pid: daemon.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -213,6 +214,7 @@ fn read_state_file() -> Option<FileSnap> {
         tunnel_active: p.get("tunnel_iface").and_then(|v| v.as_str()).is_some(),
         stable_ai_endpoint: p.get("stable_ai_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
         stable_user_key: p.get("stable_user_key").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        edge_public_url: p.get("edge_public_url").and_then(|v| v.as_str()).map(|s| s.to_string()),
     }).collect();
 
     Some(FileSnap {
