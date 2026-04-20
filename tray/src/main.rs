@@ -1177,7 +1177,15 @@ fn build_menu(state: &TrayState) -> Menu {
     if !state.keychain_healthy || state.last_refresh_error.is_some() {
         let _ = trouble_sub.append(&PredefinedMenuItem::separator());
     }
-    let _ = trouble_sub.append(&MenuItem::with_id("doctor", "Doctor", true, None));
+    // "Help…" — single user-facing recovery entry for non-dev users.
+    // Opens the same native dialog the Connect verification surface
+    // shows on failure: Try Again / Copy Diag / Cancel. Always
+    // available, regardless of connection state. Grandma clicks this
+    // when anything looks wrong and gets either a one-click retry
+    // or a paste-to-support blob.
+    let _ = trouble_sub.append(&MenuItem::with_id("help_dialog", "Help…  (something's not working)", true, None));
+    let _ = trouble_sub.append(&PredefinedMenuItem::separator());
+    let _ = trouble_sub.append(&MenuItem::with_id("doctor", "Doctor (advanced)", true, None));
     let _ = trouble_sub.append(&MenuItem::with_id("view_daemon_log", "View Daemon Log", true, None));
     let _ = trouble_sub.append(&MenuItem::with_id("view_startup_log", "View Startup Log", true, None));
     let _ = trouble_sub.append(&PredefinedMenuItem::separator());
@@ -1253,11 +1261,14 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             // happening" feedback the earlier silent attempt aimed for.
             busy_set("Connecting to pod…");
             std::thread::spawn(|| {
-                // Wait up to 60s for gateway, then clear the busy
-                // status. This runs independently of whether the user
-                // actually completes the sudo prompt — if they cancel,
-                // the 60s will expire and the menu returns to the
-                // normal "Pod unreachable" state, which is honest.
+                // Verification loop: probe gateway every 1s for up to
+                // 60s after the user clicks Connect. On success: clear
+                // busy, notify, done. On 60s timeout: surface a
+                // user-facing "Need help?" dialog with a single
+                // button that copies a small diag summary to the
+                // clipboard. The user isn't left guessing — they
+                // either see a ✓ notification or a clear failure
+                // with next steps.
                 use gateway_probe::probe_gateway;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                 while std::time::Instant::now() < deadline {
@@ -1269,6 +1280,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }
                 busy_clear();
+                // Timed out. User-visible recovery path.
+                notify("Tytus", "Couldn't verify connection. Tap the tray for Help.");
+                show_connect_failure_help();
             });
             // Terminal window auto-closes on success via `exit` after
             // the tunnel spawn completes. Leaves the window open on
@@ -1430,6 +1444,14 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         }
         "doctor" => {
             open_in_terminal_simple("tytus doctor; echo; echo 'Press Enter to close…'; read _");
+        }
+        "help_dialog" => {
+            // User-facing recovery dialog. Same UI as the post-timeout
+            // dialog, but always available from the menu so users can
+            // self-rescue without waiting for a 60s timeout.
+            std::thread::spawn(|| {
+                show_connect_failure_help();
+            });
         }
         "docs" => {
             let _ = std::process::Command::new("open")
@@ -1775,6 +1797,11 @@ fn spawn_detached(program: &str, args: &[&str]) {
 /// Activating WireGuard tunnel / Tunnel daemon running (pid …)" —
 /// they need to know one of: "connected", "not connected, here's why,
 /// open Troubleshoot". Ollama follows the same philosophy.
+///
+/// Currently unused — the tray uses Terminal-based connect flows
+/// (required for sudo TTY). Kept as a library helper for future
+/// background-only actions that don't need elevation.
+#[allow(dead_code)]
 fn run_silent_with_notify<F>(
     program: &str,
     args: &[&str],
@@ -1909,6 +1936,144 @@ fn notify(title: &str, body: &str) {
 
 #[cfg(not(target_os = "macos"))]
 fn notify(_title: &str, _body: &str) {}
+
+/// User-facing recovery dialog when Connect fails to bring the gateway
+/// up within the 60s verification window. Three buttons:
+///
+///   Try Again      → re-trigger `tytus connect` after a clean disconnect
+///   Copy Diag      → copy a short diagnostic summary to the clipboard
+///                    (for support / forum / bug reports)
+///   Cancel         → dismiss
+///
+/// The diagnostic string is deliberately small (fits in a chat
+/// message): gateway-probe result, tunnel iface presence, daemon
+/// status, email, tier, last 10 lines of ~/.tytus/logs/connect.log.
+/// No tokens, no secrets — safe to paste into Discord / Telegram / email.
+#[cfg(target_os = "macos")]
+fn show_connect_failure_help() {
+    let body = "I can't tell if your tunnel came up within 60 seconds. This usually means one of:\n\n• Your network just changed (WiFi switch, VPN toggle)\n• The droplet is momentarily unreachable\n• A stale tunnel process is blocking a clean retry\n\nTry Again will disconnect cleanly and reconnect. Copy Diag puts a short diagnostic on your clipboard you can share.";
+    let script = format!(
+        "display dialog \"{}\" with title \"Tytus — connection trouble\" \
+         buttons {{\"Copy Diag\", \"Cancel\", \"Try Again\"}} \
+         default button \"Try Again\" cancel button \"Cancel\" with icon caution",
+        body.replace('"', "\\\"").replace('\n', "\\n"),
+    );
+    let out = std::process::Command::new("osascript")
+        .arg("-e").arg(script)
+        .output();
+    let stdout = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(_) => return,
+    };
+    if stdout.contains("Try Again") {
+        // Disconnect first (reaps the stale tunnel), then reconnect.
+        // Run in a Terminal so sudo can prompt for the reconnect pass.
+        busy_set("Retrying connection…");
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            busy_clear();
+        });
+        open_in_terminal_simple(
+            "tytus disconnect 2>/dev/null; tytus connect && exit; echo; echo 'Retry failed — see above.'; echo 'Press Enter to close…'; read _"
+        );
+    } else if stdout.contains("Copy Diag") {
+        let diag = build_diag_summary();
+        // Write to pbcopy via stdin pipe.
+        if let Ok(mut child) = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(stdin) = child.stdin.as_mut() {
+                use std::io::Write;
+                let _ = stdin.write_all(diag.as_bytes());
+            }
+            let _ = child.wait();
+        }
+        notify("Tytus", "Diagnostic copied to clipboard — paste it when asking for help.");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_connect_failure_help() {}
+
+/// Build a short, secret-free diagnostic string. Included fields:
+/// gateway reachability, tunnel iface presence, daemon uptime +
+/// status, logged-in email, tier, last 10 lines of
+/// ~/.tytus/logs/connect.log. Small enough to paste into a support
+/// chat; large enough to tell us what's wrong in 95% of cases.
+fn build_diag_summary() -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let _ = writeln!(s, "Tytus diagnostic — {}", chrono_now_iso());
+    let _ = writeln!(s, "platform: macOS (Tytus.app)");
+
+    // Gateway reachability.
+    let gw = gateway_probe::probe_gateway();
+    let _ = writeln!(s, "gateway_reachable: {}", gw);
+
+    // Tunnel iface presence (look for utun with 10.42.42 or 10.18.x).
+    let tunnel = std::process::Command::new("ifconfig")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    let tunnel_up = tunnel.contains("10.42.42.") || tunnel.contains("10.18.");
+    let _ = writeln!(s, "tunnel_iface_up: {}", tunnel_up);
+
+    // Daemon status (from daemon socket, read-only).
+    let daemon = socket::send_raw_command("status").and_then(|v| {
+        let d = v.get("data")?.get("daemon")?;
+        let a = v.get("data")?.get("auth")?;
+        Some(format!(
+            "status={} uptime={}s logged_in={} tier={}",
+            d.get("status").and_then(|x| x.as_str()).unwrap_or("?"),
+            d.get("uptime_secs").and_then(|x| x.as_u64()).unwrap_or(0),
+            a.get("logged_in").and_then(|x| x.as_bool()).unwrap_or(false),
+            a.get("tier").and_then(|x| x.as_str()).unwrap_or("?"),
+        ))
+    }).unwrap_or_else(|| "daemon_unreachable".into());
+    let _ = writeln!(s, "daemon: {}", daemon);
+
+    // Pod list (no keys).
+    if let Some(v) = socket::send_raw_command("status") {
+        if let Some(arr) = v.get("data").and_then(|d| d.get("pods")).and_then(|p| p.as_array()) {
+            let summary: Vec<String> = arr.iter().map(|p| {
+                format!(
+                    "{}/{}",
+                    p.get("pod_id").and_then(|x| x.as_str()).unwrap_or("?"),
+                    p.get("agent_type").and_then(|x| x.as_str()).unwrap_or("?"),
+                )
+            }).collect();
+            let _ = writeln!(s, "pods: {}", summary.join(", "));
+        }
+    }
+
+    // Last 10 lines of connect.log if present.
+    let log_path = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".tytus/logs/connect.log"));
+    if let Some(path) = log_path {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            let tail: Vec<&str> = raw.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+            let _ = writeln!(s, "--- connect.log (last {} lines) ---", tail.len());
+            for line in tail {
+                let _ = writeln!(s, "{}", line);
+            }
+        } else {
+            let _ = writeln!(s, "connect.log: not present");
+        }
+    }
+
+    s
+}
+
+fn chrono_now_iso() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => format!("ts={}s", d.as_secs()),
+        Err(_) => "ts=?".into(),
+    }
+}
 
 /// Pull the stable (URL, API key) pair from TrayState.
 ///

@@ -1025,17 +1025,44 @@ async fn activate_tunnel_elevated(
         pidfile_pid.is_some() || orphan_pods.iter().any(|p| p == target_pod_id)
     };
     if existing_alive {
-        if json {
-            println!("{}", serde_json::json!({
-                "pod_id": target_pod_id,
-                "status": "tunnel_already_up",
-                "action": "no-op",
-            }));
+        // Dead-tunnel detection. `existing_alive` only means the
+        // tunnel process is still running — it says NOTHING about
+        // whether packets flow through the tunnel. A boringtun
+        // tunnel can be "process-alive" but traffic-dead after a
+        // network change, peer restart, or the 20-minute idle bug.
+        // If we can't reach the gateway within 2s, the tunnel is
+        // effectively dead — reap it and fall through to a fresh
+        // activation instead of telling the user to run an extra
+        // command for no reason.
+        let gateway_reachable = probe_stable_gateway();
+        if !gateway_reachable {
+            if !json {
+                eprintln!("✓ Tunnel for pod {} exists but gateway unreachable — reaping dead tunnel...", target_pod_id);
+            }
+            // Fire-and-forget disconnect so the kill path runs
+            // through the same sudoers entry as a normal
+            // `tytus disconnect`. Sleep briefly so the pidfile is
+            // cleaned up before we try to re-bind.
+            let _ = std::process::Command::new("tytus")
+                .args(["disconnect", "--pod", &target_pod_id])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            // Fall through to the normal activation path below.
         } else {
-            eprintln!("✓ Tunnel for pod {} is already up — skipping duplicate activation", target_pod_id);
-            eprintln!("  To replace: `tytus disconnect --pod {}` first, then reconnect.", target_pod_id);
+            if json {
+                println!("{}", serde_json::json!({
+                    "pod_id": target_pod_id,
+                    "status": "tunnel_already_up",
+                    "action": "no-op",
+                }));
+            } else {
+                eprintln!("✓ Tunnel for pod {} is already up — skipping duplicate activation", target_pod_id);
+                eprintln!("  To replace: `tytus disconnect --pod {}` first, then reconnect.", target_pod_id);
+            }
+            return;
         }
-        return;
     }
 
     // Serialize tunnel config to temp file (will be read by elevated process)
@@ -6668,6 +6695,42 @@ fn update_tokens(state: &mut CliState, result: &atomek_auth::DeviceAuthResult, f
             }
         }
     }
+}
+
+/// Cheap TCP-level probe of the stable dual-bound gateway endpoint.
+/// Returns true iff we got any HTTP response within 2s. Identical in
+/// spirit to `tray/src/gateway_probe.rs` but kept local so the CLI
+/// crate doesn't depend on the tray crate.
+///
+/// Used by `cmd_connect` to distinguish between "tunnel process is
+/// alive and routing packets" (skip — already connected) and "tunnel
+/// process is alive but gateway unreachable" (reap + re-activate).
+/// Without this, a boringtun session that went dead under the idle-
+/// bug or a network change would keep the user stuck on a dead
+/// tunnel until they manually ran `tytus disconnect`.
+fn probe_stable_gateway() -> bool {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    let addr: SocketAddr = match "10.42.42.1:18080".parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let timeout = Duration::from_secs(2);
+    let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if stream.set_read_timeout(Some(timeout)).is_err() { return false; }
+    if stream.set_write_timeout(Some(timeout)).is_err() { return false; }
+    let req = b"GET /v1/models HTTP/1.0\r\nHost: 10.42.42.1:18080\r\nConnection: close\r\n\r\n";
+    if stream.write_all(req).is_err() { return false; }
+    let mut buf = [0u8; 16];
+    let n = match stream.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    n >= 5 && buf[..5] == *b"HTTP/"
 }
 
 async fn ensure_token(state: &mut CliState, http: &atomek_core::HttpClient) -> Result<(), atomek_core::AtomekError> {
