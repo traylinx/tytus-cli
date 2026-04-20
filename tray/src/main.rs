@@ -1239,60 +1239,67 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
     schedule_refresh_after_action();
     match id {
         "connect" => {
-            // Ollama-style: silent background run + system notifications.
-            // No Terminal window, no "Press Enter to close" step. The
-            // sudo elevation prompt is handled inline by `tytus connect`
-            // via osascript when needed — that's a native macOS prompt
-            // that surfaces on its own without needing a Terminal.
+            // `tytus connect` needs a TTY so `sudo` can prompt for the
+            // user's password (or confirm a cached credential via Touch
+            // ID). Running it detached in the background causes the
+            // sudo step to hang indefinitely waiting for input that
+            // can never arrive — observed 2026-04-20. So we run it in
+            // a Terminal window. The Terminal is ephemeral: it closes
+            // itself on success so the user isn't left with a "Press
+            // Enter to close" artifact.
             //
-            // A watcher thread polls the gateway probe every 2s for up
-            // to 45s and fires a system notification with the outcome.
-            // The user sees: "Connecting…" immediately → "Connected to
-            // pod 01" OR "Connection failed — open Troubleshoot" after.
-            notify("Tytus", "Connecting…");
-            run_silent_with_notify(
-                "tytus",
-                &["connect"],
-                "Connect",
-                "Connecting to pod…",
-                |was_reachable_before| {
-                    // Outcome = "gateway is now reachable" (primary)
-                    // with a fallback of "tunnel pidfile appeared" for
-                    // agent-less default pods where the health probe
-                    // path differs.
-                    use gateway_probe::probe_gateway;
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-                    while std::time::Instant::now() < deadline {
-                        if probe_gateway() { return Ok("Connected. Tunnel is up.".to_string()); }
-                        std::thread::sleep(std::time::Duration::from_secs(2));
+            // The persistent "⏳ Connecting to pod… (Ns)" status line
+            // in the tray menu gives the user the same "something is
+            // happening" feedback the earlier silent attempt aimed for.
+            busy_set("Connecting to pod…");
+            std::thread::spawn(|| {
+                // Wait up to 60s for gateway, then clear the busy
+                // status. This runs independently of whether the user
+                // actually completes the sudo prompt — if they cancel,
+                // the 60s will expire and the menu returns to the
+                // normal "Pod unreachable" state, which is honest.
+                use gateway_probe::probe_gateway;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                while std::time::Instant::now() < deadline {
+                    if probe_gateway() {
+                        notify("Tytus", "Connected. Tunnel is up.");
+                        busy_clear();
+                        return;
                     }
-                    if was_reachable_before {
-                        Err("Connect didn't change state — tunnel may already have been active.".into())
-                    } else {
-                        Err("Couldn't verify connection within 45s. Open Troubleshoot ▸ Doctor.".into())
-                    }
-                },
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+                busy_clear();
+            });
+            // Terminal window auto-closes on success via `exit` after
+            // the tunnel spawn completes. Leaves the window open on
+            // failure so the user can read the error before closing
+            // manually.
+            open_in_terminal_simple(
+                "tytus connect && exit; echo; echo 'Connect failed — see above.'; echo 'Press Enter to close…'; read _"
             );
         }
         "disconnect" => {
-            // Silent background run — disconnect is fast (<1s typical)
-            // so we don't even bother with "Disconnecting…" prefix.
-            notify("Tytus", "Disconnecting…");
-            run_silent_with_notify(
-                "tytus",
-                &["disconnect"],
-                "Disconnect",
-                "Disconnecting tunnel…",
-                |_was_reachable_before| {
-                    use gateway_probe::probe_gateway;
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-                    while std::time::Instant::now() < deadline {
-                        if !probe_gateway() { return Ok("Disconnected. Tunnel is down.".to_string()); }
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                    }
-                    Err("Disconnect command ran but tunnel still responds. Check `tytus status`.".into())
-                },
-            );
+            // Disconnect is fast (<1s) and doesn't need sudo — it
+            // reads the tunnel pidfile and sends SIGTERM. Run
+            // detached, surface the result via notification.
+            busy_set("Disconnecting tunnel…");
+            std::thread::spawn(|| {
+                let _ = std::process::Command::new("tytus")
+                    .arg("disconnect")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                // Probe for up to 10s for the tunnel to actually drop.
+                use gateway_probe::probe_gateway;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while std::time::Instant::now() < deadline {
+                    if !probe_gateway() { break; }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                notify("Tytus", "Disconnected.");
+                busy_clear();
+            });
         }
         "login" => {
             // `tytus login` opens a browser — must run in terminal so the user
