@@ -211,6 +211,11 @@ enum Commands {
         /// that never changes unless you call `tytus rotate-key`.
         #[arg(long)]
         raw: bool,
+        /// Force the legacy WireGuard tunnel endpoint (10.42.42.1) even
+        /// when the public-HTTPS URL is available. Use if your network
+        /// blocks outbound TLS or you explicitly want the encrypted tunnel.
+        #[arg(long)]
+        tunnel: bool,
     },
     /// Print the full LLM-facing reference (for AI agents driving tytus-cli)
     LlmDocs,
@@ -489,7 +494,7 @@ async fn main() {
         Some(Commands::Disconnect { pod }) => cmd_disconnect(pod, cli.json).await,
         Some(Commands::Revoke { pod }) => cmd_revoke(&http, &pod, cli.json).await,
         Some(Commands::Logout) => cmd_logout(&http, cli.json).await,
-        Some(Commands::Env { pod, export, raw }) => cmd_env(pod, export, raw, cli.json, &http).await,
+        Some(Commands::Env { pod, export, raw, tunnel }) => cmd_env(pod, export, raw, tunnel, cli.json, &http).await,
         Some(Commands::LlmDocs) => { print!("{}", LLM_DOCS); }
         Some(Commands::BootstrapPrompt) => { print!("{}", BOOTSTRAP_PROMPT); }
         Some(Commands::TunnelDown { pid }) => cmd_tunnel_down(pid),
@@ -696,6 +701,8 @@ async fn ensure_default_pod(state: &mut CliState, http: &atomek_core::HttpClient
                 stable_ai_endpoint: alloc.stable_ai_endpoint.clone(),
                 stable_user_key: alloc.stable_user_key.clone(),
                 gateway_token: None,
+                edge_slug: None,
+                edge_public_url: None,
             });
             // Message verbatim per sprint doc §6 A6 acceptance criterion.
             // The stable endpoint at 10.42.42.1:18080 is reachable once the
@@ -862,6 +869,8 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
                     stable_ai_endpoint: a.stable_ai_endpoint.clone(),
                     stable_user_key: a.stable_user_key.clone(),
                     gateway_token: None,
+                edge_slug: None,
+                edge_public_url: None,
                 });
                 state.save();
                 if !json { eprintln!("✓ Default pod {} allocated", a.pod_id); }
@@ -1784,6 +1793,8 @@ async fn cmd_agent_install(
                         stable_ai_endpoint: a.stable_ai_endpoint.clone(),
                         stable_user_key: a.stable_user_key.clone(),
                         gateway_token: None,
+                edge_slug: None,
+                edge_public_url: None,
                     });
                     state.save();
                     if json {
@@ -2917,7 +2928,7 @@ async fn cmd_logout(http: &atomek_core::HttpClient, json: bool) {
 
 // ── Env (export connection info) ─────────────────────────────
 
-async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, json: bool, http: &atomek_core::HttpClient) {
+async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, tunnel: bool, json: bool, http: &atomek_core::HttpClient) {
     let mut state = CliState::load();
 
     let pod_idx = if let Some(ref pid) = pod_id {
@@ -2934,18 +2945,24 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, json: bool, ht
         std::process::exit(1);
     };
 
-    // If we don't have a stable key cached yet (e.g. state from a pre-Phase-2
-    // CLI), try to fetch one from the Provider. Ignore errors — we'll fall
-    // back to raw per-pod values below.
-    if !raw && state.pods[idx].stable_user_key.is_none() {
-        if let (Some(st), Some(aid)) = (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
-            let client = atomek_pods::TytusClient::new(http, st, aid);
-            if let Ok((endpoint, key)) = atomek_pods::get_user_key(&client).await {
-                if let Some(p) = state.pods.get_mut(idx) {
-                    p.stable_ai_endpoint = Some(endpoint);
-                    p.stable_user_key = Some(key);
+    // Refresh stable key + edge fields from the Provider if we're missing
+    // either. The same endpoint also returns slug + public_url when
+    // EDGE_PATH_ENABLED=1, so one call covers both paths.
+    if !raw {
+        let needs_refresh = state.pods[idx].stable_user_key.is_none()
+            || state.pods[idx].edge_public_url.is_none();
+        if needs_refresh {
+            if let (Some(st), Some(aid)) = (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
+                let client = atomek_pods::TytusClient::new(http, st, aid);
+                if let Ok(uk) = atomek_pods::get_user_key_full(&client).await {
+                    if let Some(p) = state.pods.get_mut(idx) {
+                        p.stable_ai_endpoint = Some(uk.endpoint);
+                        p.stable_user_key = Some(uk.key);
+                        if let Some(s) = uk.slug { p.edge_slug = Some(s); }
+                        if let Some(u) = uk.public_url { p.edge_public_url = Some(u); }
+                    }
+                    state.save();
                 }
-                state.save();
             }
         }
     }
@@ -2983,8 +3000,23 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, json: bool, ht
         // SDK, and legacy scripts all keep working without user config.
         // Note: ANTHROPIC_BASE_URL is the bare origin (no /v1) because
         // the Anthropic SDK appends /v1/messages itself.
-        let endpoint = pod.stable_ai_endpoint.as_deref()
-            .unwrap_or("http://10.42.42.1:18080");
+        //
+        // Endpoint selection:
+        //   --tunnel → legacy WG URL (10.42.42.1:18080) — requires active tunnel
+        //   else     → edge_public_url + /p/<pod_id> if present, else WG
+        //
+        // The public edge URL does NOT need the tunnel. One user, one URL,
+        // works from any network that can reach the public internet.
+        let wg_endpoint = pod.stable_ai_endpoint.as_deref()
+            .unwrap_or("http://10.42.42.1:18080")
+            .to_string();
+        let endpoint = if tunnel {
+            wg_endpoint.clone()
+        } else if let Some(ref public) = pod.edge_public_url {
+            format!("{}/p/{}", public.trim_end_matches('/'), pod.pod_id)
+        } else {
+            wg_endpoint.clone()
+        };
         let key = pod.stable_user_key.as_deref()
             .or(pod.pod_api_key.as_deref())
             .unwrap_or("");
@@ -6960,6 +6992,8 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
                         stable_ai_endpoint: None,
                         stable_user_key: None,
                         gateway_token: None,
+                edge_slug: None,
+                edge_public_url: None,
                     });
                 }
             }

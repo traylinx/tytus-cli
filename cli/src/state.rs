@@ -42,6 +42,17 @@ pub struct PodEntry {
     pub stable_ai_endpoint: Option<String>,
     #[serde(default)]
     pub stable_user_key: Option<String>,
+    /// Per-user public-edge subdomain slug (12-char Crockford base32).
+    /// Populated by Phase 1 (`/pod/user-key` response). Combined with
+    /// `pod_id` becomes the full URL `https://<slug>.tytus.traylinx.com/p/<NN>`.
+    #[serde(default)]
+    pub edge_slug: Option<String>,
+    /// Pre-built public URL — `https://<slug>.tytus.traylinx.com`. Provider
+    /// builds it from the slug + edge base so the CLI doesn't have to know
+    /// the edge domain. Used by `tytus env` to surface the public URL by
+    /// default; `--tunnel` forces the legacy WG path.
+    #[serde(default)]
+    pub edge_public_url: Option<String>,
     /// Agent's internal gateway auth token (e.g. OpenClaw's
     /// `gateway.auth.token`). Fetched from the pod at agent install
     /// time and cached here so the forwarder can auto-inject it on
