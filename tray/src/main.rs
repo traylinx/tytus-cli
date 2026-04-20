@@ -103,7 +103,12 @@ fn trigger_refresh() {
 /// and slow ones (connect needs to spawn Terminal, run `tytus connect`,
 /// pop Touch ID, bring tunnel up — often 2–4 s end to end).
 fn schedule_refresh_after_action() {
-    for delay_ms in [300u64, 1000, 3000] {
+    // Covers the full latency range: stop-forwarder <100ms, connect
+    // with sudo+WG handshake can take 10-20s on cold boot. Without
+    // the late ticks the menu would be stuck on pre-click state after
+    // the slow action finishes (unless the user clicks the icon to
+    // force a rebuild). Each tick is a cheap gateway probe (<100ms).
+    for delay_ms in [300u64, 1000, 3000, 6000, 10_000, 15_000, 22_000] {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             trigger_refresh();
@@ -1164,23 +1169,57 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
     schedule_refresh_after_action();
     match id {
         "connect" => {
-            // Connect needs to run in a Terminal so the osascript/sudo
-            // prompt is visible and the user sees the progress output.
-            // A detached background spawn silently asks for credentials
-            // via a modal that sometimes never surfaces — leaving the
-            // user thinking the click did nothing. Terminal-based run
-            // also gives them the tunnel-up summary line they can
-            // screenshot if it fails.
-            open_in_terminal_simple(
-                "tytus connect; echo; echo 'Press Enter to close…'; read _"
+            // Ollama-style: silent background run + system notifications.
+            // No Terminal window, no "Press Enter to close" step. The
+            // sudo elevation prompt is handled inline by `tytus connect`
+            // via osascript when needed — that's a native macOS prompt
+            // that surfaces on its own without needing a Terminal.
+            //
+            // A watcher thread polls the gateway probe every 2s for up
+            // to 45s and fires a system notification with the outcome.
+            // The user sees: "Connecting…" immediately → "Connected to
+            // pod 01" OR "Connection failed — open Troubleshoot" after.
+            notify("Tytus", "Connecting…");
+            run_silent_with_notify(
+                "tytus",
+                &["connect"],
+                "Connect",
+                |was_reachable_before| {
+                    // Outcome = "gateway is now reachable" (primary)
+                    // with a fallback of "tunnel pidfile appeared" for
+                    // agent-less default pods where the health probe
+                    // path differs.
+                    use gateway_probe::probe_gateway;
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+                    while std::time::Instant::now() < deadline {
+                        if probe_gateway() { return Ok("Connected. Tunnel is up.".to_string()); }
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    if was_reachable_before {
+                        Err("Connect didn't change state — tunnel may already have been active.".into())
+                    } else {
+                        Err("Couldn't verify connection within 45s. Open Troubleshoot ▸ Doctor.".into())
+                    }
+                },
             );
         }
         "disconnect" => {
-            // Same reasoning as connect: run in Terminal so the user
-            // sees the "tunnel-down OK" / failure output instead of a
-            // silent detached no-op.
-            open_in_terminal_simple(
-                "tytus disconnect; echo; echo 'Press Enter to close…'; read _"
+            // Silent background run — disconnect is fast (<1s typical)
+            // so we don't even bother with "Disconnecting…" prefix.
+            notify("Tytus", "Disconnecting…");
+            run_silent_with_notify(
+                "tytus",
+                &["disconnect"],
+                "Disconnect",
+                |_was_reachable_before| {
+                    use gateway_probe::probe_gateway;
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                    while std::time::Instant::now() < deadline {
+                        if !probe_gateway() { return Ok("Disconnected. Tunnel is down.".to_string()); }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                    Err("Disconnect command ran but tunnel still responds. Check `tytus status`.".into())
+                },
             );
         }
         "login" => {
@@ -1640,6 +1679,98 @@ fn spawn_detached(program: &str, args: &[&str]) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+/// Run a CLI command silently in a background thread and deliver the
+/// outcome via macOS notification. Also writes stdout/stderr to
+/// `~/.tytus/logs/<action>.log` for post-hoc debugging when something
+/// fails and the user wants to see what happened.
+///
+/// `probe_outcome` runs after the process exits and returns a human
+/// message. It receives the "was gateway reachable before we started"
+/// flag, which lets the probe distinguish between "connect did
+/// nothing because we were already connected" vs "connect failed".
+///
+/// Design note: we intentionally do NOT show the command's own stdout
+/// to the user. Users don't need to see "Downloading tunnel config /
+/// Activating WireGuard tunnel / Tunnel daemon running (pid …)" —
+/// they need to know one of: "connected", "not connected, here's why,
+/// open Troubleshoot". Ollama follows the same philosophy.
+fn run_silent_with_notify<F>(
+    program: &str,
+    args: &[&str],
+    action_label: &'static str,
+    probe_outcome: F,
+)
+where
+    F: Fn(bool) -> Result<String, String> + Send + 'static,
+{
+    let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let program_owned = program.to_string();
+    let was_reachable_before = gateway_probe::probe_gateway();
+
+    std::thread::spawn(move || {
+        // Best-effort log capture. File failure is non-fatal — we
+        // still want the notification at the end.
+        let log_path = std::env::var("HOME")
+            .ok()
+            .map(|h| {
+                let dir = std::path::PathBuf::from(h).join(".tytus/logs");
+                let _ = std::fs::create_dir_all(&dir);
+                dir.join(format!("{}.log", action_label.to_lowercase()))
+            });
+        let stdout: std::process::Stdio = match log_path.as_ref().and_then(|p| {
+            std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+        }) {
+            Some(f) => std::process::Stdio::from(f),
+            None => std::process::Stdio::null(),
+        };
+        let stderr: std::process::Stdio = match log_path.as_ref().and_then(|p| {
+            std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+        }) {
+            Some(f) => std::process::Stdio::from(f),
+            None => std::process::Stdio::null(),
+        };
+
+        let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+        let status = std::process::Command::new(&program_owned)
+            .args(&args_refs)
+            .stdin(std::process::Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
+            .status();
+
+        // Wake the poll loop now that the command has finished, so the
+        // next menu rebuild picks up the new state regardless of the
+        // schedule ticks.
+        trigger_refresh();
+
+        match status {
+            Ok(s) if s.success() => {
+                match probe_outcome(was_reachable_before) {
+                    Ok(msg) => notify("Tytus", &msg),
+                    Err(msg) => notify("Tytus", &msg),
+                }
+            }
+            Ok(s) => {
+                notify(
+                    "Tytus",
+                    &format!(
+                        "{} exited with code {:?}. See ~/.tytus/logs/{}.log.",
+                        action_label,
+                        s.code(),
+                        action_label.to_lowercase(),
+                    ),
+                );
+            }
+            Err(e) => {
+                notify(
+                    "Tytus",
+                    &format!("Couldn't run tytus {}: {}", action_label.to_lowercase(), e),
+                );
+            }
+        }
+    });
 }
 
 /// Native yes/no dialog via osascript. Returns true iff the user clicked OK.
