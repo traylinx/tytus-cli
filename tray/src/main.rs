@@ -845,10 +845,22 @@ fn build_menu(state: &TrayState) -> Menu {
     if !state.logged_in {
         let _ = menu.append(&MenuItem::with_id("login", "Sign In…", !is_busy, None));
         let _ = menu.append(&PredefinedMenuItem::separator());
-    } else if state.tunnel_active {
-        let _ = menu.append(&MenuItem::with_id("disconnect", "Disconnect", !is_busy, None));
+    } else {
+        // Phase 4: the public-edge URL works without the WG tunnel, so
+        // "Open in ▸" and "Run Health Test" are useful regardless of
+        // tunnel state — the connection_pair the launchers consume picks
+        // the public URL when available, WG when not.
+        //
+        // Disconnect is the primary action when tunnel IS active (to
+        // tear it down), Connect is the primary when it isn't (to bring
+        // it up for users who want the encrypted path). Users with the
+        // public URL already wired don't need to touch either.
+        if state.tunnel_active {
+            let _ = menu.append(&MenuItem::with_id("disconnect", "Disconnect", !is_busy, None));
+        } else {
+            let _ = menu.append(&MenuItem::with_id("connect", "Connect (tunnel)", !is_busy, None));
+        }
 
-        // "Open in ▸" submenu — only when tunnel is active
         let clis = launcher::detect_installed_clis();
         let open_sub = Submenu::new("Open in", true);
         for cli in &clis {
@@ -863,11 +875,6 @@ fn build_menu(state: &TrayState) -> Menu {
 
         let _ = menu.append(&MenuItem::with_id("test", "Run Health Test", true, None));
 
-        let _ = menu.append(&PredefinedMenuItem::separator());
-    } else {
-        // Logged in but tunnel not active — show Connect, regardless of
-        // whether the daemon is running.
-        let _ = menu.append(&MenuItem::with_id("connect", "Connect", !is_busy, None));
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
 
