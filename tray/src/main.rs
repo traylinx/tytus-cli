@@ -297,6 +297,74 @@ fn units_for_tier(tier: &str) -> u32 {
 }
 
 /// Check whether the daemon/tunnel autostart hook is on disk.
+/// Channels we surface in the tray's per-pod "Add X…" list. Kept in
+/// lock-step with `cli/src/channels.rs` REGISTRY — any channel we add
+/// there should also get an entry here so users see it in the menu.
+/// Tuple: (short-name, human-label).
+pub const CHANNEL_MENU_ENTRIES: &[(&str, &str)] = &[
+    ("telegram", "Telegram"),
+    ("discord", "Discord"),
+    ("slack", "Slack (Socket Mode)"),
+    ("line", "LINE"),
+];
+
+/// Human-friendly label for a channel short-name. Falls back to the
+/// short-name capitalized so a channel added to the CLI registry but
+/// not yet in `CHANNEL_MENU_ENTRIES` still renders readably.
+pub fn channel_label(short: &str) -> String {
+    CHANNEL_MENU_ENTRIES
+        .iter()
+        .find(|(n, _)| *n == short)
+        .map(|(_, l)| l.to_string())
+        .unwrap_or_else(|| {
+            let mut chars = short.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+}
+
+/// Read `~/.tytus/channels.json` (the CLI's local manifest written on
+/// every `tytus channels add/remove`) and return `(channel_name,
+/// credential_count)` pairs for a given pod. No network, no keychain —
+/// just a small JSON parse. Returns an empty vec if the file is
+/// missing or unparseable, so the menu degrades gracefully to "No
+/// channels configured".
+pub fn read_channels_for_pod(pod_id: &str) -> Vec<(String, usize)> {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return Vec::new(),
+    };
+    let path = std::path::PathBuf::from(&home).join(".tytus").join("channels.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let pods = match v.get("pods").and_then(|x| x.as_object()) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let pod = match pods.get(pod_id).and_then(|x| x.as_object()) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    pod.iter()
+        .map(|(name, entry)| {
+            let count = entry
+                .get("env_vars")
+                .and_then(|x| x.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            (name.clone(), count)
+        })
+        .collect()
+}
+
 fn check_autostart_installed() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -870,6 +938,73 @@ fn build_menu(state: &TrayState) -> Menu {
                     format!("pod_{}_uninstall", p.pod_id),
                     "  Uninstall Agent  (keeps pod)", true, None,
                 ));
+
+                // Channels submenu — the chat channels this pod's agent
+                // uses to talk to the owner (Telegram, Discord, Slack,
+                // …). Each click opens a Terminal window running the
+                // `tytus channels …` CLI subcommand, so the UX never
+                // requires the user to drop into a terminal themselves.
+                //
+                // Source of truth for "what's configured" is the local
+                // manifest at `~/.tytus/channels.json` (the CLI writes
+                // it whenever `tytus channels add/remove` succeeds).
+                // The tray reads it cheaply on each menu rebuild — no
+                // network, no daemon call, always fresh.
+                let channel_sub = Submenu::new("  Channels", true);
+                let configured = read_channels_for_pod(&p.pod_id);
+                if configured.is_empty() {
+                    let _ = channel_sub.append(&MenuItem::with_id(
+                        format!("pod_{}_channels_empty", p.pod_id),
+                        "No channels configured",
+                        false, None,
+                    ));
+                    let _ = channel_sub.append(&PredefinedMenuItem::separator());
+                } else {
+                    for (name, cred_count) in &configured {
+                        let _ = channel_sub.append(&MenuItem::with_id(
+                            format!("pod_{}_channel_{}_info", p.pod_id, name),
+                            format!(
+                                "{}  ✓  ({} secret{})",
+                                channel_label(name),
+                                cred_count,
+                                if *cred_count == 1 { "" } else { "s" },
+                            ),
+                            false, None,
+                        ));
+                    }
+                    let _ = channel_sub.append(&PredefinedMenuItem::separator());
+                    // Per-channel removal — one terminal shortcut each so
+                    // users don't have to remember the channel name's
+                    // exact spelling.
+                    for (name, _) in &configured {
+                        let _ = channel_sub.append(&MenuItem::with_id(
+                            format!("pod_{}_channel_{}_remove", p.pod_id, name),
+                            format!("Remove {}", channel_label(name)),
+                            true, None,
+                        ));
+                    }
+                    let _ = channel_sub.append(&PredefinedMenuItem::separator());
+                }
+                // Catalog + add entries always visible so the user can
+                // always find the "add" affordance even when the pod has
+                // no channels yet.
+                let _ = channel_sub.append(&MenuItem::with_id(
+                    format!("pod_{}_channels_catalog", p.pod_id),
+                    "Browse available channels…",
+                    true, None,
+                ));
+                for known in CHANNEL_MENU_ENTRIES {
+                    // Skip channels that are already configured so the
+                    // list doesn't duplicate them as "Add X".
+                    if configured.iter().any(|(n, _)| n == known.0) { continue; }
+                    let _ = channel_sub.append(&MenuItem::with_id(
+                        format!("pod_{}_channel_{}_add", p.pod_id, known.0),
+                        format!("Add {}…", known.1),
+                        true, None,
+                    ));
+                }
+                let _ = pods_sub.append(&channel_sub);
+
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_{}_revoke", p.pod_id),
                     "  Revoke Pod", true, None,
@@ -1282,6 +1417,69 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                     "tytus revoke {}; echo; echo 'Press Enter to close…'; read _",
                     shell_escape(pod_id),
                 ));
+            }
+        }
+        // Channel catalog (informational) — user wants to see what they
+        // can configure before picking one.
+        other if other.starts_with("pod_") && other.ends_with("_channels_catalog") => {
+            let pod_id = other
+                .trim_start_matches("pod_")
+                .trim_end_matches("_channels_catalog");
+            open_in_terminal_simple(&format!(
+                "tytus channels catalog; echo; echo 'To configure: tytus channels add --pod {} --type <NAME> --token <TOKEN>'; echo 'Press Enter to close…'; read _",
+                shell_escape(pod_id),
+            ));
+        }
+        // Add a specific channel — opens Terminal with the exact
+        // command skeleton so the user only needs to paste their token.
+        // The command stays on screen after completion so the user can
+        // see the success/failure message before the window closes.
+        other if other.starts_with("pod_") && other.contains("_channel_") && other.ends_with("_add") => {
+            if let Some(rest) = other.strip_prefix("pod_") {
+                if let Some(middle) = rest.strip_suffix("_add") {
+                    // middle = "<pod>_channel_<type>"
+                    if let Some((pod_id, rest)) = middle.split_once("_channel_") {
+                        let channel = rest;
+                        let pod_s = shell_escape(pod_id);
+                        let chan_s = shell_escape(channel);
+                        open_in_terminal_simple(&format!(
+                            "echo 'Configuring {chan} on pod {pod}.'; \
+                             echo 'Paste your credentials when prompted (token is hidden from history).'; \
+                             echo; \
+                             tytus channels catalog 2>/dev/null | awk '/^  {chan} /,/^$/'; \
+                             echo; \
+                             printf 'Primary token: '; read -rs TOK; echo; \
+                             if [ -z \"$TOK\" ]; then echo 'Aborted — no token entered.'; else \
+                               tytus channels add --pod {pod} --type {chan} --token \"$TOK\"; \
+                             fi; \
+                             echo; echo 'Press Enter to close…'; read _",
+                            pod = pod_s,
+                            chan = chan_s,
+                        ));
+                    }
+                }
+            }
+        }
+        // Remove a configured channel — clears keychain + manifest +
+        // redeploys agent.
+        other if other.starts_with("pod_") && other.contains("_channel_") && other.ends_with("_remove") => {
+            if let Some(rest) = other.strip_prefix("pod_") {
+                if let Some(middle) = rest.strip_suffix("_remove") {
+                    if let Some((pod_id, rest)) = middle.split_once("_channel_") {
+                        let channel = rest;
+                        let channel_label = channel_label(channel);
+                        if confirm_dialog(
+                            &format!("Remove {} from pod {}?", channel_label, pod_id),
+                            "Clears the channel's credentials from the OS keychain, removes them from the pod's state volume, and redeploys the agent container so the channel stops operating. Re-adding later will require the credentials again.",
+                        ) {
+                            open_in_terminal_simple(&format!(
+                                "tytus channels remove --pod {} --type {}; echo; echo 'Press Enter to close…'; read _",
+                                shell_escape(pod_id),
+                                shell_escape(channel),
+                            ));
+                        }
+                    }
+                }
             }
         }
         // Agent uninstall = stop container, keep pod slot (AIL still works).
