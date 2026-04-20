@@ -367,15 +367,89 @@ enum TrayAction {
     Start,
 }
 
+/// Initialize tracing so structured log noise doesn't pollute
+/// interactive CLI output. Three modes:
+///
+/// - `RUST_LOG` is set explicitly → honor it verbatim, emit to stderr
+///   (developer/debug path).
+/// - `--json` or non-interactive (stdout+stderr piped) → emit WARN+ to
+///   stderr. Machine consumers want structured logs inline; they can
+///   filter as needed.
+/// - Default (humans running `tytus` in a terminal) → route WARN+ to
+///   `~/.tytus/logs/tytus.log` (rotating, mode 0600). Stderr stays
+///   clean so "Paste your credentials" prompts, "✓ Telegram
+///   configured" confirmations, etc. aren't buried under transient
+///   keychain-timeout warnings.
+///
+/// The big win: users on a broken-keychain machine (ACL pending
+/// approval) no longer see the `WARN keychain get_refresh_token
+/// timed out after 3s` line bleeding into the tytus output they're
+/// actively reading. Warnings still hit the log file for post-hoc
+/// debugging via `View Daemon Log` in the tray.
+fn init_tracing() {
+    let explicit = std::env::var("RUST_LOG").is_ok();
+    let json_mode = std::env::args().any(|a| a == "--json");
+    let interactive_stderr = console::Term::stderr().is_term();
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "warn,tytus=info".into());
+
+    if explicit || json_mode || !interactive_stderr {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+        return;
+    }
+
+    // Interactive human CLI run. Try to open the log file; fall back
+    // to silent stderr (nothing worse than warnings printing AFTER we
+    // committed to hiding them).
+    let log_path = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".tytus/logs/tytus.log"));
+    let mut writer: Option<std::fs::File> = None;
+    if let Some(path) = log_path.as_ref() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+            writer = Some(f);
+        }
+    }
+
+    match writer {
+        Some(file) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        }
+        None => {
+            // Couldn't open the log file — degrade to ERROR-only on
+            // stderr so users never see transient WARN noise.
+            tracing_subscriber::fmt()
+                .with_env_filter("error")
+                .with_target(false)
+                .init();
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn,tytus=info".into()),
-        )
-        .with_target(false)
-        .init();
+    init_tracing();
 
     let cli = Cli::parse();
 
@@ -2687,6 +2761,25 @@ async fn cmd_channels_remove(
     }
 }
 
+/// Load state for channel operations without triggering a keychain
+/// lookup. Channel management only needs a valid access token to call
+/// Provider; the refresh token is the daemon's job. Keeping these
+/// flows keychain-free means:
+///   - No 3-second timeout on machines with a pending ACL dialog
+///   - No `WARN keychain get_refresh_token timed out` log noise
+///     bleeding into the user's terminal while they're being
+///     prompted for a bot token
+/// If the access token has expired, we fall back to `load()` (which
+/// DOES touch keychain) so the normal refresh path still works.
+fn load_for_channel_op() -> CliState {
+    let file_state = CliState::load_file_only();
+    if file_state.has_valid_token() {
+        file_state
+    } else {
+        CliState::load()
+    }
+}
+
 /// Build the channels.json payload from the local manifest + keychain
 /// and write it to `/app/workspace/.tytus/channels.json` on the pod.
 /// Uses `tytus exec` (which shells to DAM's exec endpoint under the
@@ -2714,8 +2807,8 @@ async fn push_channels_to_pod(
         b64
     );
 
-    let mut state = CliState::load();
-    if !state.is_logged_in() {
+    let mut state = load_for_channel_op();
+    if state.email.as_deref().unwrap_or("").is_empty() {
         return Err("not logged in".to_string());
     }
     ensure_token(&mut state, http).await.map_err(|e| format!("token refresh: {}", e))?;
@@ -2745,7 +2838,7 @@ async fn redeploy_agent(
     http: &atomek_core::HttpClient,
     pod_id: &str,
 ) -> Result<(), String> {
-    let mut state = CliState::load();
+    let mut state = load_for_channel_op();
     ensure_token(&mut state, http).await.map_err(|e| format!("token refresh: {}", e))?;
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);

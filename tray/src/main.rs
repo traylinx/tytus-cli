@@ -1442,19 +1442,31 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                         let channel = rest;
                         let pod_s = shell_escape(pod_id);
                         let chan_s = shell_escape(channel);
+                        let label = channel_label(channel);
+                        // Clean prompt flow. Spinner between steps so
+                        // the user sees the CLI is working on a slow
+                        // redeploy (~10s), and a clear colored result
+                        // line at the end so they know it landed.
                         open_in_terminal_simple(&format!(
-                            "echo 'Configuring {chan} on pod {pod}.'; \
-                             echo 'Paste your credentials when prompted (token is hidden from history).'; \
+                            "clear 2>/dev/null; \
+                             printf '\\033[1m{label}\\033[0m — pod {pod}\\n\\n'; \
+                             tytus channels catalog 2>/dev/null | awk '/^  {chan} /,/^$/' | sed '1,/^$/!d'; \
                              echo; \
-                             tytus channels catalog 2>/dev/null | awk '/^  {chan} /,/^$/'; \
-                             echo; \
-                             printf 'Primary token: '; read -rs TOK; echo; \
-                             if [ -z \"$TOK\" ]; then echo 'Aborted — no token entered.'; else \
-                               tytus channels add --pod {pod} --type {chan} --token \"$TOK\"; \
+                             printf 'Paste your primary token (hidden): '; read -rs TOK; echo; \
+                             if [ -z \"$TOK\" ]; then \
+                               printf '\\033[33mAborted — no token entered.\\033[0m\\n'; \
+                             else \
+                               echo; echo 'Writing credential to pod and restarting agent (this takes ~10s)…'; echo; \
+                               if tytus channels add --pod {pod} --type {chan} --token \"$TOK\"; then \
+                                 printf '\\n\\033[32m✓ Done.\\033[0m Your agent on pod {pod} can now use {label}.\\n'; \
+                               else \
+                                 printf '\\n\\033[31m✗ Something went wrong.\\033[0m Check the message above, then retry.\\n'; \
+                               fi; \
                              fi; \
                              echo; echo 'Press Enter to close…'; read _",
                             pod = pod_s,
                             chan = chan_s,
+                            label = label,
                         ));
                     }
                 }
