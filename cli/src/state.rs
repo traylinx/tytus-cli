@@ -52,7 +52,7 @@ pub struct PodEntry {
 }
 
 impl CliState {
-    fn state_path() -> PathBuf {
+    pub fn state_path() -> PathBuf {
         // When running elevated (sudo/osascript), TYTUS_REAL_HOME points to the
         // original user's home so we read THEIR state, not root's.
         // Fallback chain: TYTUS_REAL_HOME → SUDO_USER's home → dirs::config_dir()
@@ -75,6 +75,22 @@ impl CliState {
         let dir = config.join(STATE_DIR);
         std::fs::create_dir_all(&dir).ok();
         dir.join(STATE_FILE)
+    }
+
+    /// Parse state.json without touching the OS keychain. Used by paths
+    /// that need a fast, side-effect-free snapshot — notably the daemon's
+    /// status RPC, which is polled ~every 1.5s by the tray and must not
+    /// block on a 3s keychain timeout when the ACL dialog is pending.
+    ///
+    /// The returned state has `refresh_token == None` even if one exists
+    /// in the keychain. Callers that need the RT (e.g. `ensure_token`)
+    /// must use `load()` instead.
+    pub fn load_file_only() -> Self {
+        let path = Self::state_path();
+        let raw = std::fs::read_to_string(&path).ok();
+        raw.as_deref()
+            .and_then(|data| serde_json::from_str(data).ok())
+            .unwrap_or_default()
     }
 
     pub fn load() -> Self {

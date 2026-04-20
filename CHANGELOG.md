@@ -5,6 +5,65 @@ All notable changes to the `tytus` CLI, `tytus-mcp` server, and
 conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
 bumps are allowed to break compat.
 
+## [Unreleased] — v0.5.1-alpha
+
+Production-hardening pass against the class of bugs that shipped the
+2026-04-20 tray regression: stale in-memory daemon state, broken
+keychain ACL silently pinning the daemon to `NeedsLogin`, and tray
+reading the stale view instead of state.json. Fix is systemic, not
+just the immediate symptom.
+
+### Added
+
+- **`CliState::load_file_only()`** — side-effect-free state.json parse that
+  skips the OS keychain. Safe on the status RPC hot path (~1 ms).
+- **Daemon state watcher task** (`state_watcher_loop`) — polls state.json
+  mtime every 500 ms; hot-reloads the daemon's in-memory credentials
+  whenever any other process (`tytus login`, `tytus connect`, `tytus
+  revoke`) updates the file. Ends the 30-min drift window.
+- **Daemon self-heal watchdog** (`self_heal_loop`) — when the daemon has
+  been stuck in `NeedsLogin` for >5 min while state.json is plainly
+  logged in, exits so launchd/systemd can respawn with fresh state.
+- **Stale-PID sweep** (`sweep_stale_pids`) — at daemon startup, reaps
+  `daemon.pid` / `tray.pid` / `tunnel-*.pid` whose owning process is
+  dead. Uses `kill -0` semantics (ESRCH ⇒ stale, EPERM ⇒ keep).
+- **Daemon health telemetry in status RPC** — new `daemon` fields:
+  `keychain_healthy` (bool), `last_refresh_error` (Option<String>),
+  `stuck_for_secs` (Option<u64>).
+- **Tray surfaces daemon degradation** — `TrayState` carries
+  `keychain_healthy` + `last_refresh_error`; menu renders yellow dot +
+  "⚠︎ keychain access pending — re-run `tytus login`" row on metadata
+  line; Troubleshoot submenu shows last refresh error verbatim.
+- **`scripts/e2e-multiprocess.sh`** — 7-flow harness for daemon ↔
+  state.json ↔ tray coherence: ping, status-RPC latency, health-field
+  presence, mtime-driven reload, NeedsLogin self-clearing, sweep-linked-
+  into-binary, tray-merge agreement. Would have caught the 2026-04-20
+  regression on the first run.
+
+### Fixed
+
+- **Daemon now hot-reloads state.json** on every `status` RPC call AND
+  on file-mtime change (500 ms watcher). Before: up to 30 min staleness
+  + indefinite pin when keychain ACL pended.
+- **Tray no longer trusts the daemon over state.json for auth.** Merge
+  in `tray/src/socket.rs`: file wins on `logged_in`; daemon contributes
+  runtime fields (pid, uptime, pods).
+- **`refresh_once` is keychain-resilient.** Two-stage reload: file-only
+  first; if that yields a valid AT, stay `Running` regardless of
+  keychain outcome. Transient keychain failures no longer flip the
+  daemon into `NeedsLogin`.
+
+### Why
+
+The tray was showing "Sign In…" while the user was clearly logged in,
+the tunnel was up, and pods were allocated. Root cause wasn't a tray
+bug — it was a cache-coherence bug across three processes with no
+invalidation protocol: daemon memory ↔ state.json ↔ keychain. Silent
+keychain timeouts (logged, but invisible to the user) had pinned the
+daemon to `NeedsLogin` 19 hours before the user noticed. Fix is the
+watcher + self-heal + health surfacing together — each alone is
+insufficient.
+
 ## [Unreleased] — v0.5.0-alpha
 
 Tytus pod agents are now first-class lope teammates with a reusable

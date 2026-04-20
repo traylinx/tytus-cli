@@ -57,6 +57,23 @@ pub struct DaemonState {
     pub started_at: std::time::Instant,
     pub last_refresh: Option<std::time::Instant>,
     pub daemon_status: DaemonStatus,
+    /// Last observed mtime of state.json, used by the file watcher to
+    /// suppress no-op reloads. `None` before first reload.
+    pub last_state_mtime: Option<std::time::SystemTime>,
+    /// Becomes `false` the moment a `get_refresh_token` keychain call
+    /// times out or errors. Re-armed to `true` after a successful
+    /// refresh. Surfaced to the tray via `status.auth.keychain_healthy`
+    /// so the user sees "daemon can't reach keychain" instead of a
+    /// silent `needs_login`.
+    pub keychain_healthy: bool,
+    /// Last non-OK outcome from the refresh loop (human-readable).
+    /// Surfaced to the tray so the user can self-diagnose.
+    pub last_refresh_error: Option<String>,
+    /// First time we observed a logged-in state.json while the daemon
+    /// itself was `NeedsLogin`. If this persists for more than
+    /// `STUCK_THRESHOLD`, the daemon self-terminates and lets launchd
+    /// respawn it with fresh in-memory state. `None` when healthy.
+    pub stuck_since: Option<std::time::Instant>,
 }
 
 /// Shared daemon context: Mutex-guarded state + immutable HttpClient.
@@ -81,6 +98,50 @@ pub fn socket_path() -> PathBuf {
 
 pub fn pid_path() -> PathBuf {
     PathBuf::from(SOCKET_DIR).join(PID_FILE)
+}
+
+/// Remove PID files whose recorded PID is no longer a live process.
+/// Targets `daemon.pid`, `tray.pid`, and `tunnel-*.pid` in SOCKET_DIR.
+/// Safe to call at startup — the daemon hasn't written its own pidfile
+/// yet. Uses `kill -0` semantics (signal 0 = check only, does not kill).
+fn sweep_stale_pids(dir: &Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let is_pidfile = name == "daemon.pid"
+            || name == "tray.pid"
+            || (name.starts_with("tunnel-") && name.ends_with(".pid"));
+        if !is_pidfile { continue; }
+
+        let pid = match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+        {
+            Some(p) if p > 0 => p,
+            _ => {
+                // Unparseable PID file — treat as stale.
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+        };
+
+        // Signal 0: returns 0 iff the process exists AND we have
+        // permission to signal it. ESRCH (3) means dead; EPERM (1)
+        // means alive (but owned by someone else) — keep those.
+        let alive = unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        if !alive {
+            tracing::info!("sweeping stale pidfile {:?} (pid {} dead)", path.file_name(), pid);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// Check if the daemon is running by probing the socket.
@@ -120,6 +181,15 @@ pub async fn run_daemon() {
         let _ = std::fs::remove_file(&sock);
     }
 
+    // Sweep stale daemon + tunnel PID files. A previous daemon PID file
+    // whose owning process has exited leaves us unable to detect "is
+    // another daemon actually up?" — the self-heal hard-exit path
+    // especially relies on clean respawn semantics. Similarly for
+    // tunnel PID files: a crashed boringtun process leaves a stale PID
+    // that downstream logic (tytus disconnect, tray tunnel_reaches_pod)
+    // misinterprets as "tunnel healthy".
+    sweep_stale_pids(sock_dir);
+
     let listener = match UnixListener::bind(&sock) {
         Ok(l) => l,
         Err(e) => {
@@ -150,12 +220,20 @@ pub async fn run_daemon() {
         DaemonStatus::NeedsLogin
     };
 
+    let initial_mtime = std::fs::metadata(CliState::state_path())
+        .and_then(|m| m.modified())
+        .ok();
+
     let ctx = std::sync::Arc::new(DaemonCtx {
         state: tokio::sync::Mutex::new(DaemonState {
             cli_state: state,
             started_at: std::time::Instant::now(),
             last_refresh: None,
             daemon_status,
+            last_state_mtime: initial_mtime,
+            keychain_healthy: true,
+            last_refresh_error: None,
+            stuck_since: None,
         }),
         http,
     });
@@ -171,6 +249,32 @@ pub async fn run_daemon() {
     let refresh_rx = shutdown_rx.clone();
     tokio::spawn(async move {
         token_refresh_loop(refresh_ctx, refresh_rx).await;
+    });
+
+    // Spawn state.json file watcher. Polls mtime every 500ms and hot-
+    // reloads whenever another process (CLI `login`, `connect`, `revoke`)
+    // updates the file. Without this the daemon drifts up to 30 min
+    // from on-disk truth — the exact bug that shipped the 2026-04-20 tray
+    // regression. mtime polling is intentionally chosen over kqueue/
+    // fsevents: portable, zero new deps, negligible cost (one stat call
+    // per half-second) and survives editors that rename-on-save.
+    let watcher_ctx = ctx.clone();
+    let watcher_rx = shutdown_rx.clone();
+    tokio::spawn(async move {
+        state_watcher_loop(watcher_ctx, watcher_rx).await;
+    });
+
+    // Spawn self-heal watchdog. Exits the daemon when it has been stuck
+    // in NeedsLogin for more than STUCK_THRESHOLD while state.json is
+    // plainly logged-in. launchd / systemd respawn us and the fresh
+    // process starts from a clean in-memory view. Only path out of
+    // corruption scenarios the in-process code can't detect (e.g. a
+    // keychain ACL that pending-approval-times-out indefinitely).
+    let heal_ctx = ctx.clone();
+    let heal_rx = shutdown_rx.clone();
+    let heal_shutdown = shutdown_tx.clone();
+    tokio::spawn(async move {
+        self_heal_loop(heal_ctx, heal_rx, heal_shutdown).await;
     });
 
     // Spawn SIGTERM/SIGINT handler
@@ -273,7 +377,42 @@ async fn dispatch_command(
         "ping" => Response::ok(serde_json::json!({"pong": true})),
 
         "status" => {
-            let ds = ctx.state.lock().await;
+            let mut ds = ctx.state.lock().await;
+
+            // Hot-reload state.json on every status call. Without this,
+            // the daemon's in-memory cache can lag by up to 30 min (the
+            // refresh tick cadence) — any other process running `tytus
+            // login`, `tytus connect`, or `tytus revoke` updates the
+            // file atomically, but the daemon wouldn't see it until
+            // next tick. Worse: when the keychain ACL pends (very
+            // common on macOS after a rebuild), the refresh tick never
+            // succeeds, and the daemon stays pinned in `NeedsLogin`
+            // forever — lying to the tray even after the user has
+            // successfully re-logged in. This reload is file-only
+            // (skips keychain) so it never blocks the status RPC.
+            let fresh = CliState::load_file_only();
+            if fresh.email.as_deref().is_some_and(|e| !e.is_empty()) {
+                // Adopt email/tier/pods/AT unconditionally — the file is
+                // always the source of truth for these. Preserve the
+                // daemon's in-memory RT (fetched from keychain at
+                // startup) because `load_file_only` doesn't touch the
+                // keychain and we don't want to drop a good RT.
+                let preserved_rt = ds.cli_state.refresh_token.clone();
+                ds.cli_state = fresh;
+                if ds.cli_state.refresh_token.is_none() {
+                    ds.cli_state.refresh_token = preserved_rt;
+                }
+                // Unstick NeedsLogin when the file now looks healthy.
+                // `is_logged_in()` returns true on either a valid AT or
+                // a present RT — either is enough to serve the next
+                // API call, so don't leave the tray displaying "Sign
+                // In…" when we plainly have credentials.
+                if ds.cli_state.is_logged_in() && ds.daemon_status == DaemonStatus::NeedsLogin {
+                    tracing::info!("Status poll: state.json shows fresh credentials, clearing NeedsLogin");
+                    ds.daemon_status = DaemonStatus::Running;
+                }
+            }
+
             let uptime = ds.started_at.elapsed().as_secs();
             let token_valid = ds.cli_state.has_valid_token();
             let logged_in = ds.cli_state.is_logged_in();
@@ -299,6 +438,9 @@ async fn dispatch_command(
                     "uptime_secs": uptime,
                     "status": ds.daemon_status,
                     "last_refresh_secs_ago": last_refresh,
+                    "last_refresh_error": ds.last_refresh_error,
+                    "keychain_healthy": ds.keychain_healthy,
+                    "stuck_for_secs": ds.stuck_since.map(|t| t.elapsed().as_secs()),
                 },
                 "auth": {
                     "logged_in": logged_in,
@@ -415,15 +557,50 @@ async fn refresh_once(ctx: &std::sync::Arc<DaemonCtx>) -> RefreshOutcome {
     // have just run `tytus login` in another process, which writes a new RT
     // to the keychain that our in-memory copy doesn't know about. Without
     // this reload the daemon would keep trying the dead RT forever.
+    //
+    // Two-stage reload: first file-only (cannot block), then a keychain
+    // attempt. If the keychain is still pending-approval (3s timeout), we
+    // fall back to file-only credentials and stay Running as long as the
+    // AT is valid. Better to serve stale-but-working tokens than to lie
+    // to the user while their pod works perfectly. Next tick retries.
     if ds.daemon_status == DaemonStatus::NeedsLogin || !ds.cli_state.is_logged_in() {
-        let fresh = CliState::load();
-        if fresh.is_logged_in() {
-            ds.cli_state = fresh;
+        let fresh_file = CliState::load_file_only();
+        if fresh_file.has_valid_token() {
+            // File has a valid AT — adopt it. Attempt to overlay the RT
+            // from keychain (non-fatal if it times out).
+            let fresh_full = CliState::load();
+            ds.cli_state = if fresh_full.refresh_token.is_some() {
+                fresh_full
+            } else {
+                fresh_file
+            };
             ds.daemon_status = DaemonStatus::Running;
         } else {
-            ds.daemon_status = DaemonStatus::NeedsLogin;
-            return RefreshOutcome::NotLoggedIn;
+            let fresh_full = CliState::load();
+            if fresh_full.is_logged_in() {
+                ds.cli_state = fresh_full;
+                ds.daemon_status = DaemonStatus::Running;
+            } else {
+                ds.daemon_status = DaemonStatus::NeedsLogin;
+                return RefreshOutcome::NotLoggedIn;
+            }
         }
+    }
+
+    // If the reload block above couldn't fetch a refresh token from the
+    // keychain (email present but RT still None), the keychain is either
+    // pending approval or plain inaccessible. Flag it so the tray can
+    // surface an actionable warning instead of silently lying about the
+    // user's login state.
+    let email_present = ds.cli_state.email.as_ref().is_some_and(|e| !e.is_empty());
+    let rt_present = ds.cli_state.refresh_token.as_ref().is_some_and(|t| !t.is_empty());
+    if email_present && !rt_present {
+        if ds.keychain_healthy {
+            tracing::warn!("Keychain refresh token unavailable — marking daemon degraded");
+        }
+        ds.keychain_healthy = false;
+    } else if email_present && rt_present {
+        ds.keychain_healthy = true;
     }
 
     ds.daemon_status = DaemonStatus::Refreshing;
@@ -433,6 +610,8 @@ async fn refresh_once(ctx: &std::sync::Arc<DaemonCtx>) -> RefreshOutcome {
         Ok(()) => {
             ds.last_refresh = Some(std::time::Instant::now());
             ds.daemon_status = DaemonStatus::Running;
+            ds.last_refresh_error = None;
+            ds.keychain_healthy = true;
             // Persist with save_critical: we may have rotated RT and the
             // new RT is already in keychain (via update_tokens), but we
             // want expires_at_ms / access_token durable in case of crash.
@@ -448,6 +627,7 @@ async fn refresh_once(ctx: &std::sync::Arc<DaemonCtx>) -> RefreshOutcome {
         }
         Err(atomek_core::AtomekError::AuthExpired) => {
             ds.daemon_status = DaemonStatus::NeedsLogin;
+            ds.last_refresh_error = Some("refresh token expired — run `tytus login`".into());
             tracing::warn!("Background refresh: refresh token expired (needs re-login)");
             RefreshOutcome::AuthExpired
         }
@@ -455,11 +635,120 @@ async fn refresh_once(ctx: &std::sync::Arc<DaemonCtx>) -> RefreshOutcome {
             // Do NOT flip to NeedsLogin — user auth is still valid, this is
             // a transient error (network, DNS, Sentinel hiccup). Stay in
             // Running so `tytus status` doesn't lie.
+            let msg = format!("transient refresh error: {}", e);
             tracing::warn!("Background token refresh (transient): {}", e);
+            ds.last_refresh_error = Some(msg);
             if ds.daemon_status != DaemonStatus::NeedsLogin {
                 ds.daemon_status = DaemonStatus::Running;
             }
             RefreshOutcome::Transient
+        }
+    }
+}
+
+// ── File watcher + self-heal ────────────────────────────────
+
+/// Poll state.json mtime every 500ms. On change, reload file-only state
+/// and merge into `cli_state`. This keeps the daemon's in-memory view
+/// consistent with on-disk truth within ~0.5s of any CLI write, without
+/// waiting for the 30-min refresh tick. Never blocks on the keychain
+/// (file-only load).
+async fn state_watcher_loop(
+    ctx: std::sync::Arc<DaemonCtx>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let path = CliState::state_path();
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { return; }
+            }
+            _ = tick.tick() => {
+                let mtime = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                let mut ds = ctx.state.lock().await;
+                if ds.last_state_mtime == Some(mtime) {
+                    continue;
+                }
+                let fresh = CliState::load_file_only();
+                // Preserve RT — load_file_only doesn't touch keychain.
+                let preserved_rt = ds.cli_state.refresh_token.clone();
+                let had_valid_creds = ds.cli_state.is_logged_in();
+                ds.cli_state = fresh;
+                if ds.cli_state.refresh_token.is_none() {
+                    ds.cli_state.refresh_token = preserved_rt;
+                }
+                ds.last_state_mtime = Some(mtime);
+
+                // Clear NeedsLogin the moment the file shows valid credentials.
+                if ds.cli_state.is_logged_in() && ds.daemon_status == DaemonStatus::NeedsLogin {
+                    tracing::info!("state.json changed — clearing NeedsLogin (file now logged in)");
+                    ds.daemon_status = DaemonStatus::Running;
+                    ds.last_refresh_error = None;
+                }
+                if !had_valid_creds && ds.cli_state.is_logged_in() {
+                    tracing::info!("state.json watcher: credentials recovered from disk");
+                }
+            }
+        }
+    }
+}
+
+/// Daemon self-termination threshold. After this long observing a
+/// logged-in state.json while pinned to NeedsLogin, we exit so launchd
+/// / systemd can respawn us with a fresh in-memory view. Deliberately
+/// longer than one full refresh tick + keychain retry window so we
+/// don't thrash, but short enough that a user whose keychain is broken
+/// doesn't have to `kill` the daemon manually.
+const STUCK_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Watchdog that detects "keychain won't come back and the status RPC
+/// reload isn't unsticking us" scenarios and exits. Every 30s it
+/// compares in-memory daemon_status against on-disk credentials.
+async fn self_heal_loop(
+    ctx: std::sync::Arc<DaemonCtx>,
+    mut shutdown: watch::Receiver<bool>,
+    shutdown_tx: watch::Sender<bool>,
+) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { return; }
+            }
+            _ = tick.tick() => {
+                let mut ds = ctx.state.lock().await;
+                let file_logged_in = CliState::load_file_only()
+                    .email.as_ref().is_some_and(|e| !e.is_empty())
+                    && CliState::load_file_only().has_valid_token();
+                let stuck = ds.daemon_status == DaemonStatus::NeedsLogin && file_logged_in;
+
+                if stuck {
+                    let since = *ds.stuck_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() > STUCK_THRESHOLD {
+                        tracing::error!(
+                            "Daemon stuck in NeedsLogin for {}s while state.json is logged in — \
+                             self-terminating so launchd respawns us with fresh state",
+                            since.elapsed().as_secs()
+                        );
+                        drop(ds);
+                        let _ = shutdown_tx.send(true);
+                        // Give the accept loop a moment to drain, then hard-exit
+                        // in case shutdown plumbing is also stuck.
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        std::process::exit(0);
+                    }
+                } else if ds.stuck_since.is_some() {
+                    ds.stuck_since = None;
+                }
+            }
         }
     }
 }

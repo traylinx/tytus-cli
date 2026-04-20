@@ -34,27 +34,54 @@ pub fn poll_daemon_status() -> super::TrayState {
         tray_autostart_installed: super::check_tray_autostart_installed(),
         app_bundle_installed: super::check_app_bundle_installed(),
         gateway_reachable,
+        // Optimistic default — only flipped to false when the daemon
+        // explicitly reports a keychain problem. Prevents a spurious
+        // warning on first paint before the first poll completes.
+        keychain_healthy: true,
         ..Default::default()
     };
 
-    if let Some(d) = daemon_snapshot {
+    // Seed from the daemon (runtime truth: pid, uptime, its view of auth +
+    // pods).
+    if let Some(ref d) = daemon_snapshot {
         out.daemon_running = true;
         out.daemon_pid = d.daemon_pid;
         out.uptime_secs = d.uptime_secs;
         out.logged_in = d.logged_in;
         out.token_valid = d.token_valid;
-        out.email = d.email;
-        out.tier = d.tier;
-        out.pods = d.pods;
-        out.tunnel_active = out.pods.iter().any(|p| p.tunnel_active);
-    } else if let Some(f) = file_snapshot {
-        out.daemon_running = false;
-        out.logged_in = f.logged_in;
-        out.token_valid = f.token_valid_local;
-        out.email = f.email;
-        out.tier = f.tier;
-        out.pods = f.pods;
-        out.tunnel_active = out.pods.iter().any(|p| p.tunnel_active);
+        out.email = d.email.clone();
+        out.tier = d.tier.clone();
+        out.pods = d.pods.clone();
+        out.keychain_healthy = d.keychain_healthy;
+        out.last_refresh_error = d.last_refresh_error.clone();
+    }
+
+    // Overlay state.json. The file is the atomic source of truth for auth
+    // — any CLI command (`tytus login`, `tytus connect`, `tytus revoke`)
+    // writes it immediately. The daemon's in-memory cache can lag by up
+    // to a refresh tick AND, critically, can get pinned to `NeedsLogin`
+    // when the macOS keychain ACL prompt is pending — in that state the
+    // daemon lies about `logged_in=false` while the file plainly has
+    // fresh tokens. Trust the file whenever it disagrees on logged-in.
+    // Daemon-exclusive fields (pid, uptime) stay from the daemon snapshot.
+    if let Some(f) = file_snapshot {
+        if f.logged_in && !out.logged_in {
+            out.logged_in = true;
+        }
+        if f.token_valid_local {
+            out.token_valid = true;
+        }
+        if out.email.is_empty() {
+            out.email = f.email;
+        }
+        if out.tier.is_empty() {
+            out.tier = f.tier;
+        }
+        // Prefer the file's pod list when the daemon didn't contribute
+        // one (daemon down, just started, or has a smaller view).
+        if out.pods.is_empty() {
+            out.pods = f.pods;
+        }
     }
 
     // Derived fields: unit budget (used vs limit).
@@ -91,6 +118,13 @@ struct DaemonSnap {
     email: String,
     tier: String,
     pods: Vec<PodInfo>,
+    keychain_healthy: bool,
+    last_refresh_error: Option<String>,
+    // Captured for future surfacing in a "daemon stuck for Ns" diagnostic
+    // row. Currently unused in the menu; keep the field so the parser
+    // stays in sync with the daemon's schema.
+    #[allow(dead_code)]
+    stuck_for_secs: Option<u64>,
 }
 
 fn daemon_status() -> Option<DaemonSnap> {
@@ -114,6 +148,12 @@ fn daemon_status() -> Option<DaemonSnap> {
         email: auth.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         tier: auth.get("tier").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         pods,
+        // Missing fields (old daemon talking to a new tray) default
+        // optimistic — `keychain_healthy: true` — so an out-of-date
+        // daemon doesn't spuriously trip the warning row.
+        keychain_healthy: daemon.get("keychain_healthy").and_then(|v| v.as_bool()).unwrap_or(true),
+        last_refresh_error: daemon.get("last_refresh_error").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        stuck_for_secs: daemon.get("stuck_for_secs").and_then(|v| v.as_u64()),
     })
 }
 

@@ -162,6 +162,8 @@ fn menu_signature(s: &TrayState) -> String {
     parts.push(format!("tier={}", s.tier));
     parts.push(format!("tun={}", s.tunnel_active));
     parts.push(format!("uu={}/{}", s.units_used, s.units_limit));
+    parts.push(format!("kc={}", s.keychain_healthy));
+    parts.push(format!("err={}", s.last_refresh_error.as_deref().unwrap_or("")));
     for p in &s.pods {
         let fwd_live = existing_ui_forwarder(&p.pod_id).is_some();
         let tun_live = tunnel_reaches_pod(&p.pod_id);
@@ -224,6 +226,15 @@ pub struct TrayState {
     /// within 2s. Independent of daemon / state.json / login status — this
     /// is the ground truth of "can I call my pod right now?".
     pub gateway_reachable: bool,
+    /// False when the daemon can't read the refresh token from the OS
+    /// keychain (pending-approval dialog, stale ACL after a rebuild, etc.).
+    /// The data plane still works in this state, but the next `tytus
+    /// login` is required before the access token expires. Surfaced as
+    /// a yellow warning row in the menu.
+    pub keychain_healthy: bool,
+    /// Human-readable last refresh error the daemon observed. Displayed
+    /// verbatim in the troubleshoot menu when present.
+    pub last_refresh_error: Option<String>,
 }
 
 /// Per-pod info. Agent types beyond the two we ship are silently displayed
@@ -375,7 +386,13 @@ impl HealthDot {
     /// during daily use).
     fn from_state(s: &TrayState) -> Self {
         if s.gateway_reachable {
-            HealthDot::Connected
+            // Escalate to yellow if the daemon can't reach the keychain.
+            // The data plane works now, but we can't auto-refresh the
+            // access token — if the user ignores this until AT expiry,
+            // they'll lose API-plane access until they `tytus login`.
+            // Not severe enough for red: the tunnel and LLM calls are
+            // fully functional right this second.
+            if !s.keychain_healthy { HealthDot::Warning } else { HealthDot::Connected }
         } else if s.logged_in {
             // Tunnel down but credentials are fine — click Connect.
             HealthDot::Warning
@@ -642,6 +659,12 @@ fn build_menu(state: &TrayState) -> Menu {
         if state.gateway_reachable {
             if !state.daemon_running {
                 bits.push("⚠︎ daemon offline".into());
+            } else if !state.keychain_healthy {
+                // Daemon is alive but the macOS keychain hasn't yielded
+                // the refresh token. Data plane works; next `tytus login`
+                // may be needed before the current AT expires. User-
+                // actionable via the Troubleshoot menu.
+                bits.push("⚠︎ keychain access pending — re-run `tytus login`".into());
             } else if state.logged_in && !state.token_valid {
                 bits.push("⚠︎ token expiring — will auto-refresh".into());
             }
@@ -923,6 +946,27 @@ fn build_menu(state: &TrayState) -> Menu {
 
     // ── Troubleshoot ▸ ────────────────────────────────────
     let trouble_sub = Submenu::new("Troubleshoot", true);
+    // Surface the daemon's most recent diagnostic so the user doesn't
+    // have to `tail /tmp/tytus/daemon.log` to know what's wrong. Two
+    // disabled info rows render as context above the actionable items.
+    if !state.keychain_healthy {
+        let _ = trouble_sub.append(&MenuItem::with_id(
+            "diag_keychain",
+            "⚠︎ Keychain access pending — approve dialog or re-run Sign In",
+            false, None,
+        ));
+    }
+    if let Some(ref err) = state.last_refresh_error {
+        let truncated = if err.len() > 80 { format!("{}…", &err[..80]) } else { err.clone() };
+        let _ = trouble_sub.append(&MenuItem::with_id(
+            "diag_refresh_err",
+            format!("Last refresh error: {}", truncated),
+            false, None,
+        ));
+    }
+    if !state.keychain_healthy || state.last_refresh_error.is_some() {
+        let _ = trouble_sub.append(&PredefinedMenuItem::separator());
+    }
     let _ = trouble_sub.append(&MenuItem::with_id("doctor", "Doctor", true, None));
     let _ = trouble_sub.append(&MenuItem::with_id("view_daemon_log", "View Daemon Log", true, None));
     let _ = trouble_sub.append(&MenuItem::with_id("view_startup_log", "View Startup Log", true, None));
