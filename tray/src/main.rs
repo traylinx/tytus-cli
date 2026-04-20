@@ -90,6 +90,45 @@ fn trigger_refresh_from_main() {
 static REFRESH_GLOBAL: std::sync::OnceLock<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>
     = std::sync::OnceLock::new();
 
+/// Transient "working on it" status shown in the menu while a slow
+/// action (connect, disconnect, add-channel) is in flight. macOS
+/// notifications disappear after ~5s and are easy to miss, so the
+/// menu itself carries the feedback as long as the action is running:
+///
+///   🟡 Connecting… (started 4s ago)
+///
+/// Set when a long action kicks off; cleared when the action's
+/// background thread completes. Read by `build_menu`; any change
+/// triggers a menu rebuild via `menu_signature`.
+static BUSY_STATUS: std::sync::OnceLock<Arc<std::sync::Mutex<Option<BusyState>>>>
+    = std::sync::OnceLock::new();
+
+#[derive(Debug, Clone)]
+pub struct BusyState {
+    pub label: String,
+    pub started_at: std::time::Instant,
+}
+
+fn busy_set(label: &str) {
+    let cell = BUSY_STATUS.get_or_init(|| Arc::new(std::sync::Mutex::new(None)));
+    *cell.lock().unwrap() = Some(BusyState {
+        label: label.to_string(),
+        started_at: std::time::Instant::now(),
+    });
+    trigger_refresh();
+}
+
+fn busy_clear() {
+    if let Some(cell) = BUSY_STATUS.get() {
+        *cell.lock().unwrap() = None;
+    }
+    trigger_refresh();
+}
+
+fn busy_current() -> Option<BusyState> {
+    BUSY_STATUS.get().and_then(|c| c.lock().ok().and_then(|g| g.clone()))
+}
+
 fn trigger_refresh() {
     if let Some(pair) = REFRESH_GLOBAL.get() {
         let (lock, cvar) = &**pair;
@@ -169,6 +208,15 @@ fn menu_signature(s: &TrayState) -> String {
     parts.push(format!("uu={}/{}", s.units_used, s.units_limit));
     parts.push(format!("kc={}", s.keychain_healthy));
     parts.push(format!("err={}", s.last_refresh_error.as_deref().unwrap_or("")));
+    // When a long action is in flight, include the elapsed-second
+    // count in the signature so the menu rebuilds each second and the
+    // "Connecting… (4s)" counter advances visibly without waiting for
+    // the user to re-open the menu.
+    if let Some(busy) = busy_current() {
+        parts.push(format!("busy={}:{}", busy.label, busy.started_at.elapsed().as_secs()));
+    } else {
+        parts.push("busy=0".into());
+    }
     for p in &s.pods {
         let fwd_live = existing_ui_forwarder(&p.pod_id).is_some();
         let tun_live = tunnel_reaches_pod(&p.pod_id);
@@ -593,7 +641,16 @@ fn main() {
             let (lock, cvar) = &*poll_pair;
             {
                 let guard = lock.lock().unwrap();
-                let (mut guard, _) = cvar.wait_timeout(guard, std::time::Duration::from_millis(1500)).unwrap();
+                // 1s while an action is in flight so the "Connecting…
+                // (Ns)" counter advances visibly; 1.5s otherwise (the
+                // steady-state rebuild cadence). Keeps CPU low when
+                // the user isn't doing anything.
+                let wait = if busy_current().is_some() {
+                    std::time::Duration::from_millis(1000)
+                } else {
+                    std::time::Duration::from_millis(1500)
+                };
+                let (mut guard, _) = cvar.wait_timeout(guard, wait).unwrap();
                 *guard = false;
             }
 
@@ -694,7 +751,15 @@ fn build_menu(state: &TrayState) -> Menu {
     } else {
         String::new()
     };
-    let status_text = if state.gateway_reachable {
+    // Busy status wins over the normal health line so the user sees
+    // persistent "working on it" feedback during the 10–15s window that
+    // `tytus connect` typically takes. Renders with the elapsed-seconds
+    // count so a click → re-open of the menu immediately proves the
+    // action is still alive and roughly where it is in its runtime.
+    let status_text = if let Some(busy) = busy_current() {
+        let elapsed = busy.started_at.elapsed().as_secs();
+        format!("⏳ {} ({}s)", busy.label, elapsed)
+    } else if state.gateway_reachable {
         format!("{} Connected{}", dot.emoji(), who)
     } else if !state.logged_in {
         format!("{} Not logged in", dot.emoji())
@@ -759,11 +824,16 @@ fn build_menu(state: &TrayState) -> Menu {
     // bring the tunnel up. Gating Connect on daemon_running is the bug
     // that made the previous tray tell users "click Connect" without
     // rendering the button (screenshot 2026-04-18).
+    // Connect/Disconnect disabled while an action is in flight so a
+    // double-click doesn't fire a second `tytus connect` in parallel.
+    // The busy status line above already tells the user what's
+    // happening; the grayed-out item reinforces it.
+    let is_busy = busy_current().is_some();
     if !state.logged_in {
-        let _ = menu.append(&MenuItem::with_id("login", "Sign In…", true, None));
+        let _ = menu.append(&MenuItem::with_id("login", "Sign In…", !is_busy, None));
         let _ = menu.append(&PredefinedMenuItem::separator());
     } else if state.tunnel_active {
-        let _ = menu.append(&MenuItem::with_id("disconnect", "Disconnect", true, None));
+        let _ = menu.append(&MenuItem::with_id("disconnect", "Disconnect", !is_busy, None));
 
         // "Open in ▸" submenu — only when tunnel is active
         let clis = launcher::detect_installed_clis();
@@ -784,7 +854,7 @@ fn build_menu(state: &TrayState) -> Menu {
     } else {
         // Logged in but tunnel not active — show Connect, regardless of
         // whether the daemon is running.
-        let _ = menu.append(&MenuItem::with_id("connect", "Connect", true, None));
+        let _ = menu.append(&MenuItem::with_id("connect", "Connect", !is_busy, None));
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
 
@@ -1184,6 +1254,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 "tytus",
                 &["connect"],
                 "Connect",
+                "Connecting to pod…",
                 |was_reachable_before| {
                     // Outcome = "gateway is now reachable" (primary)
                     // with a fallback of "tunnel pidfile appeared" for
@@ -1211,6 +1282,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 "tytus",
                 &["disconnect"],
                 "Disconnect",
+                "Disconnecting tunnel…",
                 |_was_reachable_before| {
                     use gateway_probe::probe_gateway;
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -1700,6 +1772,7 @@ fn run_silent_with_notify<F>(
     program: &str,
     args: &[&str],
     action_label: &'static str,
+    busy_label: &'static str,
     probe_outcome: F,
 )
 where
@@ -1708,6 +1781,12 @@ where
     let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let program_owned = program.to_string();
     let was_reachable_before = gateway_probe::probe_gateway();
+
+    // Pin the "working" label to the menu before the spawn. The
+    // condvar wakes the poll loop so the rebuild renders this
+    // within ~50ms of the click — well before the CLI process
+    // has even started.
+    busy_set(busy_label);
 
     std::thread::spawn(move || {
         // Best-effort log capture. File failure is non-fatal — we
@@ -1770,6 +1849,11 @@ where
                 );
             }
         }
+
+        // Clear the "working" label so the menu goes back to its
+        // normal status line. The menu_signature includes BUSY so
+        // this implicitly triggers a rebuild.
+        busy_clear();
     });
 }
 
