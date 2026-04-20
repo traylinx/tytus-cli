@@ -1,3 +1,5 @@
+mod channels;
+mod channels_store;
 mod daemon;
 mod state;
 #[allow(dead_code)]
@@ -88,6 +90,60 @@ enum AgentAction {
         #[arg(long)]
         refresh: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ChannelsAction {
+    /// Configure a new chat channel for the pod's agent. Stores
+    /// credentials in the OS keychain, writes them to the pod's
+    /// state volume, and redeploys the agent container so the
+    /// channel's plugin picks up the env vars at startup.
+    Add {
+        /// Pod ID (e.g. "02")
+        #[arg(short, long)]
+        pod: String,
+        /// Channel type: telegram, discord, slack, line
+        /// (run `tytus channels catalog` to list supported channels).
+        #[arg(long, value_name = "CHANNEL")]
+        r#type: String,
+        /// Primary credential. For Telegram/Discord/single-token
+        /// channels this is the only flag you need. Stored in the
+        /// OS keychain, never logged.
+        #[arg(long)]
+        token: Option<String>,
+        /// Slack: app-level token (xapp-...). Required for Socket Mode.
+        #[arg(long)]
+        app_token: Option<String>,
+        /// Slack: user-scoped token (xoxp-...). Optional.
+        #[arg(long)]
+        user_token: Option<String>,
+        /// LINE: channel secret (pairs with --token).
+        #[arg(long)]
+        channel_secret: Option<String>,
+    },
+    /// Show which channels are configured for a given pod. Reads
+    /// the pod's channels.json state file; does NOT show credential
+    /// values (those live in your keychain).
+    List {
+        /// Pod ID (e.g. "02")
+        #[arg(short, long)]
+        pod: String,
+    },
+    /// Remove a channel's credentials from a pod. Clears the OS
+    /// keychain entries, removes from channels.json on the pod, and
+    /// redeploys the agent so the channel stops operating.
+    Remove {
+        /// Pod ID (e.g. "02")
+        #[arg(short, long)]
+        pod: String,
+        /// Channel type to remove.
+        #[arg(long, value_name = "CHANNEL")]
+        r#type: String,
+    },
+    /// List all channels this CLI knows how to configure, with
+    /// per-channel credential requirements and inbound-delivery
+    /// model. Read this before running `tytus channels add`.
+    Catalog,
 }
 
 #[derive(Subcommand)]
@@ -225,6 +281,20 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Add / remove / list chat channels that the pod's agent should
+    /// use to talk to you. Pod agents have built-in extensions for
+    /// Telegram, Discord, Slack (Socket Mode), LINE, etc. — this
+    /// command supplies the bot tokens / API secrets they need.
+    ///
+    /// Credentials are stored in the OS keychain and synced to the pod
+    /// via the agent state volume. The agent container is redeployed
+    /// with the new env vars so channel plugins pick them up at
+    /// startup. Requires an HTTPS-capable pod (droplet must have the
+    /// 2026-04-20 egress bridge applied).
+    Channels {
+        #[command(subcommand)]
+        action: ChannelsAction,
+    },
     /// Install/uninstall/check the auto-start-on-boot hook so your tunnel
     /// re-establishes automatically when you log back in after a reboot.
     /// Your apps configured with the stable `http://10.42.42.1:18080` +
@@ -355,6 +425,7 @@ async fn main() {
         Some(Commands::Exec { command, pod, timeout }) => cmd_exec(&http, command, pod, timeout, cli.json).await,
         Some(Commands::Lope { args }) => cmd_lope_passthrough("lope", args, cli.json).await,
         Some(Commands::Bridge { args }) => cmd_lope_passthrough("bridge", args, cli.json).await,
+        Some(Commands::Channels { action }) => cmd_channels(&http, action, cli.json).await,
         Some(Commands::Autostart { action }) => cmd_autostart(action, cli.json),
         Some(Commands::Ui { pod, port, no_open, stop }) => {
             if stop { cmd_ui_stop(pod, cli.json).await; }
@@ -2305,6 +2376,392 @@ async fn cmd_exec(http: &atomek_core::HttpClient, command: Vec<String>, pod_id: 
             std::process::exit(1);
         }
     }
+}
+
+// ── Channels ────────────────────────────────────────────────
+//
+// Configure chat-channel credentials (Telegram/Discord/Slack/LINE)
+// for the pod's agent. Writes to the pod's state volume at
+// `/app/workspace/.tytus/channels.json`; DAM picks this up on the
+// next `/agent/<pod>/deploy` and merges the values into the
+// container's env vars. Secrets live in the OS keychain, never on
+// disk in plaintext.
+//
+// See also:
+//   - `cli/src/channels.rs` — registry of known channels + credentials
+//   - `cli/src/channels_store.rs` — keychain + local manifest
+//   - `services/wannolot-infrastructure/agent-manager/app.py` — DAM's
+//     reader that merges channels.json into container env_vars
+//   - `services/tytus-cli/dev/design/2026-04-20-unblock-openclaw-channels.md`
+
+async fn cmd_channels(http: &atomek_core::HttpClient, action: ChannelsAction, json: bool) {
+    match action {
+        ChannelsAction::Catalog => {
+            cmd_channels_catalog(json);
+        }
+        ChannelsAction::List { pod } => {
+            cmd_channels_list(&pod, json);
+        }
+        ChannelsAction::Add {
+            pod,
+            r#type,
+            token,
+            app_token,
+            user_token,
+            channel_secret,
+        } => {
+            cmd_channels_add(
+                http,
+                &pod,
+                &r#type,
+                token,
+                app_token,
+                user_token,
+                channel_secret,
+                json,
+            )
+            .await;
+        }
+        ChannelsAction::Remove { pod, r#type } => {
+            cmd_channels_remove(http, &pod, &r#type, json).await;
+        }
+    }
+}
+
+fn cmd_channels_catalog(json: bool) {
+    if json {
+        let entries: Vec<serde_json::Value> = channels::REGISTRY
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "label": c.label,
+                    "blurb": c.blurb,
+                    "agent_types": c.agent_types,
+                    "inbound_model": c.inbound_model,
+                    "credentials": c.credentials.iter().map(|cr| {
+                        serde_json::json!({
+                            "env_var": cr.env_var,
+                            "label": cr.label,
+                            "cli_flag": cr.cli_flag,
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+        return;
+    }
+    println!("Channels `tytus channels add` knows how to configure:\n");
+    for c in channels::REGISTRY {
+        println!("  {} — {}", console::style(c.name).cyan().bold(), c.label);
+        println!("    Inbound: {}", c.inbound_model);
+        println!("    {}", c.blurb);
+        println!("    Credentials:");
+        for cred in c.credentials {
+            let flag = if cred.cli_flag == "token" {
+                "--token".to_string()
+            } else {
+                format!("--{}", cred.cli_flag)
+            };
+            println!("      {} — {} (env: {})", flag, cred.label, cred.env_var);
+        }
+        println!("    Agents: {}", c.agent_types.join(", "));
+        println!();
+    }
+}
+
+fn cmd_channels_list(pod_id: &str, json: bool) {
+    let manifest = channels_store::ChannelManifest::load();
+    let channels = manifest.channels_for(pod_id);
+
+    if json {
+        let entries: Vec<serde_json::Value> = channels
+            .iter()
+            .map(|(name, entry)| {
+                serde_json::json!({
+                    "channel": name,
+                    "env_vars": entry.env_vars,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "pod": pod_id,
+                "channels": entries,
+            }))
+            .unwrap()
+        );
+        return;
+    }
+
+    if channels.is_empty() {
+        println!("No channels configured for pod {}.", pod_id);
+        println!("Run `tytus channels add --pod {} --type telegram --token ...` to add one.", pod_id);
+        return;
+    }
+    println!("Channels configured for pod {}:", pod_id);
+    for (name, entry) in channels {
+        println!(
+            "  {} — {} credential(s): {}",
+            console::style(name).cyan().bold(),
+            entry.env_vars.len(),
+            entry.env_vars.join(", ")
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_channels_add(
+    http: &atomek_core::HttpClient,
+    pod_id: &str,
+    channel_type: &str,
+    token: Option<String>,
+    app_token: Option<String>,
+    user_token: Option<String>,
+    channel_secret_flag: Option<String>,
+    json: bool,
+) {
+    // 1. Look up the channel spec.
+    let spec = match channels::find(channel_type) {
+        Some(s) => s,
+        None => {
+            eprintln!(
+                "Unknown channel type '{}'. Run `tytus channels catalog` to see supported channels.",
+                channel_type
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // 2. Collect values for each credential the spec requires.
+    // Map CLI flag → supplied value.
+    let mut cli_values: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    if let Some(v) = token { cli_values.insert("token", v); }
+    if let Some(v) = app_token { cli_values.insert("app-token", v); }
+    if let Some(v) = user_token { cli_values.insert("user-token", v); }
+    if let Some(v) = channel_secret_flag { cli_values.insert("channel-secret", v); }
+
+    let mut collected: Vec<(String, String)> = Vec::new();
+    for cred in spec.credentials {
+        match cli_values.remove(cred.cli_flag) {
+            Some(value) if !value.is_empty() => {
+                collected.push((cred.env_var.to_string(), value));
+            }
+            _ => {
+                let flag = if cred.cli_flag == "token" {
+                    "--token".to_string()
+                } else {
+                    format!("--{}", cred.cli_flag)
+                };
+                eprintln!(
+                    "Missing {} for channel '{}' — pass {} (credential: {}).",
+                    cred.env_var, spec.name, flag, cred.label
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // 3. Persist each secret to the OS keychain.
+    let env_var_names: Vec<String> = collected.iter().map(|(k, _)| k.clone()).collect();
+    for (env_var, value) in &collected {
+        if let Err(e) = channels_store::store_secret(pod_id, spec.name, env_var, value) {
+            eprintln!("Failed to store '{}' in keychain: {}", env_var, e);
+            std::process::exit(1);
+        }
+    }
+
+    // 4. Update the local manifest.
+    let mut manifest = channels_store::ChannelManifest::load();
+    manifest.add_channel(pod_id, spec.name, env_var_names.clone());
+    if let Err(e) = manifest.save() {
+        eprintln!("Failed to update local channel manifest: {}", e);
+        std::process::exit(1);
+    }
+
+    // 5. Build the pod-side payload and push it to the pod.
+    if let Err(e) = push_channels_to_pod(http, &manifest, pod_id).await {
+        eprintln!("Failed to push channels.json to pod {}: {}", pod_id, e);
+        eprintln!("Keychain + local manifest are updated; you can retry with `tytus channels list --pod {}` + rerun add.", pod_id);
+        std::process::exit(1);
+    }
+
+    // 6. Redeploy the agent so it picks up the new env vars.
+    if let Err(e) = redeploy_agent(http, pod_id).await {
+        eprintln!(
+            "channels.json pushed but agent redeploy failed: {}. Run `tytus agent catalog` + retry.",
+            e
+        );
+        std::process::exit(1);
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "pod": pod_id,
+                "channel": spec.name,
+                "env_vars": env_var_names,
+            })
+        );
+    } else {
+        println!(
+            "{} {} configured on pod {} ({} credential{}). Agent restarted.",
+            console::style("✓").green(),
+            spec.label,
+            pod_id,
+            env_var_names.len(),
+            if env_var_names.len() == 1 { "" } else { "s" },
+        );
+        println!("  {}", spec.inbound_model);
+    }
+}
+
+async fn cmd_channels_remove(
+    http: &atomek_core::HttpClient,
+    pod_id: &str,
+    channel_type: &str,
+    json: bool,
+) {
+    let spec = match channels::find(channel_type) {
+        Some(s) => s,
+        None => {
+            eprintln!("Unknown channel type '{}'.", channel_type);
+            std::process::exit(1);
+        }
+    };
+
+    let mut manifest = channels_store::ChannelManifest::load();
+    let removed = manifest.remove_channel(pod_id, spec.name);
+
+    if removed.is_none() {
+        eprintln!(
+            "No {} channel configured for pod {}. Nothing to remove.",
+            spec.label, pod_id
+        );
+        std::process::exit(0);
+    }
+
+    // Delete keychain entries.
+    if let Some(ref entry) = removed {
+        for env_var in &entry.env_vars {
+            let _ = channels_store::delete_secret(pod_id, spec.name, env_var);
+        }
+    }
+
+    if let Err(e) = manifest.save() {
+        eprintln!("Failed to update local manifest: {}", e);
+        std::process::exit(1);
+    }
+
+    if let Err(e) = push_channels_to_pod(http, &manifest, pod_id).await {
+        eprintln!("Keychain + manifest cleared but pod sync failed: {}", e);
+        std::process::exit(1);
+    }
+
+    if let Err(e) = redeploy_agent(http, pod_id).await {
+        eprintln!("Pod sync OK but agent redeploy failed: {}", e);
+        std::process::exit(1);
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "pod": pod_id,
+                "channel": spec.name,
+                "removed": true,
+            })
+        );
+    } else {
+        println!(
+            "{} {} removed from pod {}. Agent restarted.",
+            console::style("✓").green(),
+            spec.label,
+            pod_id
+        );
+    }
+}
+
+/// Build the channels.json payload from the local manifest + keychain
+/// and write it to `/app/workspace/.tytus/channels.json` on the pod.
+/// Uses `tytus exec` (which shells to DAM's exec endpoint under the
+/// hood) to keep the write path identical to what users do manually.
+async fn push_channels_to_pod(
+    http: &atomek_core::HttpClient,
+    manifest: &channels_store::ChannelManifest,
+    pod_id: &str,
+) -> Result<(), String> {
+    let payload = channels_store::render_pod_payload(manifest, pod_id)
+        .map_err(|e| format!("rendering pod payload: {}", e))?;
+    let payload_str = serde_json::to_string(&payload)
+        .map_err(|e| format!("serializing pod payload: {}", e))?;
+
+    // Base64-encode the payload to survive shell quoting. base64 is
+    // available on every Linux pod image we ship (busybox or coreutils).
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(payload_str.as_bytes());
+    let script = format!(
+        "mkdir -p /app/workspace/.tytus && \
+         echo '{}' | base64 -d > /app/workspace/.tytus/channels.json.tmp && \
+         chmod 600 /app/workspace/.tytus/channels.json.tmp && \
+         mv /app/workspace/.tytus/channels.json.tmp /app/workspace/.tytus/channels.json && \
+         echo OK",
+        b64
+    );
+
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        return Err("not logged in".to_string());
+    }
+    ensure_token(&mut state, http).await.map_err(|e| format!("token refresh: {}", e))?;
+    let (sk, auid) = get_credentials(&mut state, http).await;
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+
+    let result = atomek_pods::exec_in_agent(&client, pod_id, &script, 15)
+        .await
+        .map_err(|e| format!("exec_in_agent: {}", e))?;
+
+    if result.exit_code != 0 {
+        let stderr = result.stderr.unwrap_or_default();
+        return Err(format!(
+            "pod write exited {}: {}",
+            result.exit_code,
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Redeploy the agent so the channel credentials land in the container env.
+/// Uses the existing Provider `/pod/agent/deploy` endpoint which calls
+/// DAM's deploy (stops existing container + re-reads channels.json + starts
+/// new container).
+async fn redeploy_agent(
+    http: &atomek_core::HttpClient,
+    pod_id: &str,
+) -> Result<(), String> {
+    let mut state = CliState::load();
+    ensure_token(&mut state, http).await.map_err(|e| format!("token refresh: {}", e))?;
+    let (sk, auid) = get_credentials(&mut state, http).await;
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+
+    // Look up the current agent_type for this pod from state.
+    let agent_type = state
+        .pods
+        .iter()
+        .find(|p| p.pod_id == pod_id)
+        .and_then(|p| p.agent_type.clone())
+        .unwrap_or_else(|| "nemoclaw".to_string());
+
+    atomek_pods::deploy_agent(&client, pod_id, &agent_type)
+        .await
+        .map_err(|e| format!("deploy_agent: {}", e))?;
+    Ok(())
 }
 
 // ── Logout ───────────────────────────────────────────────────

@@ -8,6 +8,11 @@ Two binaries: `tytus` (the CLI) and `tytus-mcp` (a stdio MCP server).
 > **For AI agents driving Tytus:** run `tytus llm-docs` for the full
 > structured reference. This file is just for engineers working ON the CLI.
 
+> **In-flight architectural work:** `dev/` holds audits, design docs,
+> and sprint plans for the next Tytus evolution. Start at
+> [`dev/README.md`](dev/README.md). Completed sprints and reference
+> material still live in `docs/`.
+
 ## Architecture
 
 ```

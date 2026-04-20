@@ -5,6 +5,92 @@ All notable changes to the `tytus` CLI, `tytus-mcp` server, and
 conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
 bumps are allowed to break compat.
 
+## [Unreleased] — v0.5.2-alpha
+
+Unblock OpenClaw's existing channel extensions (Telegram, Discord,
+Slack Socket Mode, LINE). Two layers: infrastructure change so pods
+can actually reach chat APIs, CLI change so users can configure
+credentials without a browser UI.
+
+### Added
+
+- **`tytus channels` subcommand** — `add` / `list` / `remove` / `catalog`.
+  Stores chat-channel credentials in the OS keychain, writes the
+  per-pod view to `/app/workspace/.tytus/channels.json` via `tytus
+  exec`, redeploys the agent container via DAM so the channel
+  extension picks up the env vars at startup. Supports Telegram,
+  Discord, Slack (Socket Mode), and LINE at launch. Adding more is a
+  ~3-line change to `cli/src/channels.rs`.
+- **`cli/src/channels.rs`** — static registry of known channels with
+  their required env-var mappings, derived from each OpenClaw
+  extension's `openclaw.plugin.json` → `channelEnvVars`.
+- **`cli/src/channels_store.rs`** — keychain-backed secret storage +
+  local manifest at `~/.tytus/channels.json` that tracks which
+  channels are configured per pod.
+- **DAM channel merging** — `agent_manager/app.py:agent_deploy`
+  reads `state_dir/.tytus/channels.json` on every container deploy
+  and merges credentials into the container's env. Non-fatal on
+  missing/invalid files; only accepts `UPPER_SNAKE_CASE=string`
+  entries. Schema is versioned (`"version": 1`) for future additions.
+- **Pod-egress bridge** — sidecars now attach to a Docker bridge
+  network (`pod-egress`, 172.30.0.0/16) in addition to WireGuard, so
+  the OpenClaw/Hermes extensions can reach external chat APIs. No
+  published ports → no inbound internet exposure. Cross-pod traffic
+  still blocked at the host iptables FORWARD chain; metadata endpoint
+  (169.254.169.254) still blocked; outbound allowlist enforced via
+  new DOCKER-USER rules.
+- **`scripts/e2e-channels.sh`** — 8-flow harness (3 static, 5 live).
+  Static flows: binary surface, catalog contents, JSON output shape.
+  Live flows (opt-in via `E2E_TELEGRAM_BOT_TOKEN`): add → channels.json
+  on pod → container env → api.telegram.org reachable → remove.
+
+### Changed
+
+- **`services/wannolot-infrastructure/docker-compose.pod.j2`** —
+  sidecars no longer `network_mode: none`. They now join the
+  `pod-egress` bridge network so the pod container (which shares the
+  sidecar's netns via `network_mode=container:...`) inherits a default
+  route to the internet via Docker's NAT.
+- **`services/wannolot-infrastructure/user-data.strato-eu-001.yml`**
+  adds DOCKER-USER iptables rules scoped to `172.30.0.0/16`:
+  allowlist TCP/443, UDP/53, TCP/53; block metadata + cross-bridge;
+  deny everything else.
+
+### Why
+
+OpenClaw already ships first-class chat channel extensions for 20+
+chat apps (Telegram, Discord, Slack, Signal, WhatsApp, iMessage,
+Line, Matrix, Teams, Feishu, GoogleChat, etc.). They were
+unreachable from Tytus pods because:
+(a) pods had no internet egress (iptables DROP catch-all +
+`network_mode: none` on the sidecar — no default route), and
+(b) users had no way to configure bot tokens without the slow
+browser UI tunnel.
+This release fixes both at the smallest possible surface area: one
+iptables chain + one bridge network + one CLI subcommand. No new
+services, no new auth model, no broker. The deferred "TML messaging
+layer" direction from earlier design drafts is correctly rejected
+— see `dev/design/2026-04-20-unblock-openclaw-channels.md` for the
+full reasoning.
+
+### Deploy notes (not automatic)
+
+The infrastructure change requires redeploying the sidecar containers
+on each droplet:
+
+1. Pull latest `wannolot-infrastructure` on the droplet
+2. `cd /opt/wannolot-infrastructure && bootstrap/02-render-compose.sh`
+3. `docker compose -f docker-compose.pod.yml down && docker compose -f docker-compose.pod.yml up -d`
+4. Re-apply iptables (either reboot or re-run the egress-filter block
+   from `user-data.strato-eu-001.yml`)
+5. DAM gets the `channels.json` reader via a normal pull + restart of
+   its container on the droplet
+
+Until these steps run, `tytus channels add` will write keychain +
+push to the pod, but the agent container will come up without the
+new env vars (the channel extension will log "missing
+TELEGRAM_BOT_TOKEN" and no-op).
+
 ## [Unreleased] — v0.5.1-alpha
 
 Production-hardening pass against the class of bugs that shipped the
