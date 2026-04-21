@@ -296,6 +296,24 @@ tytus test                         End-to-end health: auth, pod, tunnel,
                                    gateway, sample chat. Print "Everything
                                    is working!" on success.
 
+tytus capabilities [--pod NN]      Discover the pod gateway's model
+                                   catalog + provider-native tools (e.g.
+                                   MiniMax M2.7's autonomous web_search).
+                                   Reads GET /v1/models using the same
+                                   stable endpoint/key pair `tytus env`
+                                   emits, so it works over the WG tunnel
+                                   OR the public-edge path.
+                                   Default output: human tree showing
+                                   `id`, upstream name, context window,
+                                   and a ↳ native: <type> — <description>
+                                   subtree per provider-native tool.
+                                   --json (global): passthrough the raw
+                                   /v1/models body verbatim — use this
+                                   when an AI agent wants to splice
+                                   discovered native_tools entries into
+                                   its own tools[] at chat-completion
+                                   time.
+
 tytus chat [--model ail-compound]  Interactive REPL against the pod gateway.
 
 tytus exec [--pod NN] [--timeout N] "<command>"

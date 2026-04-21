@@ -219,6 +219,19 @@ enum Commands {
     },
     /// Print the full LLM-facing reference (for AI agents driving tytus-cli)
     LlmDocs,
+    /// Discover the pod's AI gateway catalog — models + provider-native
+    /// tools (e.g. MiniMax M2.7's autonomous web_search). One call covers
+    /// every model the pod exposes via `/v1/models`.
+    ///
+    /// Default output is a human tree; `--json` (global flag) passes the
+    /// gateway's raw response through verbatim so scripts and other AI
+    /// CLIs can parse it. Useful for AI agents that want to discover the
+    /// exact native-tool surface they can splice into their caller tools[].
+    Capabilities {
+        /// Pod ID (defaults to first connected pod).
+        #[arg(short, long)]
+        pod: Option<String>,
+    },
     /// Print a short setup prompt you can paste into any AI tool (Claude Code,
     /// OpenCode, Cursor, etc.) to teach it how to drive Tytus natively.
     BootstrapPrompt,
@@ -496,6 +509,7 @@ async fn main() {
         Some(Commands::Logout) => cmd_logout(&http, cli.json).await,
         Some(Commands::Env { pod, export, raw, tunnel }) => cmd_env(pod, export, raw, tunnel, cli.json, &http).await,
         Some(Commands::LlmDocs) => { print!("{}", LLM_DOCS); }
+        Some(Commands::Capabilities { pod }) => cmd_capabilities(&http, pod, cli.json).await,
         Some(Commands::BootstrapPrompt) => { print!("{}", BOOTSTRAP_PROMPT); }
         Some(Commands::TunnelDown { pid }) => cmd_tunnel_down(pid),
         Some(Commands::Link { dir, only }) => cmd_link(&dir, only, cli.json),
@@ -3034,6 +3048,278 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, tunnel: bool, 
         println!("{}TYTUS_AGENT_TYPE={}", prefix, at);
     }
     println!("{}TYTUS_POD_ID={}", prefix, pod.pod_id);
+}
+
+// ── Capabilities (discover /v1/models) ──────────────────────
+
+/// Render the pod's AI gateway model catalog + per-model provider-native
+/// tools. Human tree by default; raw JSON passthrough when `json` is set.
+/// Resolves the endpoint/key pair the same way `tytus env` does, so
+/// everything works through the WG tunnel or the public-edge path.
+async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>, json: bool) {
+    let mut state = CliState::load();
+
+    let pod_idx = if let Some(ref pid) = pod_id {
+        state.pods.iter().position(|p| p.pod_id == *pid)
+    } else {
+        state.pods.iter().position(|p| p.tunnel_iface.is_some())
+            .or(if state.pods.is_empty() { None } else { Some(0) })
+    };
+    let Some(idx) = pod_idx else {
+        if json { println!(r#"{{"error":"no_pods"}}"#); }
+        else { eprintln!("No pods. Run: tytus connect"); }
+        std::process::exit(1);
+    };
+
+    // Lazily hydrate stable_user_key + edge_public_url from Provider if
+    // we've never cached them — same conditional refresh cmd_env uses so
+    // the two commands agree on the endpoint/key pair every time.
+    let needs_refresh = state.pods[idx].stable_user_key.is_none()
+        || state.pods[idx].edge_public_url.is_none();
+    if needs_refresh {
+        if let (Some(st), Some(aid)) = (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
+            let client = atomek_pods::TytusClient::new(http, st, aid);
+            if let Ok(uk) = atomek_pods::get_user_key_full(&client).await {
+                if let Some(p) = state.pods.get_mut(idx) {
+                    p.stable_ai_endpoint = Some(uk.endpoint);
+                    p.stable_user_key = Some(uk.key);
+                    if let Some(s) = uk.slug { p.edge_slug = Some(s); }
+                    if let Some(u) = uk.public_url { p.edge_public_url = Some(u); }
+                }
+                state.save();
+            }
+        }
+    }
+
+    let pod = &state.pods[idx];
+
+    // Prefer the public-edge URL when available — matches `tytus env`'s
+    // default. Falls back to the WG tunnel endpoint otherwise. The edge
+    // URL works from any network, no tunnel required, so `tytus
+    // capabilities` is usable in CI/sandbox contexts where the user
+    // hasn't brought the tunnel up.
+    let wg_endpoint = pod.stable_ai_endpoint.as_deref()
+        .unwrap_or("http://10.42.42.1:18080")
+        .to_string();
+    let endpoint = if let Some(ref public) = pod.edge_public_url {
+        format!("{}/p/{}", public.trim_end_matches('/'), pod.pod_id)
+    } else {
+        wg_endpoint
+    };
+    let key = pod.stable_user_key.as_deref()
+        .or(pod.pod_api_key.as_deref())
+        .unwrap_or("");
+
+    if key.is_empty() {
+        if json { println!(r#"{{"error":"no_api_key"}}"#); }
+        else { eprintln!("No API key cached for pod {}. Run: tytus env --pod {}", pod.pod_id, pod.pod_id); }
+        std::process::exit(1);
+    }
+
+    let url = format!("{}/v1/models", endpoint);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            if json { println!(r#"{{"error":"http_client_build: {}"}}"#, e); }
+            else { eprintln!("Failed to build HTTP client: {}", e); }
+            std::process::exit(1);
+        }
+    };
+
+    let resp = match client.get(&url)
+        .header("Authorization", format!("Bearer {}", key))
+        .send().await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if json { println!(r#"{{"error":"network: {}"}}"#, e); }
+            else { eprintln!("Network error reaching {}: {}", url, e); }
+            std::process::exit(1);
+        }
+    };
+
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        if json {
+            println!(r#"{{"error":"http_{}","body":{}}}"#, status.as_u16(), serde_json::to_string(&body_text).unwrap_or_else(|_| "\"\"".into()));
+        } else {
+            eprintln!("Gateway returned HTTP {} from {}:", status, url);
+            eprintln!("{}", body_text);
+        }
+        std::process::exit(1);
+    }
+
+    // --json: passthrough the raw /v1/models body, verbatim. Keeps the
+    // shape byte-identical with what a direct curl would see, so AI
+    // agents don't have to guess at a wrapper schema.
+    if json {
+        print!("{}", body_text);
+        return;
+    }
+
+    // Human tree view. Parse as loose serde_json::Value so unknown
+    // fields (from future switchailocal versions) don't break rendering.
+    let v: serde_json::Value = match serde_json::from_str(&body_text) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Gateway returned unparseable JSON: {}", e);
+            eprintln!("{}", body_text);
+            std::process::exit(1);
+        }
+    };
+
+    let tier = state.tier.as_deref().unwrap_or("unknown");
+    let agent = pod.agent_type.as_deref().unwrap_or("none");
+    print!("{}", render_capabilities_tree(&pod.pod_id, agent, tier, &v));
+}
+
+/// Pure formatter for `tytus capabilities` tree output. Takes the gateway's
+/// parsed `/v1/models` body and emits a newline-terminated human rendering.
+/// Extracted from `cmd_capabilities` so unit tests can pin the output
+/// shape without standing up a live gateway. Tolerates missing / partial
+/// fields so future switchailocal shape additions don't crash the CLI.
+fn render_capabilities_tree(pod_id: &str, agent: &str, tier: &str, v: &serde_json::Value) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Pod {} ({}, {} plan)\n", pod_id, agent, tier));
+
+    let empty = Vec::new();
+    let data = v.get("data").and_then(|d| d.as_array()).unwrap_or(&empty);
+    if data.is_empty() {
+        out.push_str("  (gateway returned an empty model list)\n");
+        return out;
+    }
+
+    // Compute the width of the longest ID so the second column aligns
+    // cleanly without pulling in a table-printer dependency.
+    let id_width = data.iter()
+        .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(12);
+
+    for model in data {
+        let id = model.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+        let owned = model.get("owned_by").and_then(|o| o.as_str()).unwrap_or("");
+        let display = model.get("display_name").and_then(|d| d.as_str()).unwrap_or("");
+        let ctx = model.get("context_length").and_then(|c| c.as_i64());
+
+        // Right side: "<owner> <display>" plus context-window tag when
+        // the gateway advertises one. Keeps each row scannable at a glance.
+        let mut right = String::new();
+        if !display.is_empty() && display != id {
+            right.push_str(display);
+        } else if !owned.is_empty() {
+            right.push_str(owned);
+        }
+        if let Some(n) = ctx {
+            if n > 0 {
+                if !right.is_empty() { right.push_str(", "); }
+                if n >= 1000 { right.push_str(&format!("{}k ctx", n / 1000)); }
+                else { right.push_str(&format!("{} ctx", n)); }
+            }
+        }
+
+        out.push_str(&format!("  {:<width$}  {}\n", id, right, width = id_width));
+
+        // Native tools subtree. Only render when non-empty — matches the
+        // gateway's key-presence convention (empty / missing means the
+        // model has no provider-native tools to splice into tools[]).
+        if let Some(nt) = model.get("native_tools").and_then(|n| n.as_array()) {
+            for tool in nt {
+                let ttype = tool.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                let tdesc = tool.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                if tdesc.is_empty() {
+                    out.push_str(&format!("  {:<width$}    ↳ native: {}\n", "", ttype, width = id_width));
+                } else {
+                    // Truncate long descriptions to keep the tree compact.
+                    // Agents who need the full text should use `--json`.
+                    let short = if tdesc.chars().count() > 80 {
+                        let t: String = tdesc.chars().take(77).collect();
+                        format!("{}…", t)
+                    } else {
+                        tdesc.to_string()
+                    };
+                    out.push_str(&format!("  {:<width$}    ↳ native: {} — {}\n", "", ttype, short, width = id_width));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod capabilities_tests {
+    use super::render_capabilities_tree;
+    use serde_json::json;
+
+    /// Snapshot the tree rendering for a realistic /v1/models body so a
+    /// future shape regression (e.g. native_tools disappearing or a new
+    /// top-level field silently shadowing the ID column) trips this test.
+    #[test]
+    fn renders_tree_with_native_tools() {
+        let body = json!({
+            "object": "list",
+            "data": [
+                {
+                    "id": "ail-compound",
+                    "object": "model",
+                    "owned_by": "minimax",
+                    "context_length": 200000,
+                    "native_tools": [
+                        {
+                            "type": "web_search",
+                            "description": "MiniMax native web search"
+                        }
+                    ]
+                },
+                {
+                    "id": "ail-image",
+                    "object": "model",
+                    "owned_by": "minimax"
+                }
+            ]
+        });
+        let out = render_capabilities_tree("02", "nemoclaw", "operator", &body);
+        assert!(out.contains("Pod 02 (nemoclaw, operator plan)"), "header missing:\n{}", out);
+        assert!(out.contains("ail-compound"), "ail-compound row missing:\n{}", out);
+        assert!(out.contains("200k ctx"), "context-window tag missing:\n{}", out);
+        assert!(out.contains("↳ native: web_search"), "native_tools subtree missing:\n{}", out);
+        assert!(out.contains("MiniMax native web search"), "description missing:\n{}", out);
+        // Model without native_tools should NOT emit a native-tools subtree.
+        assert!(!out.lines().any(|l| l.contains("ail-image") && l.contains("↳ native")),
+                "ail-image should not have native subtree:\n{}", out);
+    }
+
+    /// Pin the empty-data behavior: a gateway that returns `{data: []}`
+    /// gets a clear "no models" message rather than a blank render.
+    #[test]
+    fn renders_empty_catalog_friendly() {
+        let body = json!({"object": "list", "data": []});
+        let out = render_capabilities_tree("02", "nemoclaw", "operator", &body);
+        assert!(out.contains("empty model list"), "empty-catalog message missing:\n{}", out);
+    }
+
+    /// Pin that long descriptions truncate so the tree stays scannable.
+    /// Callers who need the full text should use `--json`.
+    #[test]
+    fn truncates_long_descriptions() {
+        let long = "a".repeat(200);
+        let body = json!({
+            "data": [{
+                "id": "x",
+                "owned_by": "y",
+                "native_tools": [{"type": "t", "description": long.clone()}]
+            }]
+        });
+        let out = render_capabilities_tree("02", "nemoclaw", "operator", &body);
+        assert!(out.contains("…"), "truncation ellipsis missing:\n{}", out);
+        assert!(!out.contains(&long), "full long description should not appear:\n{}", out);
+    }
 }
 
 // ── Infect (drop integration files) ─────────────────────────
