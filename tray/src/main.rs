@@ -993,40 +993,30 @@ fn build_menu(state: &TrayState) -> Menu {
                     format!("pod_header_{}", p.pod_id),
                     &header, false, None,
                 ));
-                // Open the agent's web UI in the browser.
+                // Open the agent's web UI (OpenClaw control panel) in the
+                // browser. The web UI lives behind the pod's gateway-token
+                // auth, NOT the user's `sk-tytus-user-*` Bearer:
                 //
-                // Phase 4 cutover: when the pod has a public-edge URL we
-                // open it DIRECTLY — no localhost forwarder, no tunnel
-                // requirement, no Touch ID. One click = one HTTPS GET.
+                //   localhost:NNNN/?token=<gateway_token>      — works
+                //   https://<slug>.tytus.../p/NN/?token=...    — 401 from edge
+                //                                                (browsers can't
+                //                                                send a Bearer
+                //                                                header from a
+                //                                                URL click; edge
+                //                                                requires it)
                 //
-                // When the user explicitly wants the legacy WG path
-                // (network blocks outbound HTTPS, deeper privacy, etc),
-                // they can fall back to "Open via Tunnel ▸" which still
-                // spins the localhost forwarder and routes via WireGuard.
-                let public_pod_url = p.public_pod_url();
+                // So the browser flow MUST go through the localhost
+                // forwarder + WG tunnel. The edge URL is the right answer
+                // for API clients (Cursor, OpenAI SDK, curl) but not for
+                // the human-facing UI. We surface both:
+                //
+                //   "Open in Browser"  → forwarder (web UI, the common case)
+                //   "Copy Public API URL" → public edge URL to clipboard
+                //                            (for API client config)
                 let forwarder_live = existing_ui_forwarder(&p.pod_id).is_some();
                 let tunnel_live = tunnel_reaches_pod(&p.pod_id);
 
-                if public_pod_url.is_some() {
-                    // Edge path is live — single, fast action.
-                    let _ = pods_sub.append(&MenuItem::with_id(
-                        format!("pod_{}_open", p.pod_id),
-                        "  Open in Browser", true, None,
-                    ));
-                    // Optional fallback for users who want the tunnel.
-                    let tunnel_label = match (forwarder_live, tunnel_live) {
-                        (true, _)      => "  Open via Tunnel  ✓",
-                        (false, true)  => "  Open via Tunnel",
-                        (false, false) => "  Connect & Open via Tunnel",
-                    };
-                    let _ = pods_sub.append(&MenuItem::with_id(
-                        format!("pod_{}_open_tunnel", p.pod_id),
-                        tunnel_label, true, None,
-                    ));
-                } else {
-                    // No public URL yet (provider hasn't refreshed user-key,
-                    // or EDGE_PATH_ENABLED=0) — keep the legacy 3-state
-                    // tunnel-only label. B1 ground-truth labelling.
+                {
                     let open_label = match (forwarder_live, tunnel_live) {
                         (true, _)      => "  Open in Browser  ✓",
                         (false, true)  => "  Open in Browser",
@@ -1041,6 +1031,16 @@ fn build_menu(state: &TrayState) -> Menu {
                     let _ = pods_sub.append(&MenuItem::with_id(
                         format!("pod_{}_stop_forwarder", p.pod_id),
                         "  Stop Forwarder", true, None,
+                    ));
+                }
+                // Public API URL — for API clients (Cursor, Claude Desktop,
+                // OpenAI SDK, curl). Disabled when no edge URL yet
+                // (provider hasn't refreshed user-key, or EDGE_PATH_ENABLED=0).
+                let public_pod_url = p.public_pod_url();
+                if public_pod_url.is_some() {
+                    let _ = pods_sub.append(&MenuItem::with_id(
+                        format!("pod_{}_copy_url", p.pod_id),
+                        "  Copy Public API URL", true, None,
                     ));
                 }
                 let _ = pods_sub.append(&MenuItem::with_id(
@@ -1550,35 +1550,35 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // browser. The forwarder is stopped explicitly via the per-pod
         // "Stop Forwarder" menu item (or `tytus ui --stop --pod N`),
         // NOT by closing a Terminal that no longer exists.
-        other if other.starts_with("pod_") && other.ends_with("_open_tunnel") => {
-            // Explicit "Open via Tunnel" — keeps the legacy forwarder path
-            // available even when public_url is set. Same code as the old
-            // _open handler.
-            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open_tunnel").to_string();
+        other if other.starts_with("pod_") && other.ends_with("_open") => {
+            // The OpenClaw web UI auths via the gateway-token query param,
+            // not the user's `sk-tytus-user-*` Bearer. Browsers can't send
+            // a Bearer header from a URL click, so the public-edge URL
+            // 401s in this flow. We always use the localhost forwarder
+            // (which DOES carry the gateway token) for the web UI.
+            // The public URL is for API clients — surfaced separately
+            // via "Copy Public API URL".
+            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open").to_string();
             open_pod_via_forwarder(&pod_id);
         }
-        other if other.starts_with("pod_") && other.ends_with("_open") => {
-            // Phase 4: prefer the public-edge URL when populated. Single
-            // GET to https://<slug>.tytus.traylinx.com/p/<NN>/ — no
-            // forwarder, no tunnel, no Touch ID dialog.
-            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open").to_string();
-            let public_url = {
+        other if other.starts_with("pod_") && other.ends_with("_copy_url") => {
+            // Copy the per-pod public API URL to clipboard for paste into
+            // OpenAI-shaped client config (Cursor / Claude Desktop / SDKs).
+            // Includes the trailing `/v1` so it's a drop-in OPENAI_BASE_URL.
+            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_copy_url").to_string();
+            let url = {
                 let s = state.lock().unwrap();
                 s.pods.iter()
                     .find(|p| p.pod_id == pod_id)
                     .and_then(|p| p.public_pod_url())
             };
-            match public_url {
-                Some(url) => {
-                    // Append `/` so the pod gateway routes to its index
-                    // (most agents redirect / → /agent/dashboard etc).
-                    let target = format!("{}/", url);
-                    let _ = std::process::Command::new("open").arg(&target).spawn();
+            match url {
+                Some(u) => {
+                    let api_url = format!("{}/v1", u);
+                    copy_to_clipboard(&api_url);
+                    notify("Tytus", &format!("Copied: {}", api_url));
                 }
-                None => {
-                    // No edge URL — fall back to the legacy forwarder path.
-                    open_pod_via_forwarder(&pod_id);
-                }
+                None => notify("Tytus", "No public URL yet — refresh state with `tytus env`."),
             }
         }
         // Stop the per-pod forwarder daemon.
