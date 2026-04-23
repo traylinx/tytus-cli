@@ -717,6 +717,7 @@ async fn ensure_default_pod(state: &mut CliState, http: &atomek_core::HttpClient
                 gateway_token: None,
                 edge_slug: None,
                 edge_public_url: None,
+                pod_public_url: alloc.pod_public_url.clone(),
             });
             // Message verbatim per sprint doc §6 A6 acceptance criterion.
             // The stable endpoint at 10.42.42.1:18080 is reachable once the
@@ -883,8 +884,9 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
                     stable_ai_endpoint: a.stable_ai_endpoint.clone(),
                     stable_user_key: a.stable_user_key.clone(),
                     gateway_token: None,
-                edge_slug: None,
-                edge_public_url: None,
+                    edge_slug: None,
+                    edge_public_url: None,
+                    pod_public_url: a.pod_public_url.clone(),
                 });
                 state.save();
                 if !json { eprintln!("✓ Default pod {} allocated", a.pod_id); }
@@ -1807,8 +1809,9 @@ async fn cmd_agent_install(
                         stable_ai_endpoint: a.stable_ai_endpoint.clone(),
                         stable_user_key: a.stable_user_key.clone(),
                         gateway_token: None,
-                edge_slug: None,
-                edge_public_url: None,
+                        edge_slug: None,
+                        edge_public_url: None,
+                        pod_public_url: a.pod_public_url.clone(),
                     });
                     state.save();
                     if json {
@@ -2964,16 +2967,20 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, tunnel: bool, 
     // EDGE_PATH_ENABLED=1, so one call covers both paths.
     if !raw {
         let needs_refresh = state.pods[idx].stable_user_key.is_none()
-            || state.pods[idx].edge_public_url.is_none();
+            || state.pods[idx].edge_public_url.is_none()
+            || state.pods[idx].pod_public_url.is_none();
         if needs_refresh {
             if let (Some(st), Some(aid)) = (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
                 let client = atomek_pods::TytusClient::new(http, st, aid);
                 if let Ok(uk) = atomek_pods::get_user_key_full(&client).await {
+                    let pod_id_for_template = state.pods[idx].pod_id.clone();
+                    let composed = uk.compose_pod_public_url(&pod_id_for_template);
                     if let Some(p) = state.pods.get_mut(idx) {
                         p.stable_ai_endpoint = Some(uk.endpoint);
                         p.stable_user_key = Some(uk.key);
                         if let Some(s) = uk.slug { p.edge_slug = Some(s); }
                         if let Some(u) = uk.public_url { p.edge_public_url = Some(u); }
+                        if let Some(u) = composed { p.pod_public_url = Some(u); }
                     }
                     state.save();
                 }
@@ -3026,7 +3033,12 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, tunnel: bool, 
             .to_string();
         let endpoint = if tunnel {
             wg_endpoint.clone()
+        } else if let Some(ref pod_url) = pod.pod_public_url {
+            // Per-pod subdomain (sprint 2026-04-23) — preferred.
+            pod_url.trim_end_matches('/').to_string()
         } else if let Some(ref public) = pod.edge_public_url {
+            // Legacy `{slug}.{base}/p/{NN}` composition — kept as
+            // back-compat for state.json entries written before the sprint.
             format!("{}/p/{}", public.trim_end_matches('/'), pod.pod_id)
         } else {
             wg_endpoint.clone()
@@ -3075,16 +3087,20 @@ async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>
     // we've never cached them — same conditional refresh cmd_env uses so
     // the two commands agree on the endpoint/key pair every time.
     let needs_refresh = state.pods[idx].stable_user_key.is_none()
-        || state.pods[idx].edge_public_url.is_none();
+        || state.pods[idx].edge_public_url.is_none()
+        || state.pods[idx].pod_public_url.is_none();
     if needs_refresh {
         if let (Some(st), Some(aid)) = (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
             let client = atomek_pods::TytusClient::new(http, st, aid);
             if let Ok(uk) = atomek_pods::get_user_key_full(&client).await {
+                let pod_id_for_template = state.pods[idx].pod_id.clone();
+                let composed = uk.compose_pod_public_url(&pod_id_for_template);
                 if let Some(p) = state.pods.get_mut(idx) {
                     p.stable_ai_endpoint = Some(uk.endpoint);
                     p.stable_user_key = Some(uk.key);
                     if let Some(s) = uk.slug { p.edge_slug = Some(s); }
                     if let Some(u) = uk.public_url { p.edge_public_url = Some(u); }
+                    if let Some(u) = composed { p.pod_public_url = Some(u); }
                 }
                 state.save();
             }
@@ -3101,7 +3117,9 @@ async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>
     let wg_endpoint = pod.stable_ai_endpoint.as_deref()
         .unwrap_or("http://10.42.42.1:18080")
         .to_string();
-    let endpoint = if let Some(ref public) = pod.edge_public_url {
+    let endpoint = if let Some(ref pod_url) = pod.pod_public_url {
+        pod_url.trim_end_matches('/').to_string()
+    } else if let Some(ref public) = pod.edge_public_url {
         format!("{}/p/{}", public.trim_end_matches('/'), pod.pod_id)
     } else {
         wg_endpoint
@@ -7278,8 +7296,9 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
                         stable_ai_endpoint: None,
                         stable_user_key: None,
                         gateway_token: None,
-                edge_slug: None,
-                edge_public_url: None,
+                        edge_slug: None,
+                        edge_public_url: None,
+                        pod_public_url: None,
                     });
                 }
             }

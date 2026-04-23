@@ -23,6 +23,13 @@ pub struct PodAllocation {
     // is a per-user stable token maintained by the droplet's nginx map.
     pub stable_ai_endpoint: Option<String>,
     pub stable_user_key: Option<String>,
+    /// Per-pod subdomain URL for this specific pod — `https://{slug}-p{NN}.{base}`.
+    /// Populated by Scalesys + passed through Provider when `EDGE_PATH_ENABLED=1`.
+    /// Null when the edge surface is off or Scalesys is pre-sprint (CLI falls
+    /// back to composing off slug + the legacy `/p/NN/` path).
+    /// Sprint: dev/sprints/2026-04-23-per-pod-subdomain.md
+    #[serde(default)]
+    pub pod_public_url: Option<String>,
 }
 
 pub async fn request_pod(client: &TytusClient) -> atomek_core::Result<PodAllocation> {

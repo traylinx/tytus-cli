@@ -22,6 +22,133 @@ use super::PodInfo;
 
 const SOCKET_PATH: &str = "/tmp/tytus/daemon.sock";
 
+/// Derive the per-pod gateway auth token — the same sha256 the edge
+/// plugin + openclaw startup use — so the tray menu and the install
+/// wizard agree on a working `?token=` even when state.json hasn't
+/// been backfilled yet. Without this, a freshly-installed pod shows
+/// "Connect  Open in Browser" (tunnel fallback) in the tray menu
+/// because `public_ui_url()` bails on the null token, even though
+/// the public edge path would work fine. Invariant-preserving: we
+/// only derive when the CLI / daemon didn't already provide one.
+fn derive_gateway_token(pod_api_key: &str, pod_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(pod_api_key.as_bytes());
+    h.update(pod_id.as_bytes());
+    hex::encode(&h.finalize()[..24])
+}
+
+/// Build a PodInfo from the raw JSON Provider/daemon/state returned
+/// us, applying the two "the CLI forgot to populate this" fixes:
+///   1. Slug inheritance — borrow another pod's `edge_public_url`
+///      when this pod's is null (all a user's pods share one slug).
+///   2. Gateway-token derivation — compute from pod_api_key when the
+///      stored gateway_token is null. Deterministic formula.
+///
+/// `shared_base` is the first non-empty `edge_public_url` found across
+/// the caller's pod set. `api_keys_by_pod` is a pod_id → pod_api_key
+/// map supplied by the caller (typically built from state.json, which
+/// always has the raw pod key — the daemon's JSON response REDACTS
+/// pod_api_key as a secrets-hygiene measure, so derivation would
+/// otherwise fail when the tray was reading from the live daemon).
+fn build_pod_info(
+    p: &serde_json::Value,
+    shared_base: Option<&str>,
+    api_keys_by_pod: &std::collections::HashMap<String, String>,
+) -> PodInfo {
+    let pod_id = p.get("pod_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let stored_edge = p.get("edge_public_url")
+        .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let edge_public_url = stored_edge.or_else(|| shared_base.map(|s| s.to_string()));
+    let stored_token = p.get("gateway_token")
+        .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    // Try pod_api_key inline first (state.json path), then fall back
+    // to the state-loaded map (daemon-socket path where the key got
+    // stripped). Either way derivation is sha256(pod_api_key||pod_id).
+    let pod_api_key: Option<String> = p.get("pod_api_key")
+        .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| api_keys_by_pod.get(&pod_id).cloned());
+    let derived_token = pod_api_key.as_ref()
+        .map(|k| derive_gateway_token(k, &pod_id));
+    let gateway_token = stored_token.or(derived_token);
+
+    let pod_public_url = p.get("pod_public_url")
+        .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    PodInfo {
+        pod_id,
+        agent_type: p.get("agent_type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        tunnel_active: p.get("tunnel_iface").and_then(|v| v.as_str()).is_some(),
+        stable_ai_endpoint: p.get("stable_ai_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        stable_user_key: p.get("stable_user_key").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        edge_public_url,
+        gateway_token,
+        pod_public_url,
+    }
+}
+
+/// Build the pod_id → pod_api_key map from state.json. Cheap (a few
+/// KB file read + JSON parse) and called only when a pod info
+/// construction path needs to supply pod_api_key for derivation —
+/// which is every tray poll, ~every 2 s. Fails silently to empty map
+/// so `build_pod_info` just skips derivation when we can't read.
+fn load_api_keys_from_state() -> std::collections::HashMap<String, String> {
+    let path = state_file_path();
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Default::default(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Default::default(),
+    };
+    let mut m = std::collections::HashMap::new();
+    if let Some(arr) = v.get("pods").and_then(|x| x.as_array()) {
+        for p in arr {
+            let id = p.get("pod_id").and_then(|v| v.as_str()).unwrap_or("");
+            let key = p.get("pod_api_key").and_then(|v| v.as_str()).unwrap_or("");
+            if !id.is_empty() && !key.is_empty() {
+                m.insert(id.to_string(), key.to_string());
+            }
+        }
+    }
+    m
+}
+
+/// Companion for the "daemon gave us null edge URLs but state.json
+/// has a good one" case — returns the first non-empty
+/// `edge_public_url` from state.json. Same formula, different data
+/// source.
+fn load_shared_base_from_state() -> Option<String> {
+    let path = state_file_path();
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("pods").and_then(|x| x.as_array()).and_then(|arr| {
+        arr.iter().find_map(|p| {
+            p.get("edge_public_url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+    })
+}
+
+/// Find the first non-empty edge_public_url in a pod array. Used as
+/// the "shared base URL" for slug inheritance — all a user's pods
+/// share the same `<slug>.tytus.traylinx.com`.
+fn shared_edge_base(pods: &[serde_json::Value]) -> Option<String> {
+    pods.iter().find_map(|p| {
+        p.get("edge_public_url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    })
+}
+
 /// Build a full TrayState. Merges daemon response (if any), state.json
 /// (if present), and a live gateway reachability probe.
 pub fn poll_daemon_status() -> super::TrayState {
@@ -133,14 +260,17 @@ fn daemon_status() -> Option<DaemonSnap> {
     let daemon = data.get("daemon").cloned().unwrap_or_default();
     let auth = data.get("auth").cloned().unwrap_or_default();
     let pods_json = data.get("pods").and_then(|p| p.as_array()).cloned().unwrap_or_default();
-    let pods = pods_json.iter().map(|p| PodInfo {
-        pod_id: p.get("pod_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        agent_type: p.get("agent_type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        tunnel_active: p.get("tunnel_iface").and_then(|v| v.as_str()).is_some(),
-        stable_ai_endpoint: p.get("stable_ai_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        stable_user_key: p.get("stable_user_key").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        edge_public_url: p.get("edge_public_url").and_then(|v| v.as_str()).map(|s| s.to_string()),
-    }).collect();
+    // Daemon strips pod_api_key from its status response — pull it
+    // from state.json so gateway_token derivation has something to
+    // hash. Also fold state.json's edge URLs into shared_base since
+    // the daemon path sometimes carries null edge URLs for pods that
+    // state.json DOES have backfilled.
+    let api_keys = load_api_keys_from_state();
+    let shared_base = shared_edge_base(&pods_json)
+        .or_else(load_shared_base_from_state);
+    let pods = pods_json.iter()
+        .map(|p| build_pod_info(p, shared_base.as_deref(), &api_keys))
+        .collect();
     Some(DaemonSnap {
         daemon_pid: daemon.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
         uptime_secs: daemon.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -208,14 +338,18 @@ fn read_state_file() -> Option<FileSnap> {
     };
 
     let pods_json = v.get("pods").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-    let pods = pods_json.iter().map(|p| PodInfo {
-        pod_id: p.get("pod_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        agent_type: p.get("agent_type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        tunnel_active: p.get("tunnel_iface").and_then(|v| v.as_str()).is_some(),
-        stable_ai_endpoint: p.get("stable_ai_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        stable_user_key: p.get("stable_user_key").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        edge_public_url: p.get("edge_public_url").and_then(|v| v.as_str()).map(|s| s.to_string()),
-    }).collect();
+    let shared_base = shared_edge_base(&pods_json);
+    // state.json has pod_api_key inline; caller already provides it.
+    // Still pass a map (likely redundant but harmless) so both code
+    // paths share one builder signature.
+    let api_keys = pods_json.iter().filter_map(|p| {
+        let id = p.get("pod_id").and_then(|v| v.as_str())?;
+        let key = p.get("pod_api_key").and_then(|v| v.as_str())?;
+        if id.is_empty() || key.is_empty() { None } else { Some((id.to_string(), key.to_string())) }
+    }).collect::<std::collections::HashMap<_,_>>();
+    let pods = pods_json.iter()
+        .map(|p| build_pod_info(p, shared_base.as_deref(), &api_keys))
+        .collect();
 
     Some(FileSnap {
         logged_in: has_email,

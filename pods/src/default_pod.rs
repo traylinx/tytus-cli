@@ -25,6 +25,11 @@ pub struct DefaultPodAllocation {
     pub agent_units: Option<u32>,
     pub stable_ai_endpoint: Option<String>,
     pub stable_user_key: Option<String>,
+    /// Per-pod subdomain URL for this pod — `https://{slug}-p{NN}.{base}`.
+    /// See request.rs for the full contract.
+    /// Sprint: dev/sprints/2026-04-23-per-pod-subdomain.md
+    #[serde(default)]
+    pub pod_public_url: Option<String>,
     #[serde(default)]
     pub reused: bool,
 }

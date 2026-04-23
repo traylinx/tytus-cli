@@ -60,6 +60,14 @@ pub struct PodEntry {
     /// Rotated when the agent is reinstalled (old token goes stale).
     #[serde(default)]
     pub gateway_token: Option<String>,
+    /// Per-pod subdomain URL (`https://<slug>-p<NN>.tytus.traylinx.com`).
+    /// Each pod gets its own browser origin so the OpenClaw SPA's
+    /// localStorage / cookies don't collide across pods when the user opens
+    /// multiple pods in one browser. Populated from the allocation response
+    /// (sprint 2026-04-23). When None, callers compose the legacy
+    /// `<edge_public_url>/p/<pod_id>` shape as a fallback.
+    #[serde(default)]
+    pub pod_public_url: Option<String>,
 }
 
 impl CliState {

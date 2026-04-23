@@ -37,6 +37,16 @@ const INSTALL_HTML: &[u8] = include_bytes!("../web/install.html");
 const INSTALL_CSS: &[u8] = include_bytes!("../web/assets/install.css");
 const INSTALL_JS: &[u8] = include_bytes!("../web/assets/install.js");
 
+// ── Icons (lobehub @1.87.0) ───────────────────────────────────
+// Baked into the binary so the CSP can stay 'self'-only and the
+// wizard renders even when the laptop is offline. Mapping:
+//   openclaw.svg → agent id "nemoclaw" (display name is OpenClaw)
+//   hermes.svg   → agent id "hermes"
+//   nvidia.svg   → reserved for future sandbox badge
+const ICON_OPENCLAW: &[u8] = include_bytes!("../web/assets/icons/openclaw.svg");
+const ICON_HERMES: &[u8] = include_bytes!("../web/assets/icons/hermes.svg");
+const ICON_NVIDIA: &[u8] = include_bytes!("../web/assets/icons/nvidia.svg");
+
 // ── Job registry ──────────────────────────────────────────────
 //
 // Each install job is a live subprocess (tytus agent install <type>)
@@ -178,6 +188,15 @@ fn handle(request: Request, registry: Registry) {
         (Method::Get, "/assets/install.js") => {
             serve_bytes(request, INSTALL_JS, "application/javascript; charset=utf-8");
         }
+        (Method::Get, "/assets/icons/openclaw.svg") => {
+            serve_bytes(request, ICON_OPENCLAW, "image/svg+xml");
+        }
+        (Method::Get, "/assets/icons/hermes.svg") => {
+            serve_bytes(request, ICON_HERMES, "image/svg+xml");
+        }
+        (Method::Get, "/assets/icons/nvidia.svg") => {
+            serve_bytes(request, ICON_NVIDIA, "image/svg+xml");
+        }
         (Method::Get, "/api/catalog") => {
             handle_catalog(request, &query);
         }
@@ -196,6 +215,30 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Post, "/api/open-external") => {
             handle_open_external(request, &query);
+        }
+        // Pod actions — mirror the tray-menu-level operations so the
+        // wizard can replicate "Open in Browser", "Restart", and
+        // "Uninstall" without the user leaving the install flow.
+        // Format: /api/pod/<action>?pod=NN (NN validated as ascii digits).
+        (Method::Post, "/api/pod/open") => {
+            handle_pod_open(request, &query);
+        }
+        (Method::Post, "/api/pod/restart") => {
+            handle_pod_restart(request, &query);
+        }
+        (Method::Post, "/api/pod/uninstall") => {
+            handle_pod_uninstall(request, &query);
+        }
+        // Readiness probe for "waiting for your pod to come online"
+        // after install. The wizard polls this every 2s until {ready:true}.
+        (Method::Get, "/api/pod/ready") => {
+            handle_pod_ready(request, &query);
+        }
+        // Revoke a pod — frees its units immediately and wipes the
+        // pod's workspace state. Wizard's "Revoke & try again" button
+        // after an install failure calls this to reset before retry.
+        (Method::Post, "/api/pod/revoke") => {
+            handle_pod_revoke(request, &query);
         }
         _ => {
             let resp = Response::from_string("not found")
@@ -302,9 +345,51 @@ fn handle_install(mut request: Request, registry: &Registry) {
     respond_json(request, 202, &serde_json::json!({ "job_id": job_id }));
 }
 
+/// Resolve the absolute path to the `tytus` binary.
+///
+/// The tray is launched by a LaunchAgent, whose PATH is the kernel-default
+/// `/usr/bin:/bin:/usr/sbin:/sbin` — it does NOT include `~/bin`,
+/// `/usr/local/bin`, `/opt/homebrew/bin`, or `~/.cargo/bin`, so a bare
+/// `Command::new("tytus")` spawns with `os error 2: No such file or
+/// directory` even when the CLI is installed. Terminal-path workflows
+/// dodge this because Terminal.app spawns a login shell that sources
+/// the user's zshrc.
+///
+/// Resolution order:
+///   1. `TYTUS_BIN` env var (escape hatch for unusual installs)
+///   2. `~/bin/tytus` (install.sh default)
+///   3. `/usr/local/bin/tytus`, `/opt/homebrew/bin/tytus`, `~/.cargo/bin/tytus`
+///   4. `tytus-tray`'s own directory (dev builds: cargo run leaves them
+///      side by side in `target/<profile>/`)
+///   5. Fallback to the bare name — caller will surface the spawn error
+fn resolve_tytus_bin() -> PathBuf {
+    if let Ok(p) = std::env::var("TYTUS_BIN") {
+        let pb = PathBuf::from(p);
+        if pb.is_file() { return pb; }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates: Vec<PathBuf> = vec![
+        PathBuf::from(&home).join("bin/tytus"),
+        PathBuf::from("/usr/local/bin/tytus"),
+        PathBuf::from("/opt/homebrew/bin/tytus"),
+        PathBuf::from(&home).join(".cargo/bin/tytus"),
+    ];
+    for c in &candidates {
+        if c.is_file() { return c.clone(); }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("tytus");
+            if sibling.is_file() { return sibling; }
+        }
+    }
+    PathBuf::from("tytus")
+}
+
 fn spawn_install(job: Arc<Mutex<Job>>, agent_type: String, pod_id: Option<String>) {
     thread::spawn(move || {
-        let mut cmd = Command::new("tytus");
+        let bin = resolve_tytus_bin();
+        let mut cmd = Command::new(&bin);
         cmd.arg("agent").arg("install").arg(&agent_type);
         if let Some(ref pid) = pod_id {
             cmd.arg("--pod").arg(pid);
@@ -316,7 +401,14 @@ fn spawn_install(job: Arc<Mutex<Job>>, agent_type: String, pod_id: Option<String
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                push_event(&job, JobEvent::Fail { message: format!("spawn failed: {}", e) });
+                push_event(&job, JobEvent::Fail {
+                    message: format!(
+                        "failed to launch `tytus` at {}: {}. \
+                         If the CLI is installed somewhere else, set TYTUS_BIN \
+                         in the tray's environment.",
+                        bin.display(), e,
+                    ),
+                });
                 return;
             }
         };
@@ -558,14 +650,243 @@ impl Drop for PipeWriter {
 #[derive(Serialize)]
 struct StateSnapshot {
     connected: bool,
+    logged_in: bool,
+    tier: String,
+    units_limit: u32,
+    units_used: u32,
+    agents: Vec<AgentSlot>,
+    /// Pods that are allocated but don't count against the unit
+    /// budget — the default AIL / LLM-gateway pod (`agent_type=none`).
+    /// These are always included with every plan; we surface them in
+    /// the wizard so users can copy their OpenAI-compatible endpoint
+    /// without running `tytus env --export`.
+    included: Vec<IncludedSlot>,
+}
+
+#[derive(Serialize, Clone)]
+struct AgentSlot {
+    pod_id: String,
+    agent_type: String,
+    units: u32,
+    /// Public HTTPS URL of the pod — e.g. `https://<slug>.tytus.traylinx.com/p/02`.
+    /// None when the edge isn't wired up yet (mid-rollout); wizard hides URL row.
+    public_url: Option<String>,
+    /// Full OpenAI-compatible endpoint (`{public_url}/v1`) ready to drop into
+    /// OPENAI_BASE_URL. None when public_url is None.
+    api_url: Option<String>,
+    /// Browser-authenticated UI URL (`{public_url}/?token={gateway_token}`)
+    /// for the OpenClaw web UI. None for agents with no browser UI (Hermes
+    /// dashboard has its own flow) or when tokens are missing.
+    ui_url: Option<String>,
+    /// Stable per-user API key — same across every pod.
+    user_key: String,
+}
+
+#[derive(Serialize, Clone)]
+struct IncludedSlot {
+    pod_id: String,
+    kind: &'static str,        // "ail" for now; future types can reuse
+    endpoint: String,          // stable_ai_endpoint (e.g. http://10.42.42.1:18080)
+    user_key: String,          // stable_user_key (sk-tytus-user-…)
+    /// Public per-pod HTTPS URL (`{edge}/p/01`) — same shape as AgentSlot so
+    /// the wizard can show a "public mirror" URL for the AIL pod too.
+    public_url: Option<String>,
+}
+
+/// Per-plan unit budgets — must match Scalesys `AGENT_UNITS` + the Rails
+/// plan tiering. Keep aligned with `services/wannolot-provider/src/...`
+/// where `nemoclaw=1, hermes=2, none=0` and Explorer=1 / Creator=2 /
+/// Operator=4. Unknown agent types default to 1 unit (conservative so
+/// we never under-count the user's spend).
+/// Compute the per-pod gateway auth token. The edge plugin accepts
+/// `?token=<48-hex>` as an alternative to Bearer on non-/v1 paths and
+/// checks it against `sha256(pod_api_key || pod_id)[:48]` — the exact
+/// same value openclaw's `gateway.auth.token` is set to at pod start.
+/// Safe to derive here because pod_api_key is already in state.json
+/// on the user's machine (it's written at install time) — we're not
+/// inventing a secret, we're reproducing one that exists.
+fn derive_gateway_token(pod_api_key: &str, pod_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(pod_api_key.as_bytes());
+    h.update(pod_id.as_bytes());
+    let digest = h.finalize();
+    // 48 hex chars = first 24 bytes of the digest.
+    hex::encode(&digest[..24])
+}
+
+fn plan_limit_for(tier: &str) -> u32 {
+    match tier.to_ascii_lowercase().as_str() {
+        "explorer" => 1,
+        "creator" => 2,
+        "operator" => 4,
+        _ => 0,
+    }
+}
+fn agent_units_for(agent_type: &str) -> u32 {
+    match agent_type {
+        "hermes" => 2,
+        "none" => 0,
+        _ => 1, // nemoclaw + future openclaw-family
+    }
 }
 
 fn handle_state(request: Request) {
-    // For v1 we return a minimal shape the JS uses to decide UI micro-bits.
-    // Richer data (live pods) is available via `tytus status --json` if
-    // we need it later.
-    let snap = StateSnapshot { connected: true };
+    let snap = compute_state_snapshot();
     respond_json(request, 200, &snap);
+}
+
+/// Build the rich state snapshot that the wizard's budget strip, the
+/// running-pod panels, and the disabled-card logic all depend on.
+///
+/// Data comes from the CLI's state.json rather than
+/// `tytus status --json` so we get the full pod schema — in particular
+/// `edge_public_url`, `edge_slug`, and `gateway_token`, which
+/// `status --json` does NOT expose today. Those three fields are
+/// essential for building the public browser URL and the
+/// OpenAI-compatible API URL that the wizard surfaces as "Open in
+/// Browser" and "Copy API URL".
+///
+/// Failure mode: never blocks the wizard. If state.json is missing,
+/// unreadable, or malformed we return an empty snapshot and the
+/// wizard renders cards with no budget/running data — the user can
+/// still click Install.
+fn compute_state_snapshot() -> StateSnapshot {
+    let empty = || StateSnapshot {
+        connected: false, logged_in: false,
+        tier: String::new(),
+        units_limit: 0, units_used: 0,
+        agents: vec![], included: vec![],
+    };
+
+    let state_path = state_json_path();
+    let raw = match state_path.and_then(|p| std::fs::read_to_string(p).ok()) {
+        Some(s) => s,
+        None => return empty(),
+    };
+    let parsed: serde_json::Value =
+        match serde_json::from_str(&raw) { Ok(v) => v, Err(_) => return empty() };
+
+    let tier = parsed.get("tier")
+        .and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // state.json uses `tokens.expires_at` presence as the logged-in proxy;
+    // for the wizard we treat "has a tier + at least one pod" as logged in.
+    let logged_in = !tier.is_empty()
+        || parsed.get("pods").and_then(|v| v.as_array())
+            .map(|a| !a.is_empty()).unwrap_or(false);
+
+    let mut agents = Vec::new();
+    let mut included = Vec::new();
+    let mut used = 0u32;
+
+    // ── Slug inheritance ─────────────────────────────────────
+    // `edge_public_url` is per-user (slug is in Scalesys'
+    // user_stable_keys table — all a user's pods share the one
+    // `<slug>.tytus.traylinx.com`). The CLI's state.json only
+    // backfills this field when `tytus env` or `tytus connect` runs
+    // post-install — which means a freshly-installed pod has it
+    // null, even though the URL is perfectly derivable from any
+    // sibling pod. This made "Open in Browser" fake-disabled on the
+    // just-installed pod every time. Pull the first populated base
+    // URL and reuse it for siblings that missed the backfill.
+    let shared_base: Option<String> = parsed
+        .get("pods").and_then(|v| v.as_array())
+        .and_then(|arr| arr.iter().find_map(|p| {
+            p.get("edge_public_url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        }));
+
+    if let Some(pods) = parsed.get("pods").and_then(|v| v.as_array()) {
+        for p in pods {
+            let agent_type = p.get("agent_type")
+                .and_then(|v| v.as_str()).unwrap_or("none").to_string();
+            let pod_id = p.get("pod_id")
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let edge_public_url: Option<String> = p.get("edge_public_url")
+                .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| shared_base.clone());
+            // Gateway token resolution: prefer the one in state (set
+            // by the CLI after any `tytus env` call), else derive it
+            // from sha256(pod_api_key || pod_id)[:48] — the exact
+            // formula the edge plugin + nemoclaw startup use. Without
+            // this, a fresh-install pod's ui_url has no `?token=` so
+            // the browser hits the edge's 401 bouncer. Derivation
+            // requires only pod_api_key which IS in state.json from
+            // install time.
+            let stored_token = p.get("gateway_token")
+                .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let derived_token = p.get("pod_api_key")
+                .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                .map(|k| derive_gateway_token(k, &pod_id));
+            let gateway_token: Option<String> = stored_token.or(derived_token);
+            let user_key = p.get("stable_user_key")
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // Prefer the per-pod subdomain URL (sprint 2026-04-23) — each
+            // pod is its own browser origin so the OpenClaw SPA's
+            // localStorage doesn't collide across pods. Fall back to the
+            // legacy composed URL for state entries written before the
+            // sprint's allocation-path populated the field.
+            let stored_pod_url: Option<String> = p.get("pod_public_url")
+                .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                .map(|s| s.trim_end_matches('/').to_string());
+            let public_url = stored_pod_url.or_else(|| {
+                edge_public_url.as_ref().map(|base| {
+                    format!("{}/p/{}", base.trim_end_matches('/'), pod_id)
+                })
+            });
+            let api_url = public_url.as_ref().map(|u| format!("{}/v1", u));
+            let ui_url = match (public_url.as_ref(), gateway_token.as_ref()) {
+                (Some(u), Some(t)) => Some(format!("{}/?token={}", u, t)),
+                _ => None,
+            };
+
+            if agent_type == "none" {
+                let endpoint = p.get("stable_ai_endpoint")
+                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                included.push(IncludedSlot {
+                    pod_id, kind: "ail",
+                    endpoint, user_key,
+                    public_url,
+                });
+                continue;
+            }
+
+            let units = agent_units_for(&agent_type);
+            used += units;
+            agents.push(AgentSlot {
+                pod_id, agent_type, units,
+                public_url, api_url, ui_url, user_key,
+            });
+        }
+    }
+
+    StateSnapshot {
+        connected: true,
+        logged_in,
+        units_limit: plan_limit_for(&tier),
+        units_used: used,
+        tier,
+        agents,
+        included,
+    }
+}
+
+/// Locate the CLI's state.json. Matches the CLI's `CliState::path()`
+/// logic: `$XDG_CONFIG_HOME/tytus/state.json` on Linux, `~/Library/
+/// Application Support/tytus/state.json` on macOS. If the config dir
+/// is not resolvable we fall back to `~/.config/tytus/state.json` so
+/// callers don't have to branch on platform.
+fn state_json_path() -> Option<std::path::PathBuf> {
+    if let Some(dir) = dirs::config_dir() {
+        return Some(dir.join("tytus").join("state.json"));
+    }
+    std::env::var_os("HOME").map(|h| {
+        std::path::PathBuf::from(h).join(".config").join("tytus").join("state.json")
+    })
 }
 
 // ── /api/open-external ────────────────────────────────────────
@@ -591,7 +912,265 @@ fn handle_open_external(request: Request, query: &str) {
             { /* linux: rely on user's preferred terminal — not implemented */ }
             respond_json(request, 200, &serde_json::json!({ "ok": true }));
         }
+        "channel-setup" => {
+            // Open Terminal running `tytus channels add <channel> --pod <NN>`.
+            // The CLI prompts interactively for the token so we never handle
+            // secrets inside the wizard's HTTP layer. Whitelist channel names
+            // + digit-only pod so the osascript we build is safe. Everything
+            // goes through double-quoted heredoc-style strings in AppleScript
+            // — shell escaping is belt-and-suspenders.
+            let channel = query.split('&').find_map(|kv| {
+                kv.strip_prefix("channel=").map(|v| v.to_string())
+            }).unwrap_or_default();
+            let pod = query.split('&').find_map(|kv| {
+                kv.strip_prefix("pod=").map(|v| v.to_string())
+            }).unwrap_or_default();
+            let valid_channels = ["telegram", "discord", "slack", "line"];
+            if !valid_channels.contains(&channel.as_str()) {
+                respond_json(request, 400, &serde_json::json!({"error":"invalid channel"}));
+                return;
+            }
+            if !pod.chars().all(|c| c.is_ascii_digit()) || pod.is_empty() {
+                respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // The CLI prompts for each credential interactively when
+                // --token is omitted. That keeps the user copying the token
+                // directly into Terminal, never into an HTTP payload.
+                let cmd = format!("tytus channels add {} --pod {}", channel, pod);
+                let script = format!(
+                    "tell application \"Terminal\" to do script \"{}\"",
+                    cmd.replace('"', "\\\"")
+                );
+                let _ = Command::new("osascript").args(["-e", &script]).spawn();
+            }
+            respond_json(request, 200, &serde_json::json!({"ok": true}));
+        }
         _ => respond_json(request, 400, &serde_json::json!({ "error": "unknown target" })),
+    }
+}
+
+// ── /api/pod/* — pod-lifecycle actions ─────────────────────────
+//
+// Mirror the tray-menu-level operations so the wizard can drive "Open
+// in Browser", "Restart Agent", and "Uninstall Agent" inline. Each
+// takes ?pod=NN and validates the id against the live state snapshot
+// before shelling out — we never pass a user-supplied pod id through
+// to a subprocess without a whitelist check.
+
+fn parse_pod_id(query: &str) -> Option<String> {
+    let raw = query.split('&').find_map(|kv| {
+        kv.strip_prefix("pod=").map(|v| v.to_string())
+    })?;
+    if raw.chars().all(|c| c.is_ascii_digit()) && !raw.is_empty() {
+        Some(raw)
+    } else { None }
+}
+
+/// Confirm the pod id exists in local state (defense-in-depth — parse_pod_id
+/// already restricts to digits, this catches "pod=99 doesn't exist").
+fn pod_exists(pod_id: &str) -> bool {
+    let snap = compute_state_snapshot();
+    snap.agents.iter().any(|a| a.pod_id == pod_id)
+        || snap.included.iter().any(|i| i.pod_id == pod_id)
+}
+
+fn handle_pod_open(request: Request, query: &str) {
+    let pod_id = match parse_pod_id(query) {
+        Some(p) => p,
+        None => { respond_json(request, 400, &serde_json::json!({"error":"invalid pod"})); return; }
+    };
+    if !pod_exists(&pod_id) {
+        respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
+        return;
+    }
+    let snap = compute_state_snapshot();
+    // Prefer the browser-auth UI URL (public edge + gateway_token) — loads
+    // at LB speed. Fall back to the public api_url so the click still does
+    // *something* useful (opens the /v1 route in a browser, which shows a
+    // 401 at worst). Never fall back to a localhost tunnel URL from the
+    // wizard — user can always use the tray's "Open in Browser" for that.
+    let url = snap.agents.iter().find(|a| a.pod_id == pod_id)
+        .and_then(|a| a.ui_url.clone().or_else(|| a.public_url.clone()));
+    match url {
+        Some(u) => {
+            #[cfg(target_os = "macos")]
+            { let _ = Command::new("open").arg(&u).spawn(); }
+            #[cfg(target_os = "linux")]
+            { let _ = Command::new("xdg-open").arg(&u).spawn(); }
+            respond_json(request, 200, &serde_json::json!({"ok": true, "url": u}));
+        }
+        None => {
+            respond_json(request, 503, &serde_json::json!({
+                "error":"no public URL yet — try again after the pod finishes provisioning"
+            }));
+        }
+    }
+}
+
+fn handle_pod_restart(request: Request, query: &str) {
+    let pod_id = match parse_pod_id(query) {
+        Some(p) => p,
+        None => { respond_json(request, 400, &serde_json::json!({"error":"invalid pod"})); return; }
+    };
+    if !pod_exists(&pod_id) {
+        respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
+        return;
+    }
+    // Spawn detached so the wizard response doesn't block the 30-90s
+    // DAM round-trip. CLI logs to its own stderr; we don't stream here
+    // (keeps this endpoint a fire-and-poll primitive — the chooser view
+    // re-fetches /api/state on focus to reflect the new container).
+    let bin = resolve_tytus_bin();
+    let spawned = Command::new(&bin)
+        .args(["restart", "--pod", &pod_id, "--json"])
+        .env("TYTUS_HEADLESS", "1")
+        .stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(_) => respond_json(request, 202, &serde_json::json!({"ok":true, "pod":pod_id})),
+        Err(e) => respond_json(request, 500, &serde_json::json!({
+            "error": format!("failed to spawn: {}", e)
+        })),
+    }
+}
+
+/// Revoke a pod — destructive, frees units and wipes workspace.
+/// Only callable from the wizard's failure-path retry button. We
+/// validate the pod id exists (defense in depth) and spawn the CLI
+/// detached so the wizard gets an immediate 202 and can move on; the
+/// actual Scalesys revoke is fast (<1 s) but DAM teardown of the
+/// container can take 5-15 s.
+fn handle_pod_revoke(request: Request, query: &str) {
+    let pod_id = match parse_pod_id(query) {
+        Some(p) => p,
+        None => { respond_json(request, 400, &serde_json::json!({"error":"invalid pod"})); return; }
+    };
+    if !pod_exists(&pod_id) {
+        respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
+        return;
+    }
+    let bin = resolve_tytus_bin();
+    // `tytus revoke` has no interactive confirm (Scalesys takes the
+    // wipe immediately on POST /pod/revoke) so detached spawn is
+    // safe. --json is a global flag, must come before the subcommand.
+    let spawned = Command::new(&bin)
+        .args(["--json", "revoke", &pod_id])
+        .env("TYTUS_HEADLESS", "1")
+        .stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(_) => respond_json(request, 202, &serde_json::json!({"ok":true, "pod":pod_id})),
+        Err(e) => respond_json(request, 500, &serde_json::json!({
+            "error": format!("failed to spawn: {}", e)
+        })),
+    }
+}
+
+/// Probe whether a just-installed pod is actually reachable. The CLI's
+/// `agent install` returns as soon as Scalesys allocates the pod row +
+/// fires the DAM deploy — the container is typically still starting at
+/// that moment (15-60 s for nemoclaw, 30-90 s for hermes). The wizard
+/// polls this endpoint post-install so the user doesn't see a fake
+/// "done" screen with a broken "Chat now" button.
+///
+/// Strategy: issue a cheap GET to the pod's `/v1/models` endpoint via
+/// the public edge. Any 2xx/401/403 means the gateway is answering
+/// (401/403 from the edge auth plugin when our probe doesn't carry
+/// the bearer token — still proof of life). 404/5xx/timeout = not ready.
+fn handle_pod_ready(request: Request, query: &str) {
+    let pod_id = match parse_pod_id(query) {
+        Some(p) => p,
+        None => { respond_json(request, 400, &serde_json::json!({"error":"invalid pod"})); return; }
+    };
+    let snap = compute_state_snapshot();
+    let agent = snap.agents.iter().find(|a| a.pod_id == pod_id).cloned();
+    let api = match agent.as_ref().and_then(|a| a.api_url.clone()) {
+        Some(u) => u,
+        None => {
+            // No public URL derivable yet (slug not in state). Report
+            // not-ready but not an error — wizard keeps polling.
+            respond_json(request, 200, &serde_json::json!({
+                "ready": false, "reason": "public URL not ready"
+            }));
+            return;
+        }
+    };
+    let probe_url = format!("{}/models", api.trim_end_matches('/'));
+    let user_key = agent.as_ref().map(|a| a.user_key.clone()).unwrap_or_default();
+    // Probe WITH the stable user key as Bearer — otherwise the edge
+    // plugin 401s our unauthenticated probe and we can't distinguish
+    // "edge up, pod starting" from "edge up, pod ready". Using the
+    // key we'd actually hand the user means a 200 proves the ENTIRE
+    // path (edge → user-key map → pod gateway) is live.
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(request, 500, &serde_json::json!({"error": e.to_string()}));
+            return;
+        }
+    };
+    let http = atomek_core::HttpClient::new();
+    let result = rt.block_on(async {
+        http.get(&probe_url)
+            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {}", user_key))
+            .timeout(std::time::Duration::from_secs(4))
+            .send().await
+    });
+    let (ready, status, reason) = match result {
+        Ok(resp) => {
+            let s = resp.status().as_u16();
+            // 200 is the only real "ready". 401/403 now mean the edge
+            // is rejecting even our authenticated probe — either the
+            // user-key map hasn't propagated, or the pod is still
+            // starting. 404 = edge route missing. 502/503 = upstream
+            // unhealthy. Any non-200 keeps the wizard waiting.
+            let ok = s == 200;
+            let r = match s {
+                200 => "gateway answering with 200".into(),
+                401 | 403 => "edge auth not yet propagated".into(),
+                404 => "edge route not yet published".into(),
+                502 | 503 | 504 => "gateway upstream not yet healthy".into(),
+                other => format!("http {}", other),
+            };
+            (ok, s, r)
+        }
+        Err(e) => (false, 0u16, format!("probe error: {}", e)),
+    };
+    respond_json(request, 200, &serde_json::json!({
+        "ready": ready, "status": status, "reason": reason, "probe_url": probe_url,
+    }));
+}
+
+fn handle_pod_uninstall(request: Request, query: &str) {
+    let pod_id = match parse_pod_id(query) {
+        Some(p) => p,
+        None => { respond_json(request, 400, &serde_json::json!({"error":"invalid pod"})); return; }
+    };
+    // Only agent pods (nemoclaw, hermes) can be uninstalled. AIL-included
+    // pods have no agent to remove — `tytus agent uninstall <pod>` on a
+    // default pod is a no-op + confusing error.
+    let snap = compute_state_snapshot();
+    if !snap.agents.iter().any(|a| a.pod_id == pod_id) {
+        respond_json(request, 400, &serde_json::json!({
+            "error":"pod has no agent to uninstall"
+        }));
+        return;
+    }
+    let bin = resolve_tytus_bin();
+    let spawned = Command::new(&bin)
+        .args(["agent", "uninstall", &pod_id, "--json"])
+        .env("TYTUS_HEADLESS", "1")
+        .stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(_) => respond_json(request, 202, &serde_json::json!({"ok":true, "pod":pod_id})),
+        Err(e) => respond_json(request, 500, &serde_json::json!({
+            "error": format!("failed to spawn: {}", e)
+        })),
     }
 }
 

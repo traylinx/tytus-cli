@@ -308,16 +308,42 @@ pub struct PodInfo {
     /// (`<slug>.tytus.traylinx.com`). Empty when EDGE_PATH_ENABLED=0 on
     /// Provider — falls back to the legacy WG path.
     pub edge_public_url: Option<String>,
+    /// Phase 2.6: per-pod OpenClaw gateway-token (deterministic
+    /// `sha256(pod_api_key || pod_id)[:48]`). When present alongside
+    /// `edge_public_url`, the tray opens the web UI directly through
+    /// the public edge using `?token=…` — loads at LB speed instead of
+    /// the ~4 KB/s WireGuard ceiling.
+    pub gateway_token: Option<String>,
+    /// Sprint 2026-04-23: per-pod subdomain URL
+    /// (`https://<slug>-p<NN>.tytus.traylinx.com`). Each pod is its own
+    /// browser origin so the OpenClaw SPA's localStorage doesn't collide
+    /// across pods opened simultaneously. When None, the tray composes
+    /// the legacy `edge_public_url/p/<NN>` shape as a fallback.
+    pub pod_public_url: Option<String>,
 }
 
 impl PodInfo {
     /// Build the user-visible public URL for this pod's gateway, or `None`
-    /// when the edge isn't wired up. Includes the `/p/<NN>` path prefix so
-    /// callers can append `/v1/...` directly.
+    /// when the edge isn't wired up. Prefers the per-pod subdomain
+    /// (sprint 2026-04-23) and falls back to the legacy `/p/<NN>` shape
+    /// for state entries written before the sprint.
     pub fn public_pod_url(&self) -> Option<String> {
+        if let Some(u) = &self.pod_public_url {
+            return Some(u.trim_end_matches('/').to_string());
+        }
         self.edge_public_url
             .as_ref()
             .map(|u| format!("{}/p/{}", u.trim_end_matches('/'), self.pod_id))
+    }
+
+    /// URL for the human-facing OpenClaw web UI, ready to open in a browser.
+    /// Returns `Some(...)` only when both the per-pod public-edge URL and
+    /// the gateway-token are known — the edge plugin requires the token
+    /// query-param to authorize non-/v1 paths.
+    pub fn public_ui_url(&self) -> Option<String> {
+        let base = self.public_pod_url()?;
+        let token = self.gateway_token.as_deref().filter(|s| !s.is_empty())?;
+        Some(format!("{}/?token={}", base, token))
     }
 
     /// Unit cost — mirrors Scalesys: NemoClaw=1, Hermes=2, Default pod=0.
@@ -779,7 +805,12 @@ fn build_menu(state: &TrayState) -> Menu {
     } else if state.pods.is_empty() {
         format!("{} No pods allocated — click Connect", dot.emoji())
     } else {
-        format!("{} Pod unreachable — click Connect{}", dot.emoji(), who)
+        // Post-Phase-2.5 the public HTTPS edge reaches the pod without the
+        // WG tunnel, so "Pod unreachable" is misleading here — a failed
+        // `10.42.42.1:18080` probe only proves the tunnel is down, not that
+        // the pod itself is dead. Users regularly see this yellow at login
+        // while their `curl` to `…tytus.traylinx.com/p/NN/...` works fine.
+        format!("{} Tunnel inactive — click Connect{}", dot.emoji(), who)
     };
     let _ = menu.append(&MenuItem::with_id("status", &status_text, false, None));
 
@@ -793,15 +824,13 @@ fn build_menu(state: &TrayState) -> Menu {
         if !state.tier.is_empty() {
             bits.push(format!("Plan: {}", state.tier));
         }
-        if !state.pods.is_empty() {
-            let n = state.pods.len();
-            // Show each pod by its agent, e.g. "1 pod (NemoClaw)" — so the
-            // user instantly knows what's deployed, not just how many.
-            if n == 1 {
-                bits.push(format!("1 pod ({})", state.pods[0].display_name()));
-            } else {
-                bits.push(format!("{} pods", n));
-            }
+        // Units (not raw pod count) — matches the "Units: X / Y used" line
+        // in the Pods & Agents submenu so users aren't told "2 pods" up top
+        // and "1 / 4 used" below. Pod-count is misleading anyway: the
+        // always-on default pod is 0 units and shouldn't inflate the header.
+        // Per-pod agent labels live in the submenu, not here.
+        if state.units_limit > 0 {
+            bits.push(format!("{} / {} units", state.units_used, state.units_limit));
         }
         if state.daemon_running && state.uptime_secs > 0 {
             bits.push(format!("up {}", format_uptime(state.uptime_secs)));
@@ -993,34 +1022,37 @@ fn build_menu(state: &TrayState) -> Menu {
                     format!("pod_header_{}", p.pod_id),
                     &header, false, None,
                 ));
-                // Open the agent's web UI (OpenClaw control panel) in the
-                // browser. The web UI lives behind the pod's gateway-token
-                // auth, NOT the user's `sk-tytus-user-*` Bearer:
+                // Open the OpenClaw web UI in the browser. Two paths,
+                // chosen at click time by `pod_..._open`:
                 //
-                //   localhost:NNNN/?token=<gateway_token>      — works
-                //   https://<slug>.tytus.../p/NN/?token=...    — 401 from edge
-                //                                                (browsers can't
-                //                                                send a Bearer
-                //                                                header from a
-                //                                                URL click; edge
-                //                                                requires it)
+                //   public edge (preferred):
+                //     `https://<slug>.tytus.../p/NN/?token=<gateway_token>`
+                //     loads at LB speed (~MB/s). The edge plugin accepts
+                //     ?token= on non-/v1 paths (Phase 2.6) and forwards the
+                //     query unchanged to OpenClaw, which validates the token.
                 //
-                // So the browser flow MUST go through the localhost
-                // forwarder + WG tunnel. The edge URL is the right answer
-                // for API clients (Cursor, OpenAI SDK, curl) but not for
-                // the human-facing UI. We surface both:
+                //   localhost forwarder (fallback):
+                //     `localhost:NNNN/?token=<gateway_token>` — used when
+                //     the public URL or token isn't known yet (mid-rollout,
+                //     EDGE_PATH_ENABLED=0, old daemon). Same content but
+                //     bottlenecked by the WireGuard tunnel (~4 KB/s).
                 //
-                //   "Open in Browser"  → forwarder (web UI, the common case)
-                //   "Copy Public API URL" → public edge URL to clipboard
-                //                            (for API client config)
+                // The "Copy Public API URL" item below stays separate — it
+                // copies the API base for OpenAI-shaped clients (Cursor,
+                // SDKs, curl) which speak Bearer.
+                let p_public_ui = p.public_ui_url();
                 let forwarder_live = existing_ui_forwarder(&p.pod_id).is_some();
                 let tunnel_live = tunnel_reaches_pod(&p.pod_id);
 
                 {
-                    let open_label = match (forwarder_live, tunnel_live) {
-                        (true, _)      => "  Open in Browser  ✓",
-                        (false, true)  => "  Open in Browser",
-                        (false, false) => "  Connect & Open in Browser",
+                    // Public-edge open is always available when public_ui is
+                    // populated — no tunnel needed. Only the forwarder path
+                    // depends on tunnel state.
+                    let open_label = match (p_public_ui.is_some(), forwarder_live, tunnel_live) {
+                        (true,  _,    _)     => "  Open in Browser  (fast)",
+                        (false, true, _)     => "  Open in Browser  ✓",
+                        (false, false, true) => "  Open in Browser",
+                        (false, false, false) => "  Connect & Open in Browser",
                     };
                     let _ = pods_sub.append(&MenuItem::with_id(
                         format!("pod_{}_open", p.pod_id),
@@ -1551,15 +1583,30 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // "Stop Forwarder" menu item (or `tytus ui --stop --pod N`),
         // NOT by closing a Terminal that no longer exists.
         other if other.starts_with("pod_") && other.ends_with("_open") => {
-            // The OpenClaw web UI auths via the gateway-token query param,
-            // not the user's `sk-tytus-user-*` Bearer. Browsers can't send
-            // a Bearer header from a URL click, so the public-edge URL
-            // 401s in this flow. We always use the localhost forwarder
-            // (which DOES carry the gateway token) for the web UI.
-            // The public URL is for API clients — surfaced separately
-            // via "Copy Public API URL".
+            // Phase 2.6: prefer the public-edge URL with `?token=` query
+            // (loads at LB speed, ~MB/s) over the localhost forwarder
+            // (loads through the WG tunnel at ~4 KB/s). The edge plugin
+            // accepts ?token= as alternative auth on non-/v1 paths and
+            // forwards the query unchanged to the in-pod OpenClaw gateway,
+            // which validates the token there. Falls back to the legacy
+            // forwarder when either the edge URL or the gateway-token is
+            // missing (old daemon, EDGE_PATH_ENABLED=0, mid-rollout).
             let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open").to_string();
-            open_pod_via_forwarder(&pod_id);
+            let public_ui = {
+                let s = state.lock().unwrap();
+                s.pods.iter()
+                    .find(|p| p.pod_id == pod_id)
+                    .and_then(|p| p.public_ui_url())
+            };
+            match public_ui {
+                Some(url) => {
+                    // Direct browser open — no forwarder spawn, no tunnel
+                    // reachability check needed.
+                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                    notify("Tytus", &format!("Opening pod {} via public edge", pod_id));
+                }
+                None => open_pod_via_forwarder(&pod_id),
+            }
         }
         other if other.starts_with("pod_") && other.ends_with("_copy_url") => {
             // Copy the per-pod public API URL to clipboard for paste into

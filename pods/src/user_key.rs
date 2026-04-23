@@ -17,6 +17,14 @@ struct UserKeyResponse {
     /// know the edge domain. Null when the edge path is disabled.
     #[serde(default)]
     public_url: Option<String>,
+    /// Per-pod subdomain URL template — the literal string
+    /// `https://{slug}-p{pod_id}.{edge_base}` with `{pod_id}` as a placeholder
+    /// the CLI substitutes with each pod's two-digit id. Each pod is its
+    /// own browser origin so the OpenClaw SPA's localStorage doesn't
+    /// collide when the user opens multiple pods in one browser.
+    /// Sprint: dev/sprints/2026-04-23-per-pod-subdomain.md
+    #[serde(default)]
+    pod_public_url_template: Option<String>,
 }
 
 /// User-key fields needed by callers. `slug` and `public_url` are populated
@@ -29,6 +37,27 @@ pub struct UserKey {
     pub key: String,
     pub slug: Option<String>,
     pub public_url: Option<String>,
+    /// Template `https://{slug}-p{pod_id}.{edge_base}` — substitute
+    /// `{pod_id}` per pod to get that pod's origin URL.
+    pub pod_public_url_template: Option<String>,
+}
+
+impl UserKey {
+    /// Compose the per-pod subdomain URL for `pod_id` by substituting
+    /// into `pod_public_url_template`. Returns `None` when the Provider
+    /// hasn't emitted a template (edge disabled / Provider pre-sprint).
+    pub fn compose_pod_public_url(&self, pod_id: &str) -> Option<String> {
+        let tmpl = self.pod_public_url_template.as_ref()?;
+        // pod_id in state.json is already two-digit ("01", "02"); just in
+        // case a caller passes "1" or "2", zero-pad it here so the URL
+        // matches the edge plugin's canonical form.
+        let pod2 = if pod_id.len() < 2 {
+            format!("{:0>2}", pod_id)
+        } else {
+            pod_id.to_string()
+        };
+        Some(tmpl.replace("{pod_id}", &pod2))
+    }
 }
 
 /// Fetch the user's stable API key + stable AI endpoint from the Provider.
@@ -83,5 +112,45 @@ pub async fn get_user_key_full(client: &TytusClient) -> atomek_core::Result<User
         key,
         slug: data.slug,
         public_url: data.public_url,
+        pod_public_url_template: data.pod_public_url_template,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compose_pod_public_url_substitutes_padded_pod_id() {
+        let uk = UserKey {
+            endpoint: "http://10.42.42.1:18080".to_string(),
+            key: "sk-tytus-user-test".to_string(),
+            slug: Some("njc9ctj3zgkn".to_string()),
+            public_url: Some("https://njc9ctj3zgkn.tytus.traylinx.com".to_string()),
+            pod_public_url_template: Some(
+                "https://njc9ctj3zgkn-p{pod_id}.tytus.traylinx.com".to_string(),
+            ),
+        };
+        assert_eq!(
+            uk.compose_pod_public_url("02").as_deref(),
+            Some("https://njc9ctj3zgkn-p02.tytus.traylinx.com"),
+        );
+        // Zero-pads a 1-digit id so callers don't have to.
+        assert_eq!(
+            uk.compose_pod_public_url("4").as_deref(),
+            Some("https://njc9ctj3zgkn-p04.tytus.traylinx.com"),
+        );
+    }
+
+    #[test]
+    fn compose_pod_public_url_returns_none_without_template() {
+        let uk = UserKey {
+            endpoint: "http://10.42.42.1:18080".to_string(),
+            key: "sk-tytus-user-test".to_string(),
+            slug: None,
+            public_url: None,
+            pod_public_url_template: None,
+        };
+        assert!(uk.compose_pod_public_url("02").is_none());
+    }
 }

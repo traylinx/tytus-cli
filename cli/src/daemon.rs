@@ -434,6 +434,19 @@ async fn dispatch_command(
                     // and open the public URL directly.
                     "edge_slug": p.edge_slug,
                     "edge_public_url": p.edge_public_url,
+                    // Phase 2.6: per-pod OpenClaw gateway-token. Lets the
+                    // tray construct `https://<slug>.tytus.../p/NN/?token=…`
+                    // for the web UI — loads at LB speed instead of crawling
+                    // through the WG tunnel. Edge accepts ?token= as
+                    // alternative auth on non-/v1 paths (Bearer still
+                    // required for /v1).
+                    "gateway_token": p.gateway_token,
+                    // Sprint 2026-04-23: per-pod subdomain URL.
+                    // `https://<slug>-p<NN>.tytus.traylinx.com` — each pod
+                    // is its own browser origin so the OpenClaw SPA's
+                    // localStorage doesn't collide across pods. Tray
+                    // prefers this over the legacy /p/NN composition.
+                    "pod_public_url": p.pod_public_url,
                 })
             }).collect();
             let last_refresh = ds.last_refresh.map(|t| t.elapsed().as_secs());
