@@ -1,9 +1,10 @@
-//! Local HTTP server for the tray's agent-install browser wizard.
+//! Local HTTP server for the Tytus Tower control page.
 //!
 //! Binds to `127.0.0.1:<random>` at tray startup, serves embedded HTML/CSS/JS,
 //! and exposes a tiny local API so the static JS can (a) list the agent
 //! catalog, (b) kick off a `tytus agent install` subprocess, and (c) stream
-//! its stdout back via server-sent events.
+//! its stdout back via server-sent events. Legacy `/install` paths 302 to
+//! `/tower` for anyone with a bookmark or old external link.
 //!
 //! Spec: SPRINT-AIL-DEFAULT-POD-AND-AGENT-INSTALL.md §6 E1-E5.
 //!
@@ -14,7 +15,7 @@
 //!   concurrent install job at a time — the UI only lets the user click
 //!   one card. Parallel installs would overspend units anyway.
 //! - Port bound at startup to `127.0.0.1:0` (kernel picks). Written to
-//!   `<tmp>/tytus/tray-web.port` so `open_wizard()` can read it.
+//!   `<tmp>/tytus/tray-web.port` so `open_tower()` can read it.
 //! - Lifecycle: server thread owns the `tiny_http::Server` and parks on
 //!   `recv()`. On tray quit we drop the `Arc<Server>` and the kernel
 //!   tears down the listener.
@@ -33,9 +34,9 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 // ── Embedded static assets ────────────────────────────────────
 // `include_bytes!` paths are relative to THIS source file, so the web/
 // directory lives next to src/.
-const INSTALL_HTML: &[u8] = include_bytes!("../web/install.html");
-const INSTALL_CSS: &[u8] = include_bytes!("../web/assets/install.css");
-const INSTALL_JS: &[u8] = include_bytes!("../web/assets/install.js");
+const TOWER_HTML: &[u8] = include_bytes!("../web/tower.html");
+const TOWER_CSS: &[u8] = include_bytes!("../web/assets/tower.css");
+const TOWER_JS: &[u8] = include_bytes!("../web/assets/tower.js");
 
 // ── Icons (lobehub @1.87.0) ───────────────────────────────────
 // Baked into the binary so the CSP can stay 'self'-only and the
@@ -108,7 +109,7 @@ fn random_job_id() -> String {
 /// Spawn the wizard server on a random localhost port and return the port.
 ///
 /// Returns `None` if bind failed (very rare — only when 127.0.0.1 itself
-/// isn't available). Caller stores the returned port for `open_wizard()`.
+/// isn't available). Caller stores the returned port for `open_tower()`.
 pub fn start() -> Option<u16> {
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
@@ -120,7 +121,7 @@ pub fn start() -> Option<u16> {
     let port = server.server_addr().to_ip()?.port();
 
     // Persist the port so subsequent "Install Agent" clicks (which call
-    // `open_wizard`) can read it without a lookup.
+    // `open_tower`) can read it without a lookup.
     if let Some(path) = port_file() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -144,7 +145,7 @@ pub fn start() -> Option<u16> {
     Some(port)
 }
 
-pub fn open_wizard() {
+pub fn open_tower() {
     let port = match current_port() {
         Some(p) => p,
         None => {
@@ -152,7 +153,7 @@ pub fn open_wizard() {
             return;
         }
     };
-    let url = format!("http://127.0.0.1:{}/install", port);
+    let url = format!("http://127.0.0.1:{}/tower", port);
     #[cfg(target_os = "macos")]
     { let _ = Command::new("open").arg(&url).spawn(); }
     #[cfg(target_os = "linux")]
@@ -179,14 +180,24 @@ fn handle(request: Request, registry: Registry) {
     let query = url.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
 
     match (&method, path.as_str()) {
-        (Method::Get, "/install") | (Method::Get, "/") => {
-            serve_bytes(request, INSTALL_HTML, "text/html; charset=utf-8");
+        (Method::Get, "/tower") | (Method::Get, "/") => {
+            serve_bytes(request, TOWER_HTML, "text/html; charset=utf-8");
         }
-        (Method::Get, "/assets/install.css") => {
-            serve_bytes(request, INSTALL_CSS, "text/css; charset=utf-8");
+        // Back-compat: external bookmarks and the pre-rename `open_tower`
+        // URL both aimed at `/install`. Redirect instead of duplicating
+        // the serve path — keeps the canonical URL visible in the address
+        // bar after the redirect resolves.
+        (Method::Get, "/install") => {
+            let resp = Response::from_string("")
+                .with_status_code(StatusCode(302))
+                .with_header(header("Location", "/tower"));
+            let _ = request.respond(resp);
         }
-        (Method::Get, "/assets/install.js") => {
-            serve_bytes(request, INSTALL_JS, "application/javascript; charset=utf-8");
+        (Method::Get, "/assets/tower.css") => {
+            serve_bytes(request, TOWER_CSS, "text/css; charset=utf-8");
+        }
+        (Method::Get, "/assets/tower.js") => {
+            serve_bytes(request, TOWER_JS, "application/javascript; charset=utf-8");
         }
         (Method::Get, "/assets/icons/openclaw.svg") => {
             serve_bytes(request, ICON_OPENCLAW, "image/svg+xml");
@@ -239,6 +250,77 @@ fn handle(request: Request, registry: Registry) {
         // after an install failure calls this to reset before retry.
         (Method::Post, "/api/pod/revoke") => {
             handle_pod_revoke(request, &query);
+        }
+        // ── Tower control-surface endpoints (Wave 1) ─────────────────
+        // Header actions + Settings block moved from tray submenus into
+        // the page. All run as subprocesses of the `tytus` binary; the
+        // tray's existing handlers keep working in parallel.
+        (Method::Post, "/api/disconnect") => {
+            handle_disconnect(request);
+        }
+        (Method::Post, "/api/connect") => {
+            handle_connect(request);
+        }
+        (Method::Post, "/api/test") => {
+            handle_test(request);
+        }
+        (Method::Get, "/api/settings") => {
+            handle_settings_get(request);
+        }
+        (Method::Post, "/api/settings/autostart-tunnel") => {
+            handle_autostart_tunnel(request);
+        }
+        (Method::Post, "/api/settings/autostart-tray") => {
+            handle_autostart_tray(request);
+        }
+        (Method::Post, "/api/logout") => {
+            handle_logout(request);
+        }
+        // ── Tower Wave 2: Troubleshoot surface ───────────────────────
+        (Method::Post, "/api/doctor") => {
+            handle_doctor(request);
+        }
+        (Method::Post, "/api/daemon/start") => {
+            handle_daemon_lifecycle(request, DaemonAction::Start);
+        }
+        (Method::Post, "/api/daemon/stop") => {
+            handle_daemon_lifecycle(request, DaemonAction::Stop);
+        }
+        (Method::Post, "/api/daemon/restart") => {
+            handle_daemon_lifecycle(request, DaemonAction::Restart);
+        }
+        (Method::Get, "/api/daemon/status") => {
+            handle_daemon_status(request);
+        }
+        (Method::Get, "/api/logs") => {
+            handle_log_tail(request, &query);
+        }
+        // ── Tower Wave 3b: launch in editor ──────────────────────────
+        (Method::Get, "/api/launchers") => {
+            handle_launchers_list(request);
+        }
+        (Method::Post, "/api/launch") => {
+            handle_launch(request, &query);
+        }
+        // ── Tower Wave 3c: per-pod channels ──────────────────────────
+        (Method::Get, "/api/channels") => {
+            handle_channels_list(request, &query);
+        }
+        (Method::Post, "/api/channels/add") => {
+            handle_channels_add(request, &query);
+        }
+        (Method::Post, "/api/channels/remove") => {
+            handle_channels_remove(request, &query);
+        }
+        (Method::Post, "/api/channels/catalog") => {
+            handle_channels_catalog(request);
+        }
+        // ── Tower Wave 4: sync gaps ──────────────────────────────────
+        (Method::Post, "/api/pod/stop-forwarder") => {
+            handle_pod_stop_forwarder(request, &query);
+        }
+        (Method::Post, "/api/configure") => {
+            handle_configure(request);
         }
         _ => {
             let resp = Response::from_string("not found")
@@ -651,6 +733,10 @@ impl Drop for PipeWriter {
 struct StateSnapshot {
     connected: bool,
     logged_in: bool,
+    /// True when the WG tunnel is up and 10.42.42.1:18080 is reachable.
+    /// Used by the Tower page header to choose between "Disconnect" and
+    /// "Connect" actions. Cheap TCP probe — 500ms cap.
+    tunnel_active: bool,
     tier: String,
     units_limit: u32,
     units_used: u32,
@@ -661,6 +747,30 @@ struct StateSnapshot {
     /// the wizard so users can copy their OpenAI-compatible endpoint
     /// without running `tytus env --export`.
     included: Vec<IncludedSlot>,
+    // ── Wave 4: fields merged from socket::poll_daemon_status ──────
+    /// Signed-in user. Empty string when logged-out.
+    email: String,
+    /// Seconds since the daemon started. 0 when the daemon is down.
+    uptime_secs: u64,
+    /// False when the macOS keychain hasn't yet yielded the refresh
+    /// token (pending approval dialog, ACL stale after a rebuild).
+    /// Drives the yellow warning banner on the page.
+    keychain_healthy: bool,
+    /// Last refresh error the daemon observed, verbatim. Surfaced in
+    /// Troubleshoot only when present.
+    last_refresh_error: Option<String>,
+    /// Daemon process state — separate from `connected` (state.json
+    /// parseability). Daemon can be down while state.json is fine.
+    daemon_running: bool,
+    daemon_pid: u64,
+    /// True when /Applications/Tytus.app exists. Page uses this to
+    /// decide whether to surface the "Install in Applications" row.
+    app_bundle_installed: bool,
+    /// Pod IDs that currently have a live localhost UI forwarder — the
+    /// user has run "Open in Browser" through the WG fallback. Page
+    /// uses this to show a "Stop Forwarder" button on the matching
+    /// running-pod panel.
+    forwarders: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -754,9 +864,18 @@ fn handle_state(request: Request) {
 fn compute_state_snapshot() -> StateSnapshot {
     let empty = || StateSnapshot {
         connected: false, logged_in: false,
+        tunnel_active: false,
         tier: String::new(),
         units_limit: 0, units_used: 0,
         agents: vec![], included: vec![],
+        email: String::new(),
+        uptime_secs: 0,
+        keychain_healthy: true,
+        last_refresh_error: None,
+        daemon_running: false,
+        daemon_pid: 0,
+        app_bundle_installed: crate::check_app_bundle_installed(),
+        forwarders: vec![],
     };
 
     let state_path = state_json_path();
@@ -864,14 +983,45 @@ fn compute_state_snapshot() -> StateSnapshot {
         }
     }
 
+    // Pull the daemon snapshot for the extra health / session signals
+    // the tray also surfaces (email, uptime, keychain, last refresh
+    // error). One daemon-socket round-trip per /api/state call, capped
+    // at 3s — matches what the tray already does on every poll tick.
+    let daemon_snap = crate::socket::poll_daemon_status();
+
+    // Per-pod forwarder presence — populate for each pod we already
+    // built so the UI can show a "Stop Forwarder" button when it
+    // applies. Only true when /tmp/tytus/ui-forwarder-NN.pid points at
+    // a live process.
+    let mut forwarders: Vec<String> = Vec::new();
+    for a in &agents {
+        if crate::existing_ui_forwarder(&a.pod_id).is_some() {
+            forwarders.push(a.pod_id.clone());
+        }
+    }
+    for i in &included {
+        if crate::existing_ui_forwarder(&i.pod_id).is_some() {
+            forwarders.push(i.pod_id.clone());
+        }
+    }
+
     StateSnapshot {
         connected: true,
         logged_in,
+        tunnel_active: crate::gateway_probe::probe_gateway(),
         units_limit: plan_limit_for(&tier),
         units_used: used,
         tier,
         agents,
         included,
+        email: daemon_snap.email,
+        uptime_secs: daemon_snap.uptime_secs,
+        keychain_healthy: daemon_snap.keychain_healthy,
+        last_refresh_error: daemon_snap.last_refresh_error,
+        daemon_running: daemon_snap.daemon_running,
+        daemon_pid: daemon_snap.daemon_pid,
+        app_bundle_installed: crate::check_app_bundle_installed(),
+        forwarders,
     }
 }
 
@@ -1172,6 +1322,618 @@ fn handle_pod_uninstall(request: Request, query: &str) {
             "error": format!("failed to spawn: {}", e)
         })),
     }
+}
+
+// ── Tower control-surface handlers (Wave 1) ───────────────────
+
+fn handle_disconnect(request: Request) {
+    // Detached subprocess — disconnect is fast (<1s, no sudo) because it
+    // just reads the tunnel pidfile and SIGTERMs. Client polls /api/state
+    // to see the tunnel_active flag flip.
+    let bin = resolve_tytus_bin();
+    let spawned = Command::new(&bin)
+        .arg("disconnect")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(_) => respond_json(request, 202, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 500, &serde_json::json!({
+            "error": format!("failed to spawn tytus disconnect: {}", e)
+        })),
+    }
+}
+
+fn handle_connect(request: Request) {
+    // Connect requires sudo for the tunnel-up helper. Tray spawns a
+    // Terminal because sudo needs a TTY — we do the same from the page
+    // so the UX matches: a Terminal window pops up, user authenticates,
+    // tunnel comes up, window auto-closes. Polling /api/state reflects
+    // tunnel_active once it's up.
+    crate::open_in_terminal_simple(
+        "tytus connect && exit; echo; echo 'Connect failed — see above.'; echo 'Press Enter to close…'; read _"
+    );
+    respond_json(request, 202, &serde_json::json!({"ok": true}));
+}
+
+fn handle_test(request: Request) {
+    // Synchronous — `tytus test` is E2E (~5-15s). Running inline so the
+    // page can show the result without implementing SSE for Wave 1.
+    // Output capped + timeout'd so a wedged subprocess can't hang the
+    // tray's HTTP thread indefinitely.
+    let bin = resolve_tytus_bin();
+    let output = Command::new(&bin)
+        .arg("test")
+        .env("TYTUS_HEADLESS", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let exit_code = out.status.code().unwrap_or(-1);
+            respond_json(request, 200, &serde_json::json!({
+                "ok": out.status.success(),
+                "exit_code": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+            }));
+        }
+        Err(e) => respond_json(request, 500, &serde_json::json!({
+            "error": format!("failed to run tytus test: {}", e)
+        })),
+    }
+}
+
+fn handle_settings_get(request: Request) {
+    respond_json(request, 200, &serde_json::json!({
+        "autostart_tunnel": autostart_tunnel_installed(),
+        "autostart_tray": autostart_tray_installed(),
+    }));
+}
+
+#[derive(serde::Deserialize)]
+struct ToggleBody { enabled: bool }
+
+fn handle_autostart_tunnel(mut request: Request) {
+    let enabled = match parse_toggle_body(&mut request) {
+        Ok(e) => e,
+        Err(resp_sent) => { let _ = resp_sent; return; }
+    };
+    // `tytus autostart install|uninstall` writes
+    // ~/Library/LaunchAgents/com.traylinx.tytus.plist — user-scope, no
+    // sudo. Runs synchronously so we can surface stderr inline.
+    let sub = if enabled { "install" } else { "uninstall" };
+    run_tytus_inline(request, &["autostart", sub]);
+}
+
+fn handle_autostart_tray(mut request: Request) {
+    let enabled = match parse_toggle_body(&mut request) {
+        Ok(e) => e,
+        Err(resp_sent) => { let _ = resp_sent; return; }
+    };
+    // `tytus tray install` creates /Applications/Tytus.app + the tray
+    // LaunchAgent. 5-10s on first run because icons are generated via
+    // sips + iconutil. User-scope; no sudo.
+    let sub = if enabled { "install" } else { "uninstall" };
+    run_tytus_inline(request, &["tray", sub]);
+}
+
+fn handle_logout(request: Request) {
+    // Destructive: revokes all pods + clears keychain. JS confirms
+    // before POSTing. Spawned in a Terminal because Sentinel logout
+    // prints user-facing output and because logout-through-CLI is the
+    // canonical path. Returns 202 immediately.
+    crate::open_in_terminal_simple(
+        "tytus logout; echo; echo 'Press Enter to close…'; read _"
+    );
+    respond_json(request, 202, &serde_json::json!({"ok": true}));
+}
+
+fn parse_toggle_body(request: &mut Request) -> Result<bool, ()> {
+    let mut body = String::new();
+    if request.as_reader().read_to_string(&mut body).is_err() {
+        return Err(());
+    }
+    let parsed: Result<ToggleBody, _> = serde_json::from_str(&body);
+    match parsed {
+        Ok(t) => Ok(t.enabled),
+        Err(_) => Err(()),
+    }
+}
+
+fn run_tytus_inline(request: Request, args: &[&str]) {
+    let bin = resolve_tytus_bin();
+    let out = Command::new(&bin)
+        .args(args)
+        .env("TYTUS_HEADLESS", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    match out {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            respond_json(request, if o.status.success() { 200 } else { 500 }, &serde_json::json!({
+                "ok": o.status.success(),
+                "exit_code": o.status.code().unwrap_or(-1),
+                "stdout": stdout,
+                "stderr": stderr,
+            }));
+        }
+        Err(e) => respond_json(request, 500, &serde_json::json!({
+            "error": format!("failed to spawn tytus {}: {}", args.join(" "), e)
+        })),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn autostart_tunnel_installed() -> bool {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(&home)
+        .join("Library/LaunchAgents/com.traylinx.tytus.plist")
+        .exists()
+}
+#[cfg(target_os = "linux")]
+fn autostart_tunnel_installed() -> bool {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(&home)
+        .join(".config/systemd/user/tytus.service")
+        .exists()
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn autostart_tunnel_installed() -> bool { false }
+
+#[cfg(target_os = "macos")]
+fn autostart_tray_installed() -> bool {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(&home)
+        .join("Library/LaunchAgents/com.traylinx.tytus.tray.plist")
+        .exists()
+}
+#[cfg(not(target_os = "macos"))]
+fn autostart_tray_installed() -> bool { false }
+
+// ── Tower Wave 2: Troubleshoot handlers ────────────────────────
+
+fn handle_doctor(request: Request) {
+    // `tytus doctor` is the full diagnostic — DNS, auth, tunnel, pod,
+    // gateway, MCP. Runs in a few seconds. Synchronous is fine; client
+    // shows spinner and renders stdout in a panel.
+    let bin = resolve_tytus_bin();
+    let out = Command::new(&bin)
+        .arg("doctor")
+        .env("TYTUS_HEADLESS", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    match out {
+        Ok(o) => {
+            respond_json(request, 200, &serde_json::json!({
+                "ok": o.status.success(),
+                "exit_code": o.status.code().unwrap_or(-1),
+                "stdout": String::from_utf8_lossy(&o.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&o.stderr).to_string(),
+            }));
+        }
+        Err(e) => respond_json(request, 500, &serde_json::json!({
+            "error": format!("failed to run tytus doctor: {}", e)
+        })),
+    }
+}
+
+enum DaemonAction { Start, Stop, Restart }
+
+fn handle_daemon_lifecycle(request: Request, action: DaemonAction) {
+    let bin = resolve_tytus_bin();
+    match action {
+        DaemonAction::Stop => {
+            // Blocking — `tytus daemon stop` is fast (<1s). Surface result.
+            let out = Command::new(&bin).args(["daemon", "stop"])
+                .env("TYTUS_HEADLESS", "1")
+                .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+                .output();
+            match out {
+                Ok(o) => respond_json(request, if o.status.success() { 200 } else { 500 }, &serde_json::json!({
+                    "ok": o.status.success(),
+                    "stdout": String::from_utf8_lossy(&o.stdout).to_string(),
+                    "stderr": String::from_utf8_lossy(&o.stderr).to_string(),
+                })),
+                Err(e) => respond_json(request, 500, &serde_json::json!({
+                    "error": format!("failed: {}", e)
+                })),
+            }
+        }
+        DaemonAction::Start => {
+            // Detached — `tytus daemon run` blocks in the foreground until
+            // the process exits, so we must spawn it without piping stdio
+            // back to the HTTP thread. launchd normally handles this via
+            // KeepAlive; manual start is a troubleshooting path.
+            let res = Command::new(&bin).args(["daemon", "run"])
+                .env("TYTUS_HEADLESS", "1")
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                .spawn();
+            match res {
+                Ok(_) => respond_json(request, 202, &serde_json::json!({"ok": true})),
+                Err(e) => respond_json(request, 500, &serde_json::json!({
+                    "error": format!("failed to spawn: {}", e)
+                })),
+            }
+        }
+        DaemonAction::Restart => {
+            // Stop blocking then spawn new daemon detached. If stop fails
+            // (maybe daemon was already down), we still attempt start —
+            // the user's intent is "make it running now".
+            let _ = Command::new(&bin).args(["daemon", "stop"])
+                .env("TYTUS_HEADLESS", "1")
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                .status();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let res = Command::new(&bin).args(["daemon", "run"])
+                .env("TYTUS_HEADLESS", "1")
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                .spawn();
+            match res {
+                Ok(_) => respond_json(request, 202, &serde_json::json!({"ok": true})),
+                Err(e) => respond_json(request, 500, &serde_json::json!({
+                    "error": format!("restart failed: {}", e)
+                })),
+            }
+        }
+    }
+}
+
+fn handle_daemon_status(request: Request) {
+    // Canonical liveness check: read /tmp/tytus/daemon.pid + `kill -0`
+    // probe. `kill -0 pid` returns Ok if the process exists and the
+    // sender has permission to signal it; Err(ESRCH) if it's gone.
+    // Matches the CLI's `tytus daemon status` logic so results agree
+    // between surfaces.
+    let pid_path = PathBuf::from("/tmp/tytus/daemon.pid");
+    let pid: Option<i32> = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
+    let running = match pid {
+        Some(p) => unsafe { libc::kill(p, 0) == 0 },
+        None => false,
+    };
+    respond_json(request, 200, &serde_json::json!({
+        "running": running,
+        "pid": pid,
+    }));
+}
+
+fn handle_log_tail(request: Request, query: &str) {
+    // Simple byte-offset poll. Client calls /api/logs?name=daemon with
+    // offset=0 on first load, appends the returned chunk, then polls
+    // with offset=last_offset. Server reads from that offset to EOF and
+    // returns the new bytes (capped at MAX_CHUNK to keep responses
+    // bounded). File shrinkage (rotation) resets offset to 0 with
+    // `truncated: true` so the client can wipe its pre.
+    const MAX_CHUNK: u64 = 128 * 1024;
+
+    let mut name = "daemon";
+    let mut offset: u64 = 0;
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        if let Some((k, v)) = pair.split_once('=') {
+            match k {
+                "name" => name = match v { "daemon" | "startup" => v, _ => "daemon" },
+                "offset" => { offset = v.parse().unwrap_or(0); }
+                _ => {}
+            }
+        }
+    }
+    let path = match name {
+        "startup" => PathBuf::from("/tmp/tytus/autostart.log"),
+        _ => PathBuf::from("/tmp/tytus/daemon.log"),
+    };
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => {
+            respond_json(request, 200, &serde_json::json!({
+                "name": name,
+                "offset": 0u64,
+                "size": 0u64,
+                "chunk": "",
+                "missing": true,
+            }));
+            return;
+        }
+    };
+    let size = meta.len();
+    let (read_from, truncated) = if offset > size { (0, true) } else { (offset, false) };
+    let available = size.saturating_sub(read_from);
+    let take = available.min(MAX_CHUNK);
+
+    let chunk = if take == 0 {
+        String::new()
+    } else {
+        use std::io::{Read as _, Seek, SeekFrom};
+        let mut f = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => { respond_json(request, 500, &serde_json::json!({"error":"open failed"})); return; }
+        };
+        if f.seek(SeekFrom::Start(read_from)).is_err() {
+            respond_json(request, 500, &serde_json::json!({"error":"seek failed"})); return;
+        }
+        let mut buf = vec![0u8; take as usize];
+        let n = f.read(&mut buf).unwrap_or(0);
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf).to_string()
+    };
+    let new_offset = read_from + (chunk.as_bytes().len() as u64);
+    respond_json(request, 200, &serde_json::json!({
+        "name": name,
+        "offset": new_offset,
+        "size": size,
+        "chunk": chunk,
+        "truncated": truncated,
+        "missing": false,
+    }));
+}
+
+// ── Tower Wave 3b: launch in editor ────────────────────────────
+
+fn handle_launchers_list(request: Request) {
+    // Mirror the tray's "Open in ▸" detection so the page shows the
+    // same set of editors. Each entry is a thin metadata record; the
+    // actual launch happens via POST /api/launch with the binary name.
+    let clis = crate::launcher::detect_installed_clis();
+    let list: Vec<serde_json::Value> = clis.iter().map(|c| {
+        serde_json::json!({
+            "binary": c.binary,
+            "name": c.name,
+        })
+    }).collect();
+    respond_json(request, 200, &serde_json::json!({
+        "editors": list,
+        // Plain terminal is always "available"; tray lists it unconditionally.
+        "terminal_available": true,
+    }));
+}
+
+fn handle_launch(request: Request, query: &str) {
+    // Query: editor=<binary>&pod=NN (pod optional; default picks the
+    // first pod with a stable_user_key — matches the tray's
+    // connection_pair fallback).
+    let mut editor = String::new();
+    let mut pod_id_override: Option<String> = None;
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        if let Some((k, v)) = pair.split_once('=') {
+            match k {
+                "editor" => editor = v.to_string(),
+                "pod" => {
+                    if v.chars().all(|c| c.is_ascii_digit()) && !v.is_empty() {
+                        pod_id_override = Some(v.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Find the connection pair: URL from the chosen pod (or the first
+    // pod with a stable key), api_key from the stable user key.
+    let snap = compute_state_snapshot();
+    let agent = pod_id_override.as_ref()
+        .and_then(|id| snap.agents.iter().find(|a| &a.pod_id == id))
+        .or_else(|| snap.agents.iter().find(|a| a.api_url.is_some()));
+    let included_first = snap.included.iter().find(|i| i.public_url.is_some());
+    let (url, api_key) = if let Some(a) = agent {
+        let url = a.api_url.clone().unwrap_or_else(|| {
+            // Fallback to AIL private endpoint when the pod has no public
+            // URL yet (mid-provisioning).
+            included_first.map(|i| format!("{}/v1", i.endpoint))
+                .unwrap_or_else(|| "http://10.42.42.1:18080/v1".into())
+        });
+        (url, a.user_key.clone())
+    } else if let Some(inc) = snap.included.first() {
+        let url = inc.public_url.as_ref()
+            .map(|u| format!("{}/v1", u))
+            .unwrap_or_else(|| format!("{}/v1", inc.endpoint));
+        (url, inc.user_key.clone())
+    } else {
+        respond_json(request, 400, &serde_json::json!({
+            "error": "no pods available — run tytus connect first"
+        }));
+        return;
+    };
+
+    // Launcher wants the base URL (no /v1 — it appends /v1 itself in
+    // the shell_cmd it builds).
+    let base = url.trim_end_matches("/v1").trim_end_matches('/').to_string();
+    let conn = crate::launcher::PodConnection {
+        ai_gateway: base,
+        api_key,
+        model: "ail-compound".into(),
+    };
+
+    // Special case: "terminal" opens a plain shell with env exports.
+    if editor == "terminal" {
+        crate::launcher::launch_terminal(&conn);
+        respond_json(request, 202, &serde_json::json!({"ok": true, "editor": "terminal"}));
+        return;
+    }
+
+    // Look up the chosen editor by binary name; refuse unknown binaries
+    // so a mischievous client can't smuggle arbitrary shell into the
+    // templated command.
+    let clis = crate::launcher::detect_installed_clis();
+    let cli = match clis.iter().find(|c| c.binary == editor) {
+        Some(c) => c.clone(),
+        None => {
+            respond_json(request, 400, &serde_json::json!({
+                "error": format!("editor not detected or not whitelisted: {}", editor)
+            }));
+            return;
+        }
+    };
+    crate::launcher::launch_in_terminal(&cli, &conn);
+    respond_json(request, 202, &serde_json::json!({"ok": true, "editor": cli.binary}));
+}
+
+// ── Tower Wave 3c: per-pod channels ────────────────────────────
+
+/// `^[a-z][a-z0-9_-]{1,30}$` — matches known channel names (telegram,
+/// discord, slack, line) plus leaves room for future additions. Used
+/// as a whitelist before templating the name into a shell command.
+fn valid_channel_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 31
+        && s.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+fn valid_pod_id(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 4 && s.chars().all(|c| c.is_ascii_digit())
+}
+
+fn parse_channel_query(query: &str) -> (Option<String>, Option<String>) {
+    let mut pod = None;
+    let mut name = None;
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        if let Some((k, v)) = pair.split_once('=') {
+            match k {
+                "pod" => { if valid_pod_id(v) { pod = Some(v.to_string()); } }
+                "name" => { if valid_channel_name(v) { name = Some(v.to_string()); } }
+                _ => {}
+            }
+        }
+    }
+    (pod, name)
+}
+
+fn handle_channels_list(request: Request, query: &str) {
+    let (pod, _) = parse_channel_query(query);
+    let pod_id = match pod {
+        Some(p) => p,
+        None => {
+            respond_json(request, 400, &serde_json::json!({ "error": "missing or invalid pod id" }));
+            return;
+        }
+    };
+    let configured: Vec<serde_json::Value> = crate::read_channels_for_pod(&pod_id)
+        .into_iter()
+        .map(|(name, count)| serde_json::json!({
+            "name": name,
+            "label": crate::channel_label(&name),
+            "secret_count": count,
+        }))
+        .collect();
+    // Available = everything in CHANNEL_MENU_ENTRIES that isn't already
+    // configured on this pod. Matches what the tray's channels submenu
+    // shows when building the "Add X…" list.
+    let configured_names: std::collections::HashSet<String> = configured.iter()
+        .filter_map(|e| e.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    let available: Vec<serde_json::Value> = crate::CHANNEL_MENU_ENTRIES.iter()
+        .filter(|(n, _)| !configured_names.contains(*n))
+        .map(|(n, l)| serde_json::json!({ "name": n, "label": l }))
+        .collect();
+    respond_json(request, 200, &serde_json::json!({
+        "pod_id": pod_id,
+        "configured": configured,
+        "available": available,
+    }));
+}
+
+fn handle_channels_add(request: Request, query: &str) {
+    let (pod, name) = parse_channel_query(query);
+    let (Some(pod_id), Some(channel)) = (pod, name) else {
+        respond_json(request, 400, &serde_json::json!({ "error": "missing pod or name" }));
+        return;
+    };
+    // Mirror the tray's add flow — spawn a Terminal that (a) prints the
+    // catalog snippet for context, (b) reads the primary token
+    // securely via `read -rs`, (c) runs `tytus channels add --token`.
+    // The web page can't do the hidden-token read itself (no
+    // browser-native secure prompt), so Terminal is the right place.
+    let label = crate::channel_label(&channel);
+    let cmd = format!(
+        "clear 2>/dev/null; \
+         printf '\\033[1m{label}\\033[0m — pod {pod}\\n\\n'; \
+         tytus channels catalog 2>/dev/null | awk '/^  {chan} /,/^$/' | sed '1,/^$/!d'; \
+         echo; \
+         printf 'Paste your primary token (hidden): '; read -rs TOK; echo; \
+         if [ -z \"$TOK\" ]; then \
+           printf '\\033[33mAborted — no token entered.\\033[0m\\n'; \
+         else \
+           echo; echo 'Writing credential and redeploying agent (~10s)…'; echo; \
+           if tytus channels add --pod {pod} --type {chan} --token \"$TOK\"; then \
+             printf '\\n\\033[32m✓ Done.\\033[0m Pod {pod} now speaks {label}.\\n'; \
+           else \
+             printf '\\n\\033[31m✗ Something went wrong.\\033[0m Check the message above, then retry.\\n'; \
+           fi; \
+         fi; \
+         echo; echo 'Press Enter to close…'; read _",
+        pod = pod_id, chan = channel, label = label,
+    );
+    crate::open_in_terminal_simple(&cmd);
+    respond_json(request, 202, &serde_json::json!({ "ok": true }));
+}
+
+fn handle_channels_remove(request: Request, query: &str) {
+    let (pod, name) = parse_channel_query(query);
+    let (Some(pod_id), Some(channel)) = (pod, name) else {
+        respond_json(request, 400, &serde_json::json!({ "error": "missing pod or name" }));
+        return;
+    };
+    // Client confirms first; server spawns Terminal so the user sees
+    // the CLI's progress (credential wipe + redeploy takes ~10s).
+    let cmd = format!(
+        "tytus channels remove --pod {} --type {}; echo; echo 'Press Enter to close…'; read _",
+        pod_id, channel,
+    );
+    crate::open_in_terminal_simple(&cmd);
+    respond_json(request, 202, &serde_json::json!({ "ok": true }));
+}
+
+fn handle_channels_catalog(request: Request) {
+    crate::open_in_terminal_simple("tytus channels catalog; echo; echo 'Press Enter to close…'; read _");
+    respond_json(request, 202, &serde_json::json!({ "ok": true }));
+}
+
+// ── Tower Wave 4: sync gaps ────────────────────────────────────
+
+fn handle_pod_stop_forwarder(request: Request, query: &str) {
+    // Mirrors the tray's `pod_NN_stop_forwarder` — runs `tytus ui --stop
+    // --pod NN` so the CLI's pidfile cleanup path stays the source of
+    // truth. Detached; reply 202 and let the client refresh.
+    let mut pod_id: Option<String> = None;
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == "pod" && valid_pod_id(v) { pod_id = Some(v.to_string()); }
+        }
+    }
+    let Some(pod) = pod_id else {
+        respond_json(request, 400, &serde_json::json!({ "error": "missing or invalid pod id" }));
+        return;
+    };
+    let bin = resolve_tytus_bin();
+    let spawned = Command::new(&bin)
+        .args(["ui", "--stop", "--pod", &pod])
+        .env("TYTUS_HEADLESS", "1")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(_) => respond_json(request, 202, &serde_json::json!({"ok": true, "pod": pod})),
+        Err(e) => respond_json(request, 500, &serde_json::json!({
+            "error": format!("failed to spawn: {}", e)
+        })),
+    }
+}
+
+fn handle_configure(request: Request) {
+    // `tytus configure` is an interactive overlay editor — needs a TTY
+    // for the multi-step prompt flow. Spawn a Terminal, matching the
+    // tray's Settings ▸ Configure Agent… item.
+    crate::open_in_terminal_simple(
+        "tytus configure; echo; echo 'Press Enter to close…'; read _"
+    );
+    respond_json(request, 202, &serde_json::json!({ "ok": true }));
 }
 
 // ── Helpers ────────────────────────────────────────────────────

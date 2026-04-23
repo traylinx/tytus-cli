@@ -23,6 +23,13 @@ dirs.workspace = true
 tiny_http = "0.12"
 atomek-pods = { path = "../pods" }
 atomek-core = { path = "../core" }
+# Needed to derive per-pod gateway_token = sha256(pod_api_key||pod_id)[:48]
+# when state.json hasn't been backfilled yet (fresh install — CLI only
+# populates it via `tytus env`, which the wizard never calls). Without
+# this derivation the wizard would show "Open in Browser" URLs that
+# 401 because they lack the ?token= query the edge plugin requires.
+sha2 = "0.10"
+hex = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tytus Tower</title>
+  <link rel="stylesheet" href="/assets/tower.css">
+</head>
+<body data-view="chooser">
+  <main class="shell">
+    <header class="header">
+      <div class="brand">
+        <div class="dot"></div>
+        <h1>Tytus Tower</h1>
+      </div>
+      <p class="subtitle" id="subtitle">Your private AI pods, agents, and connections.</p>
+      <div class="status-line" id="status-line"></div>
+      <div class="header-actions">
+        <button id="hdr-health" class="btn-hdr" type="button">Run Health Test</button>
+        <button id="hdr-conn" class="btn-hdr" type="button" data-state="unknown">…</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner hidden" role="alert"></div>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <section id="health-panel" class="health-panel hidden">
+      <div class="health-panel-head">
+        <h2 id="health-panel-title">Running health test…</h2>
+        <button id="health-panel-close" class="health-panel-close" type="button" aria-label="Close">×</button>
+      </div>
+      <pre id="health-panel-log" class="log"></pre>
+    </section>
+
+    <section id="chooser" class="chooser">
+      <div id="budget" class="budget hidden">
+        <div class="budget-main">
+          <div class="budget-label">Your plan</div>
+          <div class="budget-numbers">
+            <span id="budget-used">0</span><span class="budget-slash"> / </span><span id="budget-limit">0</span>
+            <span class="budget-units-text">units used</span>
+          </div>
+          <div class="budget-meta">
+            <span id="budget-tier" class="budget-tier-chip"></span>
+            <span id="budget-remaining"></span>
+          </div>
+        </div>
+        <div class="budget-bar">
+          <div id="budget-bar-fill" class="budget-bar-fill"></div>
+        </div>
+        <div id="budget-included" class="budget-running hidden">
+          <div class="budget-running-label">Always included <span class="budget-running-sub">— free, doesn't count against units</span></div>
+          <div id="budget-included-list" class="budget-running-list"></div>
+        </div>
+        <div id="budget-running" class="budget-running hidden">
+          <div class="budget-running-label">Already running</div>
+          <div id="budget-running-list" class="budget-running-list"></div>
+        </div>
+      </div>
+      <div id="catalog-loading" class="card placeholder">
+        <div class="spinner"></div>
+        <p>Loading agent catalog…</p>
+      </div>
+      <div id="catalog-error" class="card error hidden">
+        <h3>Couldn't load the catalog.</h3>
+        <p id="catalog-error-msg"></p>
+        <button id="retry" class="btn-primary">Retry</button>
+      </div>
+      <div id="catalog" class="catalog hidden"></div>
+    </section>
+
+    <section id="installing" class="installing hidden">
+      <div class="card installing-card">
+        <div class="installing-head">
+          <div class="spinner"></div>
+          <div class="installing-head-text">
+            <h2 id="installing-title">Installing…</h2>
+            <div id="installing-status" class="installing-status">Starting…</div>
+          </div>
+          <div id="installing-elapsed" class="installing-elapsed">0s</div>
+        </div>
+        <pre id="log" class="log log-live" aria-live="polite"></pre>
+      </div>
+    </section>
+
+    <section id="success" class="success hidden">
+      <div class="success-header">
+        <div class="check">✓</div>
+        <div>
+          <h2 id="success-title">Installed.</h2>
+          <p id="success-subtitle">Your assistant is live. Pick how you'd like to use it.</p>
+        </div>
+      </div>
+
+      <div class="next-steps">
+        <div class="next-steps-label">WHAT'S NEXT</div>
+        <div class="next-steps-grid">
+          <button class="next-cta next-cta-primary" id="nx-open" type="button">
+            <div class="nx-emoji">💬</div>
+            <div class="nx-body">
+              <div class="nx-title">Chat now</div>
+              <div class="nx-sub">Open the assistant in your browser</div>
+            </div>
+          </button>
+          <button class="next-cta" id="nx-channels" type="button">
+            <div class="nx-emoji">📱</div>
+            <div class="nx-body">
+              <div class="nx-title">Connect a messenger</div>
+              <div class="nx-sub">Telegram, Discord, Slack, iMessage…</div>
+            </div>
+          </button>
+          <button class="next-cta" id="nx-editor" type="button">
+            <div class="nx-emoji">⌨️</div>
+            <div class="nx-body">
+              <div class="nx-title">Use in your editor</div>
+              <div class="nx-sub">Cursor, Claude Desktop, OpenCode</div>
+            </div>
+          </button>
+        </div>
+
+        <!-- Messenger picker — revealed by "Connect a messenger" -->
+        <div id="channels-picker" class="channels-picker hidden">
+          <div class="channels-pick-intro">
+            Pick a messenger. We'll open Terminal with the command — the CLI will ask for your bot token, securely.
+          </div>
+          <div id="channels-grid" class="channels-grid"></div>
+        </div>
+
+        <!-- Editor env block — revealed by "Use in your editor" -->
+        <div id="editor-env" class="editor-env hidden">
+          <div class="editor-env-intro">
+            Paste these into your shell, editor config, or `.env` file:
+          </div>
+          <pre id="editor-env-block" class="env"></pre>
+          <button id="editor-copy" class="btn-primary">Copy</button>
+        </div>
+      </div>
+
+      <details class="pod-details-disclosure">
+        <summary>Pod details (URLs, restart, uninstall)</summary>
+        <div id="success-panel-slot"></div>
+      </details>
+
+      <div class="row">
+        <button id="install-another" class="btn-secondary">Install another agent</button>
+        <button id="done" class="btn-secondary">Close</button>
+      </div>
+    </section>
+
+    <section id="failure" class="failure hidden">
+      <div class="card error">
+        <h2>Install failed</h2>
+        <p id="failure-msg"></p>
+        <details class="installing-log-disclosure failure-log-disclosure">
+          <summary>Show full log</summary>
+          <pre id="failure-log" class="log"></pre>
+        </details>
+        <div class="row">
+          <button id="failure-retry" class="btn-primary">Revoke pod &amp; try again</button>
+          <button id="failure-close" class="btn-secondary">Close</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="settings" class="settings">
+      <h2 class="settings-title">Settings</h2>
+      <div class="settings-row">
+        <label class="settings-toggle" for="st-autostart-tunnel">
+          <input type="checkbox" id="st-autostart-tunnel">
+          <span>Start tunnel at login</span>
+        </label>
+        <div class="settings-hint">Bring the WireGuard tunnel up automatically every time you log into this machine.</div>
+      </div>
+      <div class="settings-row">
+        <label class="settings-toggle" for="st-autostart-tray">
+          <input type="checkbox" id="st-autostart-tray">
+          <span>Launch tray at login</span>
+        </label>
+        <div class="settings-hint">Open the Tytus menu-bar app when your session starts.</div>
+      </div>
+      <div class="settings-row">
+        <button id="st-configure" class="btn-secondary" type="button">Configure Agent…</button>
+        <div class="settings-hint">Interactive overlay editor (model defaults, context window, timeouts). Opens in Terminal.</div>
+      </div>
+      <div class="settings-row">
+        <button id="st-signout" class="btn-danger" type="button">Sign Out</button>
+        <div class="settings-hint">Revokes all your pods, clears stored credentials, tears down active tunnels.</div>
+      </div>
+    </section>
+
+    <details id="troubleshoot" class="troubleshoot">
+      <summary class="troubleshoot-summary">Troubleshoot</summary>
+      <div class="troubleshoot-body">
+
+        <div id="tr-refresh-err" class="trouble-row hidden">
+          <div class="trouble-label trouble-label-warn">Last refresh error</div>
+          <pre id="tr-refresh-err-text" class="trouble-err-text"></pre>
+        </div>
+
+        <div class="trouble-row">
+          <div class="trouble-label">Diagnostics</div>
+          <div class="trouble-actions">
+            <button id="tr-doctor" class="btn-secondary" type="button">Run Doctor</button>
+          </div>
+          <div class="settings-hint">Checks auth, pod allocation, tunnel, gateway, MCP wiring.</div>
+        </div>
+
+        <section id="doctor-panel" class="health-panel hidden">
+          <div class="health-panel-head">
+            <h2 id="doctor-panel-title">Running doctor…</h2>
+            <button id="doctor-panel-close" class="health-panel-close" type="button" aria-label="Close">×</button>
+          </div>
+          <pre id="doctor-panel-log" class="log"></pre>
+        </section>
+
+        <div class="trouble-row">
+          <div class="trouble-label">Daemon</div>
+          <div class="trouble-actions">
+            <span id="daemon-status-pill" class="pill">checking…</span>
+            <button id="tr-daemon-start" class="btn-secondary" type="button">Start</button>
+            <button id="tr-daemon-stop" class="btn-secondary" type="button">Stop</button>
+            <button id="tr-daemon-restart" class="btn-secondary" type="button">Restart</button>
+          </div>
+          <div class="settings-hint">Background token-refresh process. Stop/restart if auth is stuck.</div>
+        </div>
+
+        <div class="trouble-row">
+          <div class="trouble-label">Logs</div>
+          <div class="trouble-actions">
+            <select id="log-select" class="log-select">
+              <option value="daemon">daemon.log</option>
+              <option value="startup">autostart.log</option>
+            </select>
+            <label class="log-follow-lbl">
+              <input type="checkbox" id="log-follow" checked>
+              Follow
+            </label>
+            <button id="log-clear" class="btn-secondary" type="button">Clear view</button>
+          </div>
+          <pre id="log-view" class="log log-tail" aria-live="polite"></pre>
+          <div id="log-missing" class="settings-hint hidden">Log file not present yet.</div>
+        </div>
+
+      </div>
+    </details>
+
+    <footer class="tower-footer">
+      <div class="tower-footer-links">
+        <a id="footer-docs" href="https://github.com/traylinx/tytus-cli" target="_blank" rel="noopener">Documentation</a>
+        <span class="tower-footer-sep">·</span>
+        <a id="footer-about" href="#" class="tower-footer-about-link">About Tytus</a>
+      </div>
+      <div id="footer-about-panel" class="tower-footer-about hidden">
+        <div class="tower-footer-about-row"><span>Tower</span> <code>/tower</code></div>
+        <div class="tower-footer-about-row"><span>Bundle</span> <code id="about-bundle">—</code></div>
+        <div class="tower-footer-about-row"><span>Daemon</span> <code id="about-daemon">—</code></div>
+        <div class="tower-footer-about-row"><span>Signed in</span> <code id="about-email">—</code></div>
+      </div>
+    </footer>
+  </main>
+  <script src="/assets/tower.js"></script>
+</body>
+</html>

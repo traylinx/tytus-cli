@@ -490,7 +490,7 @@ fn check_tray_autostart_installed() -> bool {
 }
 
 /// Check whether /Applications/Tytus.app exists.
-fn check_app_bundle_installed() -> bool {
+pub(crate) fn check_app_bundle_installed() -> bool {
     #[cfg(target_os = "macos")]
     { std::path::Path::new("/Applications/Tytus.app").exists() }
     #[cfg(not(target_os = "macos"))]
@@ -875,6 +875,14 @@ fn build_menu(state: &TrayState) -> Menu {
         let _ = menu.append(&MenuItem::with_id("login", "Sign In…", !is_busy, None));
         let _ = menu.append(&PredefinedMenuItem::separator());
     } else {
+        // Tower — the full-surface control page. Everything the tray
+        // exposes (and more — catalog, running-pod panels, live logs)
+        // lives there. Listed first inside the logged-in block so the
+        // user's top-of-menu glance answers "where do I go to do
+        // anything non-trivial" with one click.
+        let _ = menu.append(&MenuItem::with_id("open_tower", "Open Tytus Tower", true, None));
+        let _ = menu.append(&PredefinedMenuItem::separator());
+
         // Phase 4: the public-edge URL works without the WG tunnel, so
         // "Open in ▸" and "Run Health Test" are useful regardless of
         // tunnel state — the connection_pair the launchers consume picks
@@ -1748,8 +1756,8 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // the user's default browser (SPRINT §6 E). The per-agent
         // terminal shortcuts below are legacy + fallback when the
         // localhost server isn't bound (rare).
-        "install_agent" => {
-            web_server::open_wizard();
+        "install_agent" | "open_tower" => {
+            web_server::open_tower();
         }
         // Install a specific agent via the terminal-picker fallback.
         "install_agent_nemoclaw" => {
@@ -1817,7 +1825,7 @@ fn open_pod_via_forwarder(pod_id: &str) {
 /// We trust the marker only when the pid is alive AND the port still
 /// accepts a TCP connect. Anything else = stale → return None and let
 /// the caller spawn a fresh forwarder.
-fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
+pub(crate) fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
     let path = format!("/tmp/tytus/ui-{}.port", pod_id);
     let raw = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -2372,7 +2380,7 @@ fn open_log_file(path: &str) {
 /// Automation entitlement for Terminal.app, so the AppleScript was rejected
 /// with no visible prompt.
 #[cfg(target_os = "macos")]
-fn open_in_terminal_simple(cmd: &str) {
+pub(crate) fn open_in_terminal_simple(cmd: &str) {
     let _ = std::fs::create_dir_all("/tmp/tytus");
     // Unique path per invocation so rapid clicks don't race on the same file.
     let nonce = std::time::SystemTime::now()
@@ -2412,7 +2420,7 @@ fn open_in_terminal_simple(cmd: &str) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn open_in_terminal_simple(cmd: &str) {
+pub(crate) fn open_in_terminal_simple(cmd: &str) {
     // Best-effort: try common Linux terminals.
     for term in &["gnome-terminal", "konsole", "xterm"] {
         if std::process::Command::new(term)
