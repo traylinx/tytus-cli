@@ -1124,7 +1124,7 @@ async fn activate_tunnel_elevated(
             .and_then(|s| s.trim().parse::<i32>().ok())
             .filter(|&pid| pid > 1 && unsafe {
                 if libc::kill(pid, 0) == 0 { true }
-                else { *libc::__error() == libc::EPERM }
+                else { std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
             });
         let orphan_pods = tunnel_reap::list_orphan_tunnel_pods();
         pidfile_pid.is_some() || orphan_pods.iter().any(|p| p == target_pod_id)
@@ -6613,7 +6613,7 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
                 if let Ok(pid) = raw.trim().parse::<i32>() {
                     let alive = pid > 1 && unsafe {
                         if libc::kill(pid, 0) == 0 { true }
-                        else { *libc::__error() == libc::EPERM }
+                        else { std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
                     };
                     if alive { tunnel_ok = true; }
                 }
