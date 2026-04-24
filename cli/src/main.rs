@@ -1,7 +1,9 @@
 mod channels;
 mod channels_store;
+mod cmd_transfer;
 mod daemon;
 mod state;
+mod transfer;
 #[allow(dead_code)]
 mod wizard;
 
@@ -370,6 +372,69 @@ enum Commands {
         /// Path to temp JSON file with tunnel config
         config_file: String,
     },
+    /// Push a file or directory from your Mac into a pod's workspace.
+    /// Directories are tarred+streamed automatically. Default destination
+    /// is `/app/workspace/inbox/` (auto-created). Refuses transfers > 100 MB
+    /// (use the Garage-backed shared filesystem in v0.7 for GB-scale).
+    Push {
+        /// Local file or directory to push.
+        local: String,
+        /// Pod ID to push to. Omit if exactly one pod is connected.
+        #[arg(short, long)]
+        pod: Option<String>,
+        /// Remote destination. Default `/app/workspace/inbox/`. Must live
+        /// under `/app/workspace/` — pod rootfs is read-only outside.
+        #[arg(long)]
+        to: Option<String>,
+        /// Suppress the progress bar (otherwise shown on stderr for >1 MB).
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Pull a file or directory from a pod's workspace to your Mac.
+    Pull {
+        /// Remote path (must live under /app/workspace/).
+        remote: String,
+        /// Pod ID to pull from. Omit if exactly one pod is connected.
+        #[arg(short, long)]
+        pod: Option<String>,
+        /// Local destination. Default: current directory, basename preserved.
+        #[arg(long)]
+        to: Option<String>,
+        /// Suppress the progress bar.
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// List contents of a remote path under /app/workspace/. Default
+    /// PATH is `/app/workspace/inbox/`. Columns: mode, size, mtime, name.
+    Ls {
+        /// Remote path. Default `/app/workspace/inbox/`.
+        path: Option<String>,
+        /// Pod ID. Omit if exactly one pod is connected.
+        #[arg(short, long)]
+        pod: Option<String>,
+    },
+    /// Delete a remote path under /app/workspace/. Requires --recursive
+    /// for directories. Refuses any path outside /app/workspace/.
+    Rm {
+        /// Remote path to delete.
+        remote: String,
+        /// Pod ID. Omit if exactly one pod is connected.
+        #[arg(short, long)]
+        pod: Option<String>,
+        /// Required to delete a directory.
+        #[arg(long)]
+        recursive: bool,
+    },
+    /// Show the local push/pull/rm audit log (JSONL). Defaults to the last
+    /// 20 events; `--tail 0` prints all.
+    Transfers {
+        /// How many trailing rows to show. Use 0 for all.
+        #[arg(long, default_value = "20")]
+        tail: usize,
+        /// Filter by pod id.
+        #[arg(short, long)]
+        pod: Option<String>,
+    },
 }
 
 #[derive(Clone, ValueEnum, Debug)]
@@ -529,6 +594,21 @@ async fn main() {
         Some(Commands::Tray { action }) => cmd_tray(action, cli.json),
         // Hidden subcommand: called by elevated helper to activate tunnel from a temp config file
         Some(Commands::TunnelUp { config_file }) => cmd_tunnel_up(&config_file, cli.json).await,
+        Some(Commands::Push { local, pod, to, quiet }) => {
+            cmd_transfer::cmd_push(&http, local, pod, to, quiet, cli.json).await
+        }
+        Some(Commands::Pull { remote, pod, to, quiet }) => {
+            cmd_transfer::cmd_pull(&http, remote, pod, to, quiet, cli.json).await
+        }
+        Some(Commands::Ls { path, pod }) => {
+            cmd_transfer::cmd_ls(&http, path, pod, cli.json).await
+        }
+        Some(Commands::Rm { remote, pod, recursive }) => {
+            cmd_transfer::cmd_rm(&http, remote, pod, recursive, cli.json).await
+        }
+        Some(Commands::Transfers { tail, pod }) => {
+            cmd_transfer::cmd_transfers(tail, pod, cli.json).await
+        }
     }
 }
 
@@ -7106,7 +7186,7 @@ fn probe_stable_gateway() -> bool {
     n >= 5 && buf[..5] == *b"HTTP/"
 }
 
-async fn ensure_token(state: &mut CliState, http: &atomek_core::HttpClient) -> Result<(), atomek_core::AtomekError> {
+pub(crate) async fn ensure_token(state: &mut CliState, http: &atomek_core::HttpClient) -> Result<(), atomek_core::AtomekError> {
     let headless = !wizard::is_interactive();
 
     if state.has_valid_token() {
@@ -7278,7 +7358,7 @@ fn append_autostart_log(msg: &str) {
     }
 }
 
-async fn get_credentials(state: &mut CliState, http: &atomek_core::HttpClient) -> (String, String) {
+pub(crate) async fn get_credentials(state: &mut CliState, http: &atomek_core::HttpClient) -> (String, String) {
     if let (Some(s), Some(a)) = (&state.secret_key, &state.agent_user_id) {
         return (s.clone(), a.clone());
     }
