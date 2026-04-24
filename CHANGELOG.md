@@ -5,7 +5,99 @@ All notable changes to the `tytus` CLI, `tytus-mcp` server, and
 conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
 bumps are allowed to break compat.
 
-## [Unreleased] — v0.5.2-alpha
+## [0.5.0] — 2026-04-24
+
+Four themes consolidated from the three in-flight `v0.5.x-alpha`
+drops plus the just-shipped shared-folders sprint:
+
+- **Shared folders** — `tytus push / pull / ls / rm / transfers`
+  move files between your Mac and any pod. Tray Files submenu per pod
+  with osascript picker + macOS notifications. Portable
+  `skill-tytus-files` skill with 53 EN+ES trigger phrasings so every
+  infected AI CLI can translate "push the PDF to pod 2" / "manda el
+  reporte al pod-04" into the right invocation. Full doc at
+  `docs/file-sharing.md`.
+- **Channels** — `tytus channels add/list/remove/catalog` wires
+  OpenClaw's Telegram / Discord / Slack / LINE extensions without a
+  browser. Pod egress bridge + DOCKER-USER iptables rules enable
+  outbound chat-API reachability without exposing cross-pod traffic
+  or the metadata endpoint.
+- **Daemon hardening** — state.json mtime watcher + self-heal
+  watchdog + stale-PID sweeper + degradation surfaced in tray. Fixes
+  the cache-coherence class of bugs (stale in-memory creds, silent
+  keychain timeouts, tray showing "Sign In" while logged in).
+- **Lope teammates** — `tytus lope ask/install/list/identity` turns
+  pod agents (OpenClaw, Hermes) into lope validators; `tytus bridge`
+  ships the reverse channel for pod → Harvey notifications via brain
+  journal + superbrain event store. Python SDK at `tytus_sdk/`.
+
+### Shared folders (new in 0.5.0)
+
+#### Added
+
+- **`tytus push <LOCAL> [--pod NN] [--to /app/workspace/PATH]`** —
+  file or directory push. Directories are tarred + gzipped locally and
+  unpacked on the pod. Default destination is `/app/workspace/inbox/`
+  (auto-created). Smart `--pod` default: one pod connected → auto-
+  picked; multiple → refuses with the list.
+- **`tytus pull <REMOTE> [--pod NN] [--to LOCAL]`** — inverse. Files
+  + whole directories supported.
+- **`tytus ls [PATH] [--pod NN] [--json]`** — list pod contents under
+  `/app/workspace/`. Columns: mode, size, mtime, name.
+- **`tytus rm <REMOTE> [--pod NN] [--recursive]`** — delete. Refuses
+  directories without `--recursive`; refuses anything outside
+  `/app/workspace/` unconditionally.
+- **`tytus transfers [--tail N] [--pod NN] [--json]`** — reads the
+  append-only JSONL audit log. Every `push`/`pull`/`rm` invocation
+  (success OR failure) appends exactly one line.
+- **Progress bar** on stderr for transfers > 1 MB (`indicatif`),
+  suppressed with `--quiet`.
+- **100 MB ceiling per transfer** — refused with a clear pointer to
+  the planned v0.7 Garage-backed shared filesystem. Deliberate;
+  docker-exec base64 streaming is the wrong foundation for GB-scale.
+- **`cli/src/transfer.rs`** — shared helpers: path validation
+  (rejects outside `/app/workspace/`, `..` segments, NUL bytes), size
+  ceiling, `flock`-serialised JSONL transfer log, shell escaping.
+- **`cli/src/cmd_transfer.rs`** — command implementations. Chunked
+  256 KB base64 via the existing `tytus exec` pipeline (no new infra,
+  fits `dash` ARG_MAX on the pod side).
+- **Tray Files submenu** — `Pods ▸ pod-NN ▸ Files ▸ Push file… /
+  Push folder… / List inbox in Terminal / Open local download
+  folder`. Uses osascript for the file picker; posts macOS
+  notifications on transfer completion and reveals pulled files in
+  Finder.
+- **`plugins-core/skill-tytus-files/`** (in `makakoo-os`) — portable
+  SKILL.md with 53 EN + ES trigger phrasings ("push PDF to pod 2",
+  "manda el reporte al pod 4", "qué hay en el pod 02", "descarga el
+  log del pod-04", etc.), decision table, cross-CLI routing notes,
+  and a regex-based trigger-corpus test (7 tests green).
+- **`docs/file-sharing.md`** — canonical reference: mental model,
+  quickstart, tray tour, skill discovery, when-NOT-to-use
+  cross-references (to `harvey_knowledge_ingest` for RAG and the v0.7
+  Garage sprint for bulk data), troubleshooting cheatsheet.
+
+#### Why
+
+Before this release the only path to move a file onto a pod was a
+hand-crafted `tytus exec base64 -d` pipeline. This release makes the
+feature feel like `scp` with zero ceremony — one command, smart pod
+defaults, refuses path escapes before sending bytes. The 100 MB cap
+is the boundary where the base64-over-exec transport stops being a
+good idea; past that, wait for Garage.
+
+### Known limitations
+
+- **Drag-and-drop onto the menu bar icon** is deferred. The
+  `tray-icon` crate wraps `NSStatusItem` without the
+  `NSDraggingDestination` protocol, and subclassing via `objc2` is
+  non-trivial. The menu-based file picker covers the same user
+  intent in one extra click. Tracked for a follow-up release.
+- **Live-pod integration tests** are manual. Unit + concurrency
+  tests cover the helper surface (34 tests green across the CLI +
+  tray + skill); end-to-end "push → pull → md5-match" is verified by
+  hand before cutting.
+
+### Channels (was v0.5.2-alpha)
 
 Unblock OpenClaw's existing channel extensions (Telegram, Discord,
 Slack Socket Mode, LINE). Two layers: infrastructure change so pods
@@ -91,7 +183,7 @@ push to the pod, but the agent container will come up without the
 new env vars (the channel extension will log "missing
 TELEGRAM_BOT_TOKEN" and no-op).
 
-## [Unreleased] — v0.5.1-alpha
+### Daemon hardening (was v0.5.1-alpha)
 
 Production-hardening pass against the class of bugs that shipped the
 2026-04-20 tray regression: stale in-memory daemon state, broken
@@ -150,7 +242,7 @@ daemon to `NeedsLogin` 19 hours before the user noticed. Fix is the
 watcher + self-heal + health surfacing together — each alone is
 insufficient.
 
-## [Unreleased] — v0.5.0-alpha
+### Lope teammates (was v0.5.0-alpha)
 
 Tytus pod agents are now first-class lope teammates with a reusable
 Python SDK and a bidirectional bridge back to Harvey (brain journal +
