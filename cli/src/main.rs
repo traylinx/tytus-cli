@@ -1985,16 +1985,33 @@ async fn configure_nemoclaw_for_zero_auth(
     // isControlUiBrowserContainerLocalEquivalent in server.impl).
     let pod_num: u16 = pod_id.parse().unwrap_or(0);
     let fwd_port = 18700u16.saturating_add(pod_num);
+    // Per-pod-subdomain sprint (2026-04-23): the browser may also load the
+    // UI from `https://{slug}-pNN.tytus.traylinx.com` (per-pod) or the
+    // legacy `https://{slug}.tytus.traylinx.com/p/NN/...`. OpenClaw's
+    // origin check is exact-string, not pattern — both URLs must be in
+    // allowedOrigins or the WebSocket upgrade fails with "origin not
+    // allowed". Pull from state so we don't have to rebuild the pattern.
+    let (pod_public_url, edge_public_url) = {
+        let st = CliState::load();
+        let p = st.pods.into_iter().find(|p| p.pod_id == pod_id);
+        match p {
+            Some(p) => (p.pod_public_url, p.edge_public_url),
+            None => (None, None),
+        }
+    };
+    let mut origins: Vec<serde_json::Value> = vec![
+        serde_json::Value::String("http://localhost:3000".into()),
+        serde_json::Value::String("http://127.0.0.1:3000".into()),
+        serde_json::Value::String(format!("http://10.18.{}.1:3000", pod_num)),
+        serde_json::Value::String(format!("http://localhost:{}", fwd_port)),
+        serde_json::Value::String(format!("http://127.0.0.1:{}", fwd_port)),
+    ];
+    if let Some(u) = pod_public_url.as_deref() { origins.push(serde_json::Value::String(u.to_string())); }
+    if let Some(u) = edge_public_url.as_deref() { origins.push(serde_json::Value::String(u.to_string())); }
     let overlay_json = serde_json::json!({
         "gateway": {
             "controlUi": {
-                "allowedOrigins": [
-                    "http://localhost:3000",
-                    "http://127.0.0.1:3000",
-                    format!("http://10.18.{}.1:3000", pod_num),
-                    format!("http://localhost:{}", fwd_port),
-                    format!("http://127.0.0.1:{}", fwd_port),
-                ]
+                "allowedOrigins": origins
             }
         }
     }).to_string();
@@ -5485,14 +5502,28 @@ async fn ensure_controlui_overlay(
     }
     let secret = st.secret_key.as_deref().ok_or("no secret_key in state")?;
     let uid = st.agent_user_id.as_deref().ok_or("no agent_user_id in state")?;
+    // Pull public-URL fields from the same PodEntry so the overlay always
+    // reflects the current assignment. Per-pod-subdomain sprint (2026-04-23)
+    // made pod_public_url the canonical browser origin; edge_public_url is
+    // the 7-day legacy back-compat form we keep in the list until the
+    // subdomain rip-out gate lifts.
+    let (pod_public_url, edge_public_url) = {
+        let p = st.pods.iter().find(|p| p.pod_id == pod_id);
+        match p {
+            Some(p) => (p.pod_public_url.clone(), p.edge_public_url.clone()),
+            None => (None, None),
+        }
+    };
     let client = atomek_pods::TytusClient::new(http, secret, uid);
     let pod_num: u16 = pod_id.parse().unwrap_or(0);
     let fwd_port = 18700u16.saturating_add(pod_num);
     let wanted = format!("http://localhost:{}", fwd_port);
     let wanted2 = format!("http://127.0.0.1:{}", fwd_port);
 
-    // Probe the live config. If our origin is already in allowedOrigins,
-    // skip the write + restart.
+    // Probe the live config. If all the origins we need are already in
+    // allowedOrigins, skip the write + restart — no-op on already-healthy
+    // pods. If ANY is missing (e.g. pods provisioned before the per-pod-
+    // subdomain sprint had pod_public_url added to the overlay), rewrite.
     let probe_cmd = "cat /app/workspace/.openclaw/config.json 2>/dev/null | node -e \
          \"let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{\
          try{const c=JSON.parse(d);process.stdout.write(JSON.stringify(c.gateway?.controlUi?.allowedOrigins||[]))}\
@@ -5502,21 +5533,27 @@ async fn ensure_controlui_overlay(
         .map_err(|e| e.to_string())?;
     let origins: Vec<String> = serde_json::from_str(probe.stdout.as_deref().unwrap_or("[]"))
         .unwrap_or_default();
-    if origins.iter().any(|o| o == &wanted) && origins.iter().any(|o| o == &wanted2) {
+    let has = |needle: &str| origins.iter().any(|o| o == needle);
+    let public_ok = pod_public_url.as_deref().map_or(true, |u| has(u));
+    let edge_ok = edge_public_url.as_deref().map_or(true, |u| has(u));
+    if has(&wanted) && has(&wanted2) && public_ok && edge_ok {
         return Ok(());
     }
 
     // Missing — write the overlay and restart.
+    let mut origin_list: Vec<serde_json::Value> = vec![
+        serde_json::Value::String("http://localhost:3000".into()),
+        serde_json::Value::String("http://127.0.0.1:3000".into()),
+        serde_json::Value::String(format!("http://10.18.{}.1:3000", pod_num)),
+        serde_json::Value::String(wanted.clone()),
+        serde_json::Value::String(wanted2.clone()),
+    ];
+    if let Some(u) = pod_public_url.as_deref() { origin_list.push(serde_json::Value::String(u.to_string())); }
+    if let Some(u) = edge_public_url.as_deref() { origin_list.push(serde_json::Value::String(u.to_string())); }
     let overlay = serde_json::json!({
         "gateway": {
             "controlUi": {
-                "allowedOrigins": [
-                    "http://localhost:3000",
-                    "http://127.0.0.1:3000",
-                    format!("http://10.18.{}.1:3000", pod_num),
-                    wanted,
-                    wanted2,
-                ]
+                "allowedOrigins": origin_list
             }
         }
     }).to_string();
