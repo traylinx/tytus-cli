@@ -180,6 +180,12 @@ tytus chat [--model ail-compound]    Interactive REPL
 tytus exec [--pod NN] "<command>"    Run shell command in agent container
 tytus configure                      Interactive overlay editor
 
+tytus push <LOCAL> [--pod NN] [--to ...]    Push file/dir to pod (see docs/file-sharing.md)
+tytus pull <REMOTE> [--pod NN] [--to ...]   Pull file/dir from pod
+tytus ls   [PATH] [--pod NN]                List pod files under /app/workspace/
+tytus rm   <REMOTE> [--pod NN] [--recursive]  Delete pod files (refuses outside /app/workspace/)
+tytus transfers [--tail N] [--pod NN]       Show local JSONL audit log
+
 tytus link [DIR] [--only ...]        Link a project so AI CLIs in it know Tytus
 tytus mcp [--format ...]             Print MCP server config for an AI tool
 tytus bootstrap-prompt               Print the paste prompt for any AI tool
@@ -196,6 +202,28 @@ tytus tray install|uninstall|status  macOS only — installs /Applications/Tytus
 ```
 
 Run `tytus <command> --help` for per-command details.
+
+---
+
+## File sharing
+
+Move files and folders between your Mac and any pod:
+
+```bash
+tytus push ~/report.pdf --pod 02            # Mac → pod inbox
+tytus pull /app/workspace/out/result.md --pod 02   # pod → Mac
+tytus ls --pod 02                           # list pod files
+tytus rm /app/workspace/inbox/old --pod 02 --recursive   # delete
+```
+
+Default destination is `/app/workspace/inbox/` (auto-created).
+Directories are tarred + gzipped transparently. The 100 MB ceiling is
+intentional — bulk transfers are the job of the v0.7 Garage sprint.
+
+Full reference: [`docs/file-sharing.md`](docs/file-sharing.md). Drives
+the tray "Files ▸" submenu per pod and the portable
+`skill-tytus-files` skill (human-language triggers in EN + ES on every
+infected AI CLI).
 
 ---
 
