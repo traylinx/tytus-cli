@@ -16,6 +16,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::TrayIconBuilder;
 use std::sync::{Arc, Mutex};
 
+mod files;
 mod icon;
 mod launcher;
 mod socket;
@@ -1168,6 +1169,34 @@ fn build_menu(state: &TrayState) -> Menu {
                 }
                 let _ = pods_sub.append(&channel_sub);
 
+                // ── Files submenu ─────────────────────────
+                // Menu-based file sharing (Phase 2 of shared-folders
+                // sprint). Drag-and-drop onto the menu bar icon proper
+                // needs NSStatusItem subclassing + NSDraggingDestination
+                // which is non-trivial via objc2 — deferred to a follow-
+                // up. The file/folder picker covers the same intent
+                // ("I have this file, put it on my pod") with one extra
+                // click and zero native-code risk.
+                let files_sub = Submenu::new("  Files", true);
+                let _ = files_sub.append(&MenuItem::with_id(
+                    files::menu_id_push_file(&p.pod_id),
+                    "Push file…", true, None,
+                ));
+                let _ = files_sub.append(&MenuItem::with_id(
+                    files::menu_id_push_folder(&p.pod_id),
+                    "Push folder…", true, None,
+                ));
+                let _ = files_sub.append(&PredefinedMenuItem::separator());
+                let _ = files_sub.append(&MenuItem::with_id(
+                    files::menu_id_list_inbox(&p.pod_id),
+                    "List inbox in Terminal", true, None,
+                ));
+                let _ = files_sub.append(&MenuItem::with_id(
+                    files::menu_id_open_downloads(&p.pod_id),
+                    "Open local download folder", true, None,
+                ));
+                let _ = pods_sub.append(&files_sub);
+
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_{}_revoke", p.pod_id),
                     "  Revoke Pod", true, None,
@@ -1779,8 +1808,43 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 }
             }
         }
+        // File sharing (Phase 2 of SPRINT-tytus-shared-folders).
+        other if files::parse_pod_from_files_id(other).is_some() => {
+            let (pod_id, action) = files::parse_pod_from_files_id(other).unwrap();
+            match action {
+                files::FilesAction::PushFile => {
+                    if let Some(path) = files::pick_path(files::PickerKind::File) {
+                        notify("Tytus", &format!("Pushing {} → pod-{}…", short_basename(&path), pod_id));
+                        files::spawn_push(&pod_id, &path);
+                    }
+                }
+                files::FilesAction::PushFolder => {
+                    if let Some(path) = files::pick_path(files::PickerKind::Folder) {
+                        notify("Tytus", &format!("Pushing {} → pod-{}…", short_basename(&path), pod_id));
+                        files::spawn_push(&pod_id, &path);
+                    }
+                }
+                files::FilesAction::ListInbox => {
+                    open_in_terminal_simple(&format!(
+                        "tytus ls /app/workspace/inbox/ --pod {}; echo; echo 'Press Enter to close…'; read _",
+                        shell_escape(&pod_id),
+                    ));
+                }
+                files::FilesAction::OpenDownloads => {
+                    files::open_download_dir(&pod_id);
+                }
+            }
+        }
         _ => {}
     }
+}
+
+fn short_basename(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// Open the pod's web UI through the legacy localhost forwarder
