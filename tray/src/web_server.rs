@@ -342,7 +342,7 @@ fn handle(request: Request, registry: Registry) {
             handle_connect(request);
         }
         (Method::Post, "/api/test") => {
-            handle_test(request);
+            handle_test(request, &registry);
         }
         (Method::Get, "/api/settings") => {
             handle_settings_get(request);
@@ -358,7 +358,7 @@ fn handle(request: Request, registry: Registry) {
         }
         // ── Tower Wave 2: Troubleshoot surface ───────────────────────
         (Method::Post, "/api/doctor") => {
-            handle_doctor(request);
+            handle_doctor(request, &registry);
         }
         (Method::Post, "/api/daemon/start") => {
             handle_daemon_lifecycle(request, DaemonAction::Start);
@@ -1611,35 +1611,19 @@ fn handle_connect(request: Request) {
     respond_json(request, 202, &serde_json::json!({"ok": true}));
 }
 
-fn handle_test(request: Request) {
-    // Synchronous — `tytus test` is E2E (~5-15s). Running inline so the
-    // page can show the result without implementing SSE for Wave 1.
-    // Output capped + timeout'd so a wedged subprocess can't hang the
-    // tray's HTTP thread indefinitely.
-    let bin = resolve_tytus_bin();
-    let output = Command::new(&bin)
-        .arg("test")
-        .env("TYTUS_HEADLESS", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let exit_code = out.status.code().unwrap_or(-1);
-            respond_json(request, 200, &serde_json::json!({
-                "ok": out.status.success(),
-                "exit_code": exit_code,
-                "stdout": stdout,
-                "stderr": stderr,
-            }));
-        }
-        Err(e) => respond_json(request, 500, &serde_json::json!({
-            "error": format!("failed to run tytus test: {}", e)
-        })),
-    }
+fn handle_test(request: Request, registry: &Registry) {
+    // Streamed: `tytus test` is E2E (~5-15s) with per-step spinners.
+    // Returns { job_id }; output streams via /api/jobs/<id>/stream so
+    // the page can render each check as it lands instead of one big
+    // blob at the end. Pre-streaming behavior was Command::output()
+    // which blocked until exit; the user saw nothing for the whole
+    // run. Requires the wizard helpers in the CLI to flush stdout
+    // per line (cli/src/wizard.rs::flush()) — without that, Rust
+    // block-buffers stdout when piped and the lines arrive in bursts
+    // at process exit anyway.
+    let (job_id, job) = registry.create();
+    spawn_pod_action(job, vec!["test".to_string()]);
+    respond_json(request, 202, &serde_json::json!({"job_id": job_id}));
 }
 
 fn handle_settings_get(request: Request) {
@@ -1754,31 +1738,14 @@ fn autostart_tray_installed() -> bool { false }
 
 // ── Tower Wave 2: Troubleshoot handlers ────────────────────────
 
-fn handle_doctor(request: Request) {
-    // `tytus doctor` is the full diagnostic — DNS, auth, tunnel, pod,
-    // gateway, MCP. Runs in a few seconds. Synchronous is fine; client
-    // shows spinner and renders stdout in a panel.
-    let bin = resolve_tytus_bin();
-    let out = Command::new(&bin)
-        .arg("doctor")
-        .env("TYTUS_HEADLESS", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
-    match out {
-        Ok(o) => {
-            respond_json(request, 200, &serde_json::json!({
-                "ok": o.status.success(),
-                "exit_code": o.status.code().unwrap_or(-1),
-                "stdout": String::from_utf8_lossy(&o.stdout).to_string(),
-                "stderr": String::from_utf8_lossy(&o.stderr).to_string(),
-            }));
-        }
-        Err(e) => respond_json(request, 500, &serde_json::json!({
-            "error": format!("failed to run tytus doctor: {}", e)
-        })),
-    }
+fn handle_doctor(request: Request, registry: &Registry) {
+    // Streamed: `tytus doctor` runs DNS, auth, tunnel, pod, gateway,
+    // MCP checks back-to-back. Returns { job_id }; output streams via
+    // /api/jobs/<id>/stream. Same rationale as handle_test — see that
+    // doc block + the wizard::flush() helper in the CLI.
+    let (job_id, job) = registry.create();
+    spawn_pod_action(job, vec!["doctor".to_string()]);
+    respond_json(request, 202, &serde_json::json!({"job_id": job_id}));
 }
 
 enum DaemonAction { Start, Stop, Restart }

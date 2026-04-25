@@ -2185,6 +2185,71 @@
     }
   });
 
+  // ── Streamed global action (Run Health Test / Run Doctor) ────
+  //
+  // Both endpoints now respond with `{job_id}` (HTTP 202) and stream
+  // their subprocess output via SSE on /api/jobs/<id>/stream — same
+  // pipeline as the install flow + the per-pod streamed actions.
+  // Output appears live, line-by-line, instead of all-at-once after
+  // the subprocess exits. Requires `cli/src/wizard.rs::flush()` to
+  // flush stdout per println — without that, Rust block-buffers
+  // stdout when piped and the lines all release at process exit.
+  async function streamGlobalAction(opts) {
+    const { url, panel, title, log, btn, prevText,
+            okTitle, errTitle, runningTitle, errorTitle } = opts;
+    const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = prevText; } };
+    let res, body;
+    try {
+      res = await fetch(url, { method: 'POST' });
+      body = await res.json();
+    } catch (err) {
+      panel.classList.add('err');
+      title.textContent = errorTitle;
+      log.textContent = String(err);
+      restoreBtn();
+      return;
+    }
+    if (!res.ok || !body || !body.job_id) {
+      panel.classList.add('err');
+      title.textContent = errorTitle;
+      log.textContent = (body && body.error) || `Failed (HTTP ${res.status})`;
+      restoreBtn();
+      return;
+    }
+    if (title) title.textContent = runningTitle;
+    const es = new EventSource(`/api/jobs/${encodeURIComponent(body.job_id)}/stream`);
+    es.addEventListener('log', (ev) => {
+      const line = (ev.data || '').replace(/\\n/g, '\n');
+      log.textContent += line + '\n';
+      log.scrollTop = log.scrollHeight;
+    });
+    es.addEventListener('exit', (ev) => {
+      let code = -1;
+      try { code = (JSON.parse(ev.data || '{}').code) ?? -1; } catch {}
+      panel.classList.add(code === 0 ? 'ok' : 'err');
+      title.textContent = code === 0 ? okTitle : errTitle(code);
+      es.close();
+      restoreBtn();
+    });
+    es.addEventListener('fail', (ev) => {
+      panel.classList.add('err');
+      title.textContent = errorTitle;
+      log.textContent += `\n[error] ${ev.data || 'job failed'}`;
+      es.close();
+      restoreBtn();
+    });
+    es.onerror = () => {
+      // Only treat onerror as fatal if no terminal event already fired
+      // (panel already has ok/err class set in that case).
+      if (!panel.classList.contains('ok') && !panel.classList.contains('err')) {
+        panel.classList.add('err');
+        title.textContent = 'Connection lost';
+      }
+      es.close();
+      restoreBtn();
+    };
+  }
+
   $('hdr-health')?.addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     const panel = $('health-panel');
@@ -2197,30 +2262,14 @@
     panel.classList.remove('hidden', 'ok', 'err');
     title.textContent = 'Running health test…';
     log.textContent = '';
-    try {
-      const res = await fetch('/api/test', { method: 'POST' });
-      const body = await res.json();
-      if (body.error) {
-        panel.classList.add('err');
-        title.textContent = 'Health test failed to run';
-        log.textContent = body.error;
-      } else {
-        panel.classList.add(body.ok ? 'ok' : 'err');
-        title.textContent = body.ok
-          ? 'Health test passed ✓'
-          : `Health test failed (exit ${body.exit_code})`;
-        log.textContent =
-          (body.stdout || '') +
-          (body.stderr ? `\n\n[stderr]\n${body.stderr}` : '');
-      }
-    } catch (err) {
-      panel.classList.add('err');
-      title.textContent = 'Health test errored';
-      log.textContent = String(err);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = prev;
-    }
+    streamGlobalAction({
+      url: '/api/test',
+      panel, title, log, btn, prevText: prev,
+      okTitle: 'Health test passed ✓',
+      errTitle: (code) => `Health test failed (exit ${code})`,
+      runningTitle: 'Running health test…',
+      errorTitle: 'Health test errored',
+    });
   });
 
   $('health-panel-close')?.addEventListener('click', () => {
@@ -2312,30 +2361,14 @@
     panel.classList.remove('hidden', 'ok', 'err');
     title.textContent = 'Running doctor…';
     log.textContent = '';
-    try {
-      const res = await fetch('/api/doctor', { method: 'POST' });
-      const body = await res.json();
-      if (body.error) {
-        panel.classList.add('err');
-        title.textContent = 'Doctor failed to run';
-        log.textContent = body.error;
-      } else {
-        panel.classList.add(body.ok ? 'ok' : 'err');
-        title.textContent = body.ok
-          ? 'Doctor: all checks passed ✓'
-          : `Doctor reported issues (exit ${body.exit_code})`;
-        log.textContent =
-          (body.stdout || '') +
-          (body.stderr ? `\n\n[stderr]\n${body.stderr}` : '');
-      }
-    } catch (err) {
-      panel.classList.add('err');
-      title.textContent = 'Doctor errored';
-      log.textContent = String(err);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = prev;
-    }
+    streamGlobalAction({
+      url: '/api/doctor',
+      panel, title, log, btn, prevText: prev,
+      okTitle: 'Doctor: all checks passed ✓',
+      errTitle: (code) => `Doctor reported issues (exit ${code})`,
+      runningTitle: 'Running doctor…',
+      errorTitle: 'Doctor errored',
+    });
   });
 
   $('doctor-panel-close')?.addEventListener('click', () => {

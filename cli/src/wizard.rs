@@ -5,7 +5,21 @@
 
 use console::{style, Term};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::io::Write;
 use std::time::Duration;
+
+/// Flush stdout immediately. Needed because Rust's println! is
+/// BLOCK-buffered when stdout is connected to a pipe (e.g., the tray's
+/// tytus-tray process spawning `tytus test` with Stdio::piped() so
+/// output can stream into the Tower web UI via SSE). Without an explicit
+/// flush, every wizard-helper line accumulates in stdout's BufWriter
+/// and only releases at process exit — the user sees nothing for ~10s,
+/// then the entire output appears at once. Cheap on TTY (already
+/// line-buffered, flush is a no-op).
+#[inline]
+pub(crate) fn flush() {
+    let _ = std::io::stdout().flush();
+}
 
 /// ASCII logo shown on welcome screens.
 pub const LOGO: &str = r#"
@@ -35,6 +49,7 @@ pub fn is_interactive() -> bool {
 /// Print the big logo in cyan.
 pub fn print_logo() {
     println!("{}", style(LOGO).cyan().bold());
+    flush();
 }
 
 /// Print a section header with a decorated line.
@@ -45,12 +60,14 @@ pub fn print_header(text: &str) {
     println!("  {}", style(text).cyan().bold());
     println!("{}", style(&line).cyan().dim());
     println!();
+    flush();
 }
 
 /// Print a step indicator like "Step 2/5: Connecting..."
 pub fn print_step(current: usize, total: usize, text: &str) {
     let prefix = format!("[{}/{}]", current, total);
     println!("{} {}", style(prefix).cyan().bold(), style(text).bold());
+    flush();
 }
 
 /// Status icons with colors.
@@ -77,26 +94,31 @@ pub fn icon_arrow() -> console::StyledObject<&'static str> {
 /// Print a green success line.
 pub fn print_ok(msg: &str) {
     println!("  {} {}", icon_ok(), msg);
+    flush();
 }
 
 /// Print a red failure line.
 pub fn print_fail(msg: &str) {
     println!("  {} {}", icon_fail(), msg);
+    flush();
 }
 
 /// Print a yellow warning line.
 pub fn print_warn(msg: &str) {
     println!("  {} {}", icon_warn(), style(msg).yellow());
+    flush();
 }
 
 /// Print a blue info line.
 pub fn print_info(msg: &str) {
     println!("  {} {}", icon_info(), msg);
+    flush();
 }
 
 /// Print a cyan arrow hint / next-action line.
 pub fn print_hint(msg: &str) {
     println!("  {} {}", icon_arrow(), style(msg).cyan());
+    flush();
 }
 
 /// Print a boxed message (for important info).
@@ -112,11 +134,13 @@ pub fn print_box(title: &str, lines: &[&str]) {
     let top = format!("╭─ {} {}╮", style(title).bold(), "─".repeat(width.saturating_sub(title.chars().count() + 4)));
     let bot = format!("╰{}╯", "─".repeat(width));
     println!("{}", style(top).cyan());
+    flush();
     for line in lines {
         let padding = width.saturating_sub(console::measure_text_width(line) + 2);
         println!("{} {}{} {}", style("│").cyan(), line, " ".repeat(padding), style("│").cyan());
     }
     println!("{}", style(bot).cyan());
+    flush();
 }
 
 /// Create a spinner with a message. Respects non-TTY: becomes plain print.
@@ -124,6 +148,7 @@ pub fn spinner(msg: &str) -> ProgressBar {
     if !is_interactive() {
         // In non-TTY mode, just print the message immediately and return a hidden bar.
         println!("  → {}", msg);
+        flush();
         return ProgressBar::hidden();
     }
     let pb = ProgressBar::new_spinner();
@@ -155,6 +180,7 @@ pub fn progress_bar(total: u64, msg: &str) -> ProgressBar {
 pub fn finish_ok(pb: &ProgressBar, msg: &str) {
     if pb.is_hidden() {
         println!("    {} {}", icon_ok(), msg);
+        flush();
     } else {
         pb.finish_with_message(format!("{} {}", icon_ok(), msg));
     }
@@ -164,6 +190,7 @@ pub fn finish_ok(pb: &ProgressBar, msg: &str) {
 pub fn finish_fail(pb: &ProgressBar, msg: &str) {
     if pb.is_hidden() {
         println!("    {} {}", icon_fail(), msg);
+        flush();
     } else {
         pb.finish_with_message(format!("{} {}", icon_fail(), msg));
     }
@@ -171,9 +198,9 @@ pub fn finish_fail(pb: &ProgressBar, msg: &str) {
 
 /// Typed-out welcome text animation (slow reveal, only in TTY).
 pub fn type_out(text: &str) {
-    use std::io::Write;
     if !is_interactive() {
         println!("{}", text);
+        flush();
         return;
     }
     for ch in text.chars() {
@@ -230,6 +257,7 @@ pub fn print_success_banner(msg: &str) {
     println!();
     println!("  {} {}", style("🎉").bold(), style(msg).green().bold());
     println!();
+    flush();
 }
 
 /// Print a command hint styled as code.
