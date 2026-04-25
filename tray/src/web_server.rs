@@ -744,7 +744,19 @@ fn sse_response(request: Request, job: Arc<Mutex<Job>>) {
         .with_header(header("Content-Type", "text/event-stream"))
         .with_header(header("Cache-Control", "no-cache"))
         .with_header(header("X-Accel-Buffering", "no"))
-        .with_data(rx, None);
+        .with_data(rx, None)
+        // CRITICAL for SSE streaming: tiny_http's default chunked
+        // threshold is 32KB — when the body length is unknown AND
+        // total output is shorter, it buffers the ENTIRE response
+        // before sending to compute Content-Length, which defeats
+        // streaming entirely (browser gets all frames at once at
+        // process exit). Setting threshold=0 forces chunked transfer
+        // encoding from the first byte: each `read()` from the pipe
+        // produces a chunk that flushes to the wire immediately.
+        // Verified via `curl -sN ... | timestamper` — without this,
+        // all SSE frames arrive within a single second; with it, they
+        // arrive as the subprocess emits them.
+        .with_chunked_threshold(0);
     let _ = request.respond(resp);
 }
 
