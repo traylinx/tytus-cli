@@ -1551,7 +1551,11 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 .status();
         }
         "test" => {
-            open_in_terminal_simple("tytus test; echo; echo 'Press Enter to close…'; read _");
+            // Tower's "Run Health Test" button (#hdr-health) streams
+            // tytus test in-page via /api/test. Deep-link the tray menu
+            // straight into that flow so users stop seeing a Terminal
+            // window for what is now a browser-native action.
+            web_server::open_tower_at("#/run/test");
         }
         "view_daemon_log" => {
             open_log_file("/tmp/tytus/daemon.log");
@@ -1560,7 +1564,10 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             open_log_file("/tmp/tytus/autostart.log");
         }
         "doctor" => {
-            open_in_terminal_simple("tytus doctor; echo; echo 'Press Enter to close…'; read _");
+            // Tower's Troubleshoot ▸ Run Doctor button (#tr-doctor)
+            // already streams `tytus doctor` in-page via /api/doctor.
+            // Deep-link into it.
+            web_server::open_tower_at("#/run/doctor");
         }
         "help_dialog" => {
             // User-facing recovery dialog. Same UI as the post-timeout
@@ -1672,37 +1679,24 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             // that CLI users see. Detached — no Terminal window for this.
             spawn_detached("tytus", &["ui", "--stop", "--pod", &pod_id]);
         }
-        // Agent container restart (no state loss).
+        // Agent container restart (no state loss). Tower handles this
+        // via /api/pod/restart and Phase B will stream output in-page;
+        // the JS hash handler also confirms on the user's behalf.
         other if other.starts_with("pod_") && other.ends_with("_restart") => {
             let pod_id = other.trim_start_matches("pod_").trim_end_matches("_restart");
-            open_in_terminal_simple(&format!(
-                "tytus restart --pod {}; echo; echo 'Press Enter to close…'; read _",
-                shell_escape(pod_id),
-            ));
+            web_server::open_tower_at(&format!("#/pod/{}/restart", pod_id));
         }
-        // Destructive: frees units + wipes pod workspace.
+        // Destructive: frees units + wipes pod workspace. Tower confirms
+        // before POSTing /api/pod/revoke; tray no longer double-confirms.
         other if other.starts_with("pod_") && other.ends_with("_revoke") => {
             let pod_id = other.trim_start_matches("pod_").trim_end_matches("_revoke");
-            if confirm_dialog(
-                &format!("Revoke pod {}?", pod_id),
-                "This frees the units and permanently deletes anything saved inside this pod's agent workspace. You can allocate a new pod from the tray menu afterwards.",
-            ) {
-                open_in_terminal_simple(&format!(
-                    "tytus revoke {}; echo; echo 'Press Enter to close…'; read _",
-                    shell_escape(pod_id),
-                ));
-            }
+            web_server::open_tower_at(&format!("#/pod/{}/revoke", pod_id));
         }
-        // Channel catalog (informational) — user wants to see what they
-        // can configure before picking one.
+        // Channel catalog (informational). Tower's Run Channels Catalog
+        // button (#pod-channels-catalog-btn) renders the listing inline.
         other if other.starts_with("pod_") && other.ends_with("_channels_catalog") => {
-            let pod_id = other
-                .trim_start_matches("pod_")
-                .trim_end_matches("_channels_catalog");
-            open_in_terminal_simple(&format!(
-                "tytus channels catalog; echo; echo 'To configure: tytus channels add --pod {} --type <NAME> --token <TOKEN>'; echo 'Press Enter to close…'; read _",
-                shell_escape(pod_id),
-            ));
+            let _ = other; // pod_id ignored — catalog is global
+            web_server::open_tower_at("#/run/channels-catalog");
         }
         // Add a specific channel — opens Terminal with the exact
         // command skeleton so the user only needs to paste their token.
@@ -1712,74 +1706,38 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             if let Some(rest) = other.strip_prefix("pod_") {
                 if let Some(middle) = rest.strip_suffix("_add") {
                     // middle = "<pod>_channel_<type>"
-                    if let Some((pod_id, rest)) = middle.split_once("_channel_") {
-                        let channel = rest;
-                        let pod_s = shell_escape(pod_id);
-                        let chan_s = shell_escape(channel);
-                        let label = channel_label(channel);
-                        // Clean prompt flow. Spinner between steps so
-                        // the user sees the CLI is working on a slow
-                        // redeploy (~10s), and a clear colored result
-                        // line at the end so they know it landed.
-                        open_in_terminal_simple(&format!(
-                            "clear 2>/dev/null; \
-                             printf '\\033[1m{label}\\033[0m — pod {pod}\\n\\n'; \
-                             tytus channels catalog 2>/dev/null | awk '/^  {chan} /,/^$/' | sed '1,/^$/!d'; \
-                             echo; \
-                             printf 'Paste your primary token (hidden): '; read -rs TOK; echo; \
-                             if [ -z \"$TOK\" ]; then \
-                               printf '\\033[33mAborted — no token entered.\\033[0m\\n'; \
-                             else \
-                               echo; echo 'Writing credential to pod and restarting agent (this takes ~10s)…'; echo; \
-                               if tytus channels add --pod {pod} --type {chan} --token \"$TOK\"; then \
-                                 printf '\\n\\033[32m✓ Done.\\033[0m Your agent on pod {pod} can now use {label}.\\n'; \
-                               else \
-                                 printf '\\n\\033[31m✗ Something went wrong.\\033[0m Check the message above, then retry.\\n'; \
-                               fi; \
-                             fi; \
-                             echo; echo 'Press Enter to close…'; read _",
-                            pod = pod_s,
-                            chan = chan_s,
-                            label = label,
+                    if let Some((pod_id, channel)) = middle.split_once("_channel_") {
+                        // Phase C: tray menu deep-links to Tower's
+                        // token modal. The browser <dialog> collects
+                        // the token in-page; no Terminal `read -rs`.
+                        web_server::open_tower_at(&format!(
+                            "#/pod/{}/channels?action=add&type={}",
+                            pod_id, channel,
                         ));
                     }
                 }
             }
         }
         // Remove a configured channel — clears keychain + manifest +
-        // redeploys agent.
+        // redeploys agent. Tower confirms before POSTing
+        // /api/channels/remove and renders the result inline.
         other if other.starts_with("pod_") && other.contains("_channel_") && other.ends_with("_remove") => {
             if let Some(rest) = other.strip_prefix("pod_") {
                 if let Some(middle) = rest.strip_suffix("_remove") {
-                    if let Some((pod_id, rest)) = middle.split_once("_channel_") {
-                        let channel = rest;
-                        let channel_label = channel_label(channel);
-                        if confirm_dialog(
-                            &format!("Remove {} from pod {}?", channel_label, pod_id),
-                            "Clears the channel's credentials from the OS keychain, removes them from the pod's state volume, and redeploys the agent container so the channel stops operating. Re-adding later will require the credentials again.",
-                        ) {
-                            open_in_terminal_simple(&format!(
-                                "tytus channels remove --pod {} --type {}; echo; echo 'Press Enter to close…'; read _",
-                                shell_escape(pod_id),
-                                shell_escape(channel),
-                            ));
-                        }
+                    if let Some((pod_id, channel)) = middle.split_once("_channel_") {
+                        web_server::open_tower_at(&format!(
+                            "#/pod/{}/channels?action=remove&type={}",
+                            pod_id, channel,
+                        ));
                     }
                 }
             }
         }
-        // Agent uninstall = stop container, keep pod slot (AIL still works).
+        // Agent uninstall = stop container, keep pod slot (AIL still
+        // works). Tower confirms before POSTing /api/pod/uninstall.
         other if other.starts_with("pod_") && other.ends_with("_uninstall") => {
             let pod_id = other.trim_start_matches("pod_").trim_end_matches("_uninstall");
-            if confirm_dialog(
-                &format!("Uninstall agent on pod {}?", pod_id),
-                "The agent container is stopped and removed but the pod slot stays allocated. AIL gateway access keeps working through the sidecar. Use 'Revoke Pod' to fully free units.",
-            ) {
-                open_in_terminal_simple(&format!(
-                    "tytus agent uninstall {}; echo; echo 'Press Enter to close…'; read _",
-                    shell_escape(pod_id),
-                ));
-            }
+            web_server::open_tower_at(&format!("#/pod/{}/uninstall", pod_id));
         }
         // Primary install entry point — opens the localhost wizard in
         // the user's default browser (SPRINT §6 E). The per-agent

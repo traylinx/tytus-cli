@@ -391,6 +391,34 @@ tytus tray start                   Open /Applications/Tytus.app (or fall
                                    back to ~/bin/tytus-tray). Useful from
                                    scripts after a `quit`.
 
+NOTE — Tower in-page actions (tray-driven). When the tray is running,
+most non-interactive menu items (Run Health Test, Doctor, per-pod
+Restart / Uninstall / Revoke / Stop forwarder, Channels catalog, Add
+channel) deep-link the user's browser into the local Tower web UI at
+`http://127.0.0.1:<port>/tower#/<route>` and stream subprocess output
+there via SSE — no Terminal window opens. Sudo-bearing commands
+(`tytus connect`, `tytus tray install`), browser-auth flows
+(`tytus login`), and interactive wizards (`tytus configure`) still
+open a Terminal because they need a TTY. Hash routes recognized by
+Tower:
+
+  #/run/test                       — POST /api/test (global health probe)
+  #/run/doctor                     — POST /api/doctor (also opens
+                                     the Troubleshoot disclosure)
+  #/run/channels-catalog           — POST /api/channels/catalog
+  #/pod/<NN>                       — pod subpage, Overview tab
+  #/pod/<NN>/<tab>                 — overview | output | channels
+  #/pod/<NN>/<action>              — restart | revoke | uninstall |
+                                     stop-forwarder. Runs the action
+                                     via POST /api/pod/<NN>/run-streamed
+                                     and streams output in the Output
+                                     tab. One streamed action per pod
+                                     at a time (concurrent attempts
+                                     return 409 Conflict).
+  #/pod/<NN>/channels?action=add&type=<channel>
+                                   — opens the in-page <dialog> token
+                                     modal for adding a messenger.
+
 tytus ui [--pod NN] [-P PORT] [--no-open]
                                    Start a 127.0.0.1 → pod agent TCP
                                    forwarder so the browser sees the

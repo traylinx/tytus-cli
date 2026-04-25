@@ -32,6 +32,16 @@ tray/     Binary crate: `tytus-tray` (menu-bar app). Single-instance guard
           probe to 10.42.42.1:18080 — NOT by daemon-status inspection.
           The tunnel lives independently of the daemon (boringtun is a
           separate root process), so a dead daemon does NOT mean 🔴.
+
+          Hosts the localhost Tower web UI: tiny_http on 127.0.0.1:0
+          (kernel-picked port, written to `/tmp/tytus/tray-web.port`)
+          + an SSE Registry for streamed subprocess output. Tray menu
+          items deep-link the user's browser at `<port>/tower#/<route>`
+          rather than spawning Terminal.app for non-interactive
+          actions (Run Doctor / Test, per-pod Restart / Revoke /
+          Uninstall / Stop forwarder, Channels catalog, Add channel).
+          Sudo / browser-auth / interactive-wizard commands still
+          spawn Terminal because they need a TTY.
 ```
 
 Workspace docs:

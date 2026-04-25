@@ -5,6 +5,64 @@ All notable changes to the `tytus` CLI, `tytus-mcp` server, and
 conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
 bumps are allowed to break compat.
 
+## [Unreleased]
+
+- **Tower in-page actions + per-pod subpages** — tray menu items that
+  used to spawn Terminal.app for `test`, `doctor`, per-pod
+  `restart` / `revoke` / `uninstall` / `stop-forwarder`,
+  `channels catalog`, `channel-remove`, and `channel-add` now
+  deep-link the user's browser into the local Tower web UI. New
+  hash-route grammar:
+    - `#/run/<action>` — global commands (`test`, `doctor`,
+      `channels-catalog`). The doctor route also opens Troubleshoot.
+    - `#/pod/<NN>` — per-pod subpage with Overview / Output / Channels
+      tabs. The Output tab streams subprocess stdout+stderr live via
+      the existing SSE Registry/JobEvent infrastructure (no PTY, no
+      WebSocket, no xterm.js).
+    - `#/pod/<NN>/<action>` — runs a per-pod streamed action
+      (`restart`, `revoke`, `uninstall`, `stop-forwarder`); concurrent
+      attempts on the same pod return HTTP 409 from the new
+      `Registry::create_pod`. Successful revoke auto-navigates back
+      to Tower so the user isn't stranded on a 'pod not found' page.
+    - `#/pod/<NN>/channels?action=add&type=<channel>` — opens an
+      in-page native `<dialog>` to collect the bot token. The token
+      rides only the local POST body (127.0.0.1) and is forwarded to
+      the `tytus` subprocess as an argv element — no shell, no
+      Terminal `read -rs`, no logs. (Threat-model note in the
+      handler: the token is briefly visible to local processes via
+      `ps aux` for the ~10–15s subprocess lifetime; same exposure as
+      the prior Terminal flow.)
+  Backend additions: `Job::pod_id`, `JobEvent::Exit { code }`,
+  `Registry::create_pod` (busy-check returns 409), `Registry::active_pods`
+  (surfaced as `active_jobs_per_pod` in `/api/state` for the running-
+  job dot in the overview), strict action whitelist via
+  `pod_action_argv` (no free-form strings ever reach the shell —
+  Command::arg per token; doctor/test rejected because they aren't
+  pod-scoped), `open_tower_at(fragment)` helper that auto-appends a
+  nonce so repeat tray clicks force `hashchange` to fire.
+  Tray-menu rewires: `test`, `doctor`, `pod_NN_restart`,
+  `pod_NN_revoke`, `pod_NN_uninstall`, `pod_NN_channels_catalog`,
+  `pod_NN_channel_X_add`, `pod_NN_channel_X_remove` migrated from
+  `open_in_terminal_simple` to `web_server::open_tower_at`. Tower-side
+  `handle_channels_catalog` and `handle_channels_remove` migrated from
+  Terminal-spawn to inline `run_tytus_inline`. `handle_channels_add`
+  rewritten to accept JSON `{pod, channel, token}` body; parse-error
+  path returns only `{"error":"bad json"}` (never echoes raw body —
+  would leak the token).
+  Stays in Terminal.app (intentional, requires TTY): `connect` (sudo),
+  `login` (Sentinel browser-auth), `logout`, `tray install` (sudo +
+  bundler), `configure` (multi-step interactive wizard), autostart
+  toggles (sudo plist), editor launches (`launch_<editor>`,
+  `launch_terminal`), the "Try Again" reconnect dialog, and the
+  install-agent terminal fallback when the localhost Tower server
+  isn't bound. CSP is unchanged (`connect-src 'self'`); no new heavy
+  deps (no `portable-pty`, no `tokio-tungstenite`, no `xterm.js`).
+  Binary delta ~15KB; release build 6.7M. 11/11 tray tests
+  (4 new in `web_server::tests`); 68/68 workspace tests; `cargo
+  clippy` clean (no new warnings). Verified across 5 lope review
+  rounds with `pi` + `qwen` validators.
+  Sprint doc: `~/Projects/makakoo/sprints/wannolot-embedded-terminal-2026-04-24/SPRINT.md`.
+
 ## [0.5.0] — 2026-04-24
 
 Four themes consolidated from the three in-flight `v0.5.x-alpha`

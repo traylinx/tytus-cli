@@ -1843,3 +1843,195 @@ body {
 h2 { font-size: 20px; font-weight: 700; margin-bottom: 10px; letter-spacing: -0.01em; }
 h3 { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
 p  { line-height: 1.55; color: var(--muted); }
+
+/* ── Phase B: per-pod subpage ─────────────────────────────── */
+
+/* Default: pod subpage hidden, overview stack visible. */
+#view-pod { display: none; }
+body.pod-mode #view-pod { display: block; }
+
+/* When in pod-mode, hide the entire overview stack (chooser,
+   install flow, settings, troubleshoot, header health-panel). The
+   subpage owns the screen until the user clicks "← Tower". */
+body.pod-mode #chooser,
+body.pod-mode #installing,
+body.pod-mode #success,
+body.pod-mode #failure,
+body.pod-mode #health-panel,
+body.pod-mode #settings,
+body.pod-mode #troubleshoot {
+  display: none !important;
+}
+
+.pod-sub-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 0 20px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.pod-sub-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+.pod-sub-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+}
+.pod-sub-icon img { width: 28px; height: 28px; }
+
+.pod-tabs {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+.pod-tab-btn {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.pod-tab-btn:hover {
+  color: var(--fg);
+  background: var(--surface);
+}
+.pod-tab-btn.tab-active {
+  color: var(--fg);
+  background: var(--surface);
+  border-color: var(--border-strong);
+}
+
+.pod-tab-content { min-height: 200px; }
+.pod-tab-pane { display: block; }
+.pod-tab-pane.hidden { display: none; }
+
+.pod-output-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.pod-output-spacer { flex: 1; }
+#pod-output-log {
+  min-height: 280px;
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pod-output-status {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  min-height: 18px;
+}
+.pod-output-status.ok { color: var(--success); }
+.pod-output-status.err { color: var(--error); }
+
+/* Running-session dot on overview pod rows. Only visible when the
+   per-pod registry has an active job (StateSnapshot.active_pods). */
+.pod-running-job-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 6px;
+  vertical-align: middle;
+  animation: pod-job-pulse 1.4s infinite;
+}
+@keyframes pod-job-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(0.85); }
+}
+
+.btn-small { font-size: 11px; padding: 4px 8px; }
+.btn-danger {
+  background: transparent;
+  color: var(--error);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.btn-danger:hover { background: rgba(239, 68, 68, 0.08); }
+
+/* ── Phase C: token modal ─────────────────────────────────── */
+
+.token-modal {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  background: var(--surface);
+  color: var(--fg);
+  max-width: 480px;
+  width: calc(100% - 32px);
+}
+.token-modal::backdrop { background: rgba(0, 0, 0, 0.6); }
+.token-modal h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+.token-modal-hint {
+  margin: 0 0 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.token-label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 16px;
+}
+.token-modal input[type="password"] {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.token-modal input[type="password"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.token-error {
+  color: var(--error);
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+.token-error.hidden { display: none; }
+.token-menu {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+}

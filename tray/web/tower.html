@@ -245,6 +245,45 @@
       </div>
     </details>
 
+    <!-- ── Phase B: per-pod subpage ───────────────────────────── -->
+    <!-- Shown when location.hash matches #/pod/<NN>/<tab>. Visibility
+         is driven by body.pod-mode (set by viewPod.show in tower.js)
+         which hides the overview stack via CSS. -->
+    <section id="view-pod" class="view-pod" aria-label="Pod detail">
+      <header class="pod-sub-header">
+        <button id="pod-back" class="btn-secondary" type="button">← Tower</button>
+        <h2 class="pod-sub-title">
+          <span id="pod-sub-icon" class="pod-sub-icon"></span>
+          <span id="pod-sub-name">Pod</span>
+        </h2>
+        <nav class="pod-tabs" role="tablist">
+          <a href="#" id="pod-tab-overview-btn" class="pod-tab-btn" data-tab="overview" role="tab">Overview</a>
+          <a href="#" id="pod-tab-output-btn"   class="pod-tab-btn" data-tab="output"   role="tab">Output</a>
+          <a href="#" id="pod-tab-channels-btn" class="pod-tab-btn" data-tab="channels" role="tab">Channels</a>
+        </nav>
+      </header>
+      <div class="pod-tab-content">
+        <div id="pod-tab-overview" class="pod-tab-pane hidden" role="tabpanel"></div>
+        <div id="pod-tab-output" class="pod-tab-pane hidden" role="tabpanel">
+          <div class="pod-output-toolbar">
+            <!-- Per-pod actions only. `tytus doctor` and `tytus test`
+                 are global (no --pod flag in cli/src/main.rs cmd_doctor /
+                 cmd_test) so they live in the Tower header / Troubleshoot
+                 section, not on a per-pod page. -->
+            <button id="pod-run-restart"    class="btn-secondary" type="button">Restart</button>
+            <button id="pod-run-stop-fwd"   class="btn-secondary" type="button">Stop forwarder</button>
+            <button id="pod-run-uninstall"  class="btn-danger"    type="button">Uninstall</button>
+            <button id="pod-run-revoke"     class="btn-danger"    type="button">Revoke</button>
+            <span class="pod-output-spacer"></span>
+            <button id="pod-output-clear" class="btn-secondary btn-small" type="button" title="Clear log view">Clear</button>
+          </div>
+          <pre id="pod-output-log" class="log log-live" aria-live="polite"></pre>
+          <div id="pod-output-status" class="pod-output-status"></div>
+        </div>
+        <div id="pod-tab-channels" class="pod-tab-pane hidden" role="tabpanel"></div>
+      </div>
+    </section>
+
     <footer class="tower-footer">
       <div class="tower-footer-links">
         <a id="footer-docs" href="https://github.com/traylinx/tytus-cli" target="_blank" rel="noopener">Documentation</a>
@@ -259,6 +298,33 @@
       </div>
     </footer>
   </main>
+  <!-- ── Phase C: token modal ────────────────────────────────── -->
+  <!-- Inline replacement for the Terminal `read -rs TOK` flow. The
+       token rides only the local POST body (127.0.0.1) — it never
+       lands in the URL bar, address history, or browser logs. -->
+  <dialog id="token-modal" class="token-modal">
+    <form id="token-form" method="dialog">
+      <h3 id="token-modal-title">Add channel</h3>
+      <p id="token-modal-hint" class="token-modal-hint">
+        Paste your bot token. It's sent only to your local Tytus process
+        on 127.0.0.1, then forwarded to the pod over TLS.
+      </p>
+      <label class="token-label">
+        Token
+        <input type="password" id="token-input"
+               autocomplete="off"
+               data-1p-ignore="true"
+               required
+               placeholder="bot-token…">
+      </label>
+      <p id="token-error" class="token-error hidden"></p>
+      <menu class="token-menu">
+        <button type="button" id="token-cancel" class="btn-secondary">Cancel</button>
+        <button type="submit" id="token-submit" class="btn-primary">Add</button>
+      </menu>
+    </form>
+  </dialog>
+
   <script src="/assets/tower.js"></script>
 </body>
 </html>

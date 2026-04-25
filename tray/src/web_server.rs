@@ -57,18 +57,27 @@ const ICON_NVIDIA: &[u8] = include_bytes!("../web/assets/icons/nvidia.svg");
 
 enum JobEvent {
     Log(String),
-    Done { payload: String },
+    Done { payload: String },     // install-shaped: payload is the CLI's JSON result
     Fail { message: String },
+    Exit { code: i32 },           // pod-action-shaped: process exited with code
 }
 
 struct Job {
     events: Vec<JobEvent>,
     finished: bool,
+    /// `None` for the install flow (one global install at a time);
+    /// `Some(pod_id)` for per-pod actions so `Registry::active_for_pod`
+    /// can enforce one-running-action-per-pod and the Tower UI can
+    /// badge pod rows that have a live job.
+    pod_id: Option<String>,
 }
 
 impl Job {
-    fn new() -> Self {
-        Job { events: Vec::new(), finished: false }
+    fn new_install() -> Self {
+        Job { events: Vec::new(), finished: false, pod_id: None }
+    }
+    fn new_pod(pod_id: String) -> Self {
+        Job { events: Vec::new(), finished: false, pod_id: Some(pod_id) }
     }
 }
 
@@ -82,15 +91,47 @@ impl Registry {
         Registry { inner: Arc::new(Mutex::new(HashMap::new())) }
     }
 
+    /// Install-flow constructor. Pre-existing call shape; kept stable.
     fn create(&self) -> (String, Arc<Mutex<Job>>) {
         let id = random_job_id();
-        let job = Arc::new(Mutex::new(Job::new()));
+        let job = Arc::new(Mutex::new(Job::new_install()));
         self.inner.lock().unwrap().insert(id.clone(), job.clone());
         (id, job)
     }
 
+    /// Per-pod constructor. Returns `Err(pod)` if a job is already
+    /// running on that pod so callers can reject with 409 Conflict.
+    fn create_pod(&self, pod_id: &str) -> Result<(String, Arc<Mutex<Job>>), String> {
+        let mut guard = self.inner.lock().unwrap();
+        for job in guard.values() {
+            let j = job.lock().unwrap();
+            if j.pod_id.as_deref() == Some(pod_id) && !j.finished {
+                return Err(pod_id.to_string());
+            }
+        }
+        let id = random_job_id();
+        let job = Arc::new(Mutex::new(Job::new_pod(pod_id.to_string())));
+        guard.insert(id.clone(), job.clone());
+        Ok((id, job))
+    }
+
     fn get(&self, id: &str) -> Option<Arc<Mutex<Job>>> {
         self.inner.lock().unwrap().get(id).cloned()
+    }
+
+    /// Compact view of currently-running per-pod jobs, keyed by pod_id
+    /// → count. Surfaced in StateSnapshot so the Tower overview can
+    /// dot pod rows that have a live action streaming.
+    fn active_pods(&self) -> HashMap<String, usize> {
+        let mut out: HashMap<String, usize> = HashMap::new();
+        for job in self.inner.lock().unwrap().values() {
+            let j = job.lock().unwrap();
+            if j.finished { continue; }
+            if let Some(pod) = &j.pod_id {
+                *out.entry(pod.clone()).or_insert(0) += 1;
+            }
+        }
+        out
     }
 }
 
@@ -146,6 +187,25 @@ pub fn start() -> Option<u16> {
 }
 
 pub fn open_tower() {
+    open_tower_at("");
+}
+
+/// Open Tower at a specific URL fragment so the tray menu can deep-link
+/// directly into an in-page action (e.g. `#/run/doctor`, `#/pod/02/restart`).
+///
+/// `fragment` should start with `#` if non-empty. A nonce query param is
+/// appended automatically — without it, browsers focus the existing tab
+/// without re-firing `hashchange` when the fragment matches the current one,
+/// so successive tray clicks would silently no-op.
+///
+/// CALLER CONSTRAINT: pass path-only fragments like `"#/pod/02/output"` or
+/// query-bearing fragments like `"#/pod/02/channels?action=add&type=telegram"`.
+/// Do NOT embed a literal `?` outside the canonical query separator — the
+/// `sep` heuristic detects the first `?` to decide between `?n=` and `&n=`,
+/// so a fragment with a stray `?` (e.g. `"#/path?weird"`) would still parse
+/// here but produce a URL the browser may interpret unexpectedly. None of
+/// the current call sites do this; this is a future-maintainer warning.
+pub fn open_tower_at(fragment: &str) {
     let port = match current_port() {
         Some(p) => p,
         None => {
@@ -153,7 +213,16 @@ pub fn open_tower() {
             return;
         }
     };
-    let url = format!("http://127.0.0.1:{}/tower", port);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let url = if fragment.is_empty() {
+        format!("http://127.0.0.1:{}/tower", port)
+    } else {
+        let sep = if fragment.contains('?') { '&' } else { '?' };
+        format!("http://127.0.0.1:{}/tower{}{}n={:x}", port, fragment, sep, nonce)
+    };
     #[cfg(target_os = "macos")]
     { let _ = Command::new("open").arg(&url).spawn(); }
     #[cfg(target_os = "linux")]
@@ -222,7 +291,7 @@ fn handle(request: Request, registry: Registry) {
             handle_stream(request, &registry, &job_id);
         }
         (Method::Get, "/api/state") => {
-            handle_state(request);
+            handle_state(request, &registry);
         }
         (Method::Post, "/api/open-external") => {
             handle_open_external(request, &query);
@@ -250,6 +319,17 @@ fn handle(request: Request, registry: Registry) {
         // after an install failure calls this to reset before retry.
         (Method::Post, "/api/pod/revoke") => {
             handle_pod_revoke(request, &query);
+        }
+        // Phase B: per-pod streamed action. Body is { "action": "doctor"
+        // | "restart" | "revoke" | "uninstall" | "stop-forwarder" }.
+        // Returns { job_id }; output streams via /api/jobs/<id>/stream.
+        (Method::Post, p) if p.starts_with("/api/pod/")
+                          && p.ends_with("/run-streamed") => {
+            let pod = p
+                .trim_start_matches("/api/pod/")
+                .trim_end_matches("/run-streamed")
+                .to_string();
+            handle_pod_run_streamed(request, &registry, pod);
         }
         // ── Tower control-surface endpoints (Wave 1) ─────────────────
         // Header actions + Settings block moved from tray submenus into
@@ -582,7 +662,10 @@ fn spawn_install(job: Arc<Mutex<Job>>, agent_type: String, pod_id: Option<String
 
 fn push_event(job: &Arc<Mutex<Job>>, ev: JobEvent) {
     let mut j = job.lock().unwrap();
-    let terminal = matches!(ev, JobEvent::Done { .. } | JobEvent::Fail { .. });
+    let terminal = matches!(
+        ev,
+        JobEvent::Done { .. } | JobEvent::Fail { .. } | JobEvent::Exit { .. }
+    );
     j.events.push(ev);
     if terminal { j.finished = true; }
 }
@@ -636,6 +719,10 @@ fn sse_response(request: Request, job: Arc<Mutex<Job>>) {
                         JobEvent::Fail { message } => format!(
                             "event: fail\ndata: {}\n\n",
                             message.replace('\n', " "),
+                        ),
+                        JobEvent::Exit { code } => format!(
+                            "event: exit\ndata: {{\"code\":{}}}\n\n",
+                            code,
                         ),
                     }
                 };
@@ -841,9 +928,24 @@ fn agent_units_for(agent_type: &str) -> u32 {
     }
 }
 
-fn handle_state(request: Request) {
+fn handle_state(request: Request, registry: &Registry) {
     let snap = compute_state_snapshot();
-    respond_json(request, 200, &snap);
+    let active = registry.active_pods();
+    // Merge in active_jobs_per_pod (Phase B running-session badge).
+    // serialize snap then patch — avoids changing StateSnapshot's
+    // schema and breaking the long list of #[derive(Serialize)] fields
+    // it carries today.
+    let mut value = match serde_json::to_value(&snap) {
+        Ok(v) => v,
+        Err(_) => { respond_json(request, 200, &snap); return; }
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "active_jobs_per_pod".to_string(),
+            serde_json::to_value(&active).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    respond_json(request, 200, &value);
 }
 
 /// Build the rich state snapshot that the wizard's budget strip, the
@@ -1217,6 +1319,160 @@ fn handle_pod_revoke(request: Request, query: &str) {
             "error": format!("failed to spawn: {}", e)
         })),
     }
+}
+
+// ── Phase B: per-pod streamed action ──────────────────────────
+//
+// Whitelisted actions only — never lets the page pass an arbitrary
+// command. The shell is bypassed entirely (Command::new + .arg per
+// token), so even a compromised page can only invoke one of the
+// hardcoded `tytus` subcommands below.
+
+#[derive(serde::Deserialize)]
+struct PodRunBody {
+    action: String,
+}
+
+/// Map an action string to the canonical `tytus` argv. Returns `None`
+/// for unknown actions so the handler can reply 400.
+///
+/// Per-pod actions ONLY. Global commands (`tytus doctor`, `tytus test`)
+/// are intentionally absent — they aren't pod-scoped (CLI doesn't accept
+/// `--pod` for them), so exposing them under `/api/pod/<NN>/run-streamed`
+/// would be misleading. They're available via dedicated endpoints
+/// (`POST /api/doctor`, `POST /api/test`) and surfaced on the Tower
+/// header / Troubleshoot section, not on per-pod subpages.
+fn pod_action_argv(action: &str, pod_id: &str) -> Option<Vec<String>> {
+    let v = |args: &[&str]| Some(args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    match action {
+        "restart"         => v(&["restart", "--pod", pod_id]),
+        "revoke"          => v(&["revoke", pod_id]),
+        "uninstall"       => v(&["agent", "uninstall", pod_id]),
+        "stop-forwarder"  => v(&["ui", "--stop", "--pod", pod_id]),
+        "channels-list"   => v(&["channels", "list", "--pod", pod_id]),
+        _ => None,
+    }
+}
+
+fn handle_pod_run_streamed(mut request: Request, registry: &Registry, pod_id: String) {
+    if !valid_pod_id(&pod_id) {
+        respond_json(request, 400, &serde_json::json!({"error":"invalid pod id"}));
+        return;
+    }
+    let mut raw = String::new();
+    if request.as_reader().read_to_string(&mut raw).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"read failed"}));
+        return;
+    }
+    let body: PodRunBody = match serde_json::from_str(&raw) {
+        Ok(b) => b,
+        Err(_) => {
+            respond_json(request, 400, &serde_json::json!({"error":"bad json"}));
+            return;
+        }
+    };
+    let argv = match pod_action_argv(&body.action, &pod_id) {
+        Some(a) => a,
+        None => {
+            respond_json(
+                request, 400,
+                &serde_json::json!({"error": format!("unknown action {}", body.action)}),
+            );
+            return;
+        }
+    };
+
+    let (job_id, job) = match registry.create_pod(&pod_id) {
+        Ok(pair) => pair,
+        Err(p) => {
+            respond_json(
+                request, 409,
+                &serde_json::json!({"error": format!("pod {} busy", p)}),
+            );
+            return;
+        }
+    };
+
+    spawn_pod_action(job, argv);
+    respond_json(request, 202, &serde_json::json!({"job_id": job_id}));
+}
+
+fn spawn_pod_action(job: Arc<Mutex<Job>>, argv: Vec<String>) {
+    thread::spawn(move || {
+        let bin = resolve_tytus_bin();
+        let mut cmd = Command::new(&bin);
+        for a in &argv { cmd.arg(a); }
+        cmd.stdin(Stdio::null())
+           .stdout(Stdio::piped())
+           .stderr(Stdio::piped())
+           .env("TYTUS_HEADLESS", "1");
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                push_event(&job, JobEvent::Fail {
+                    message: format!(
+                        "failed to launch `tytus` at {}: {}. \
+                         Set TYTUS_BIN if the CLI lives elsewhere.",
+                        bin.display(), e,
+                    ),
+                });
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        // Stream stdout.
+        let job_so = job.clone();
+        let stdout_t = stdout.map(|mut h| thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut carry = String::new();
+            while let Ok(n) = h.read(&mut buf) {
+                if n == 0 { break; }
+                carry.push_str(&String::from_utf8_lossy(&buf[..n]));
+                while let Some(idx) = carry.find('\n') {
+                    let line = carry[..idx].to_string();
+                    carry = carry[idx + 1..].to_string();
+                    push_event(&job_so, JobEvent::Log(line));
+                }
+            }
+            if !carry.is_empty() {
+                push_event(&job_so, JobEvent::Log(carry));
+            }
+        }));
+
+        // Stream stderr (merged into the same log channel; tytus uses
+        // stderr for progress/status messages).
+        let job_se = job.clone();
+        let stderr_t = stderr.map(|mut h| thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut carry = String::new();
+            while let Ok(n) = h.read(&mut buf) {
+                if n == 0 { break; }
+                carry.push_str(&String::from_utf8_lossy(&buf[..n]));
+                while let Some(idx) = carry.find('\n') {
+                    let line = carry[..idx].to_string();
+                    carry = carry[idx + 1..].to_string();
+                    push_event(&job_se, JobEvent::Log(line));
+                }
+            }
+            if !carry.is_empty() {
+                push_event(&job_se, JobEvent::Log(carry));
+            }
+        }));
+
+        let status = child.wait();
+        let _ = stdout_t.and_then(|h| h.join().ok());
+        let _ = stderr_t.and_then(|h| h.join().ok());
+
+        let code = match status {
+            Ok(s) => s.code().unwrap_or(-1),
+            Err(_) => -1,
+        };
+        push_event(&job, JobEvent::Exit { code });
+    });
 }
 
 /// Probe whether a just-installed pod is actually reachable. The CLI's
@@ -1840,39 +2096,63 @@ fn handle_channels_list(request: Request, query: &str) {
     }));
 }
 
-fn handle_channels_add(request: Request, query: &str) {
-    let (pod, name) = parse_channel_query(query);
-    let (Some(pod_id), Some(channel)) = (pod, name) else {
-        respond_json(request, 400, &serde_json::json!({ "error": "missing pod or name" }));
+/// Phase C: token modal posts JSON `{pod, channel, token}`. The token
+/// rides only the request body and is forwarded to the `tytus`
+/// subprocess as an argv element — the shell is never invoked, so
+/// shell-quoting and injection concerns do not apply. The token is
+/// not written to disk on the laptop side; tytus forwards it to the
+/// provider over TLS where it ends up in the pod keychain.
+///
+/// IMPORTANT: never echo the request body back. Error responses
+/// quote only the `error` field, never `raw` or `body.token`, so a
+/// malformed request can't surface the secret in tray.log.
+///
+/// THREAT MODEL NOTE: passing `--token <value>` as argv makes the
+/// token visible to local processes via `ps aux` /
+/// `/proc/<pid>/cmdline` for the lifetime of the `tytus` subprocess
+/// (typically ~10-15 s while the agent redeploys). This is the same
+/// exposure as Sebastian's prior Terminal flow (`tytus channels add
+/// --token "$TOK"`). Eliminating it would require an alternative IPC
+/// (env var, stdin pipe, or file descriptor) on the `tytus` side —
+/// out of scope for this sprint. Mitigations: localhost-only HTTP,
+/// short-lived subprocess, single-user laptop trust boundary.
+fn handle_channels_add(mut request: Request, _query: &str) {
+    #[derive(serde::Deserialize)]
+    struct Body { pod: String, channel: String, token: String }
+    let mut raw = String::new();
+    if request.as_reader().read_to_string(&mut raw).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error": "read failed"}));
         return;
+    }
+    let body: Body = match serde_json::from_str(&raw) {
+        Ok(b) => b,
+        Err(_) => {
+            // Do NOT echo `raw` — it carries the token.
+            respond_json(request, 400, &serde_json::json!({"error": "bad json"}));
+            return;
+        }
     };
-    // Mirror the tray's add flow — spawn a Terminal that (a) prints the
-    // catalog snippet for context, (b) reads the primary token
-    // securely via `read -rs`, (c) runs `tytus channels add --token`.
-    // The web page can't do the hidden-token read itself (no
-    // browser-native secure prompt), so Terminal is the right place.
-    let label = crate::channel_label(&channel);
-    let cmd = format!(
-        "clear 2>/dev/null; \
-         printf '\\033[1m{label}\\033[0m — pod {pod}\\n\\n'; \
-         tytus channels catalog 2>/dev/null | awk '/^  {chan} /,/^$/' | sed '1,/^$/!d'; \
-         echo; \
-         printf 'Paste your primary token (hidden): '; read -rs TOK; echo; \
-         if [ -z \"$TOK\" ]; then \
-           printf '\\033[33mAborted — no token entered.\\033[0m\\n'; \
-         else \
-           echo; echo 'Writing credential and redeploying agent (~10s)…'; echo; \
-           if tytus channels add --pod {pod} --type {chan} --token \"$TOK\"; then \
-             printf '\\n\\033[32m✓ Done.\\033[0m Pod {pod} now speaks {label}.\\n'; \
-           else \
-             printf '\\n\\033[31m✗ Something went wrong.\\033[0m Check the message above, then retry.\\n'; \
-           fi; \
-         fi; \
-         echo; echo 'Press Enter to close…'; read _",
-        pod = pod_id, chan = channel, label = label,
-    );
-    crate::open_in_terminal_simple(&cmd);
-    respond_json(request, 202, &serde_json::json!({ "ok": true }));
+    if !valid_pod_id(&body.pod) {
+        respond_json(request, 400, &serde_json::json!({"error": "invalid pod"}));
+        return;
+    }
+    if !valid_channel_name(&body.channel) {
+        respond_json(request, 400, &serde_json::json!({"error": "invalid channel"}));
+        return;
+    }
+    if body.token.is_empty() || body.token.len() > 4096 {
+        respond_json(request, 400, &serde_json::json!({"error": "invalid token"}));
+        return;
+    }
+    // run_tytus_inline blocks for ~10-15s while the agent redeploys.
+    // The browser modal shows "Adding…" during that window. The token
+    // is the last argv element; no shell, no quoting, no log surface.
+    run_tytus_inline(request, &[
+        "channels", "add",
+        "--pod", &body.pod,
+        "--type", &body.channel,
+        "--token", &body.token,
+    ]);
 }
 
 fn handle_channels_remove(request: Request, query: &str) {
@@ -1881,19 +2161,23 @@ fn handle_channels_remove(request: Request, query: &str) {
         respond_json(request, 400, &serde_json::json!({ "error": "missing pod or name" }));
         return;
     };
-    // Client confirms first; server spawns Terminal so the user sees
-    // the CLI's progress (credential wipe + redeploy takes ~10s).
-    let cmd = format!(
-        "tytus channels remove --pod {} --type {}; echo; echo 'Press Enter to close…'; read _",
-        pod_id, channel,
-    );
-    crate::open_in_terminal_simple(&cmd);
-    respond_json(request, 202, &serde_json::json!({ "ok": true }));
+    // Client confirms first; server runs the subprocess inline. The
+    // credential wipe + redeploy takes ~10s, so the HTTP thread blocks
+    // for that window — acceptable since each click is its own thread
+    // and the page shows a spinner. Phase B switches this to streamed
+    // SSE for richer feedback.
+    run_tytus_inline(request, &[
+        "channels", "remove",
+        "--pod", &pod_id,
+        "--type", &channel,
+    ]);
 }
 
 fn handle_channels_catalog(request: Request) {
-    crate::open_in_terminal_simple("tytus channels catalog; echo; echo 'Press Enter to close…'; read _");
-    respond_json(request, 202, &serde_json::json!({ "ok": true }));
+    // Read-only listing of available channel types. Runs synchronously
+    // (subprocess returns within ~200ms) and returns the captured stdout
+    // so the page can render it inline without spawning Terminal.app.
+    run_tytus_inline(request, &["channels", "catalog"]);
 }
 
 // ── Tower Wave 4: sync gaps ────────────────────────────────────
@@ -1944,4 +2228,86 @@ fn respond_json<T: Serialize>(request: Request, status: u16, body: &T) {
         .with_status_code(StatusCode(status))
         .with_header(header("Content-Type", "application/json"));
     let _ = request.respond(resp);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pod_action_argv_whitelist() {
+        // Known-good per-pod actions resolve to the canonical tytus argv.
+        assert_eq!(
+            pod_action_argv("restart", "02").unwrap(),
+            vec!["restart", "--pod", "02"],
+        );
+        assert_eq!(
+            pod_action_argv("revoke", "04").unwrap(),
+            vec!["revoke", "04"],
+        );
+        assert_eq!(
+            pod_action_argv("uninstall", "04").unwrap(),
+            vec!["agent", "uninstall", "04"],
+        );
+        assert_eq!(
+            pod_action_argv("stop-forwarder", "02").unwrap(),
+            vec!["ui", "--stop", "--pod", "02"],
+        );
+        assert_eq!(
+            pod_action_argv("channels-list", "02").unwrap(),
+            vec!["channels", "list", "--pod", "02"],
+        );
+
+        // Global commands are intentionally not pod-scoped — they
+        // belong on /api/doctor and /api/test, not here.
+        assert!(pod_action_argv("doctor", "02").is_none());
+        assert!(pod_action_argv("test", "02").is_none());
+
+        // Unknown / injection-shaped actions reject.
+        assert!(pod_action_argv("install", "02").is_none());
+        assert!(pod_action_argv("doctor; rm -rf /", "02").is_none());
+        assert!(pod_action_argv("", "02").is_none());
+        assert!(pod_action_argv("RESTART", "02").is_none());
+    }
+
+    #[test]
+    fn registry_create_pod_rejects_concurrent() {
+        let r = Registry::new();
+        let (id1, _) = r.create_pod("02").expect("first create_pod");
+        // Second start on same pod while still running → Err.
+        assert!(r.create_pod("02").is_err());
+        // Different pod is fine.
+        assert!(r.create_pod("04").is_ok());
+        // Marking the first finished frees the slot.
+        {
+            let job = r.get(&id1).unwrap();
+            job.lock().unwrap().finished = true;
+        }
+        assert!(r.create_pod("02").is_ok());
+    }
+
+    #[test]
+    fn registry_active_pods_counts() {
+        let r = Registry::new();
+        let _ = r.create_pod("02").unwrap();
+        let _ = r.create_pod("04").unwrap();
+        let active = r.active_pods();
+        assert_eq!(active.get("02"), Some(&1));
+        assert_eq!(active.get("04"), Some(&1));
+        assert_eq!(active.get("99"), None);
+    }
+
+    #[test]
+    fn job_event_exit_marks_finished() {
+        let r = Registry::new();
+        let (id, job) = r.create_pod("02").unwrap();
+        push_event(&job, JobEvent::Log("hello".into()));
+        assert!(!job.lock().unwrap().finished);
+        push_event(&job, JobEvent::Exit { code: 0 });
+        assert!(job.lock().unwrap().finished);
+        // active_pods no longer reports it.
+        assert_eq!(r.active_pods().get("02"), None);
+        // It still exists in the registry until reaped.
+        assert!(r.get(&id).is_some());
+    }
 }

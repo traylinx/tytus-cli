@@ -60,6 +60,629 @@
     },
   };
 
+  // ── Hash deep-link auto-run ───────────────────────────────────
+  //
+  // Tray menu items deep-link into Tower at hashes like
+  // `#/run/doctor` or `#/pod/02/restart` instead of spawning a
+  // Terminal. We pick those up here, wait for `state-ready` (so
+  // pod panels exist), then trigger the matching in-page action.
+  //
+  // Each tray click appends `?n=<nonce>` to force `hashchange` to
+  // fire even when the fragment matches the previous one — without
+  // it, browsers focus the tab without re-running our handler.
+  let __stateReady = false;
+  let __pendingHash = location.hash;
+  function __runHashAction(hash) {
+    if (!hash) return;
+    const route = hash.replace(/^#\/?/, '').split('?')[0];
+    if (!route) return;
+    const parts = route.split('/');
+    if (parts[0] === 'run' && parts[1]) {
+      // Buttons inside collapsed <details> need their parent opened
+      // first — otherwise the panel they reveal sits invisibly inside
+      // a closed disclosure. Map of button-id → optional details-id
+      // to open before click.
+      const buttonMap = {
+        doctor: { btn: 'tr-doctor', openDetails: 'troubleshoot' },
+        test:   { btn: 'hdr-health' }, // header button, no parent details
+      };
+      const route = buttonMap[parts[1]];
+      if (route) {
+        if (route.openDetails) {
+          const d = document.getElementById(route.openDetails);
+          if (d) d.open = true;
+        }
+        document.getElementById(route.btn)?.click();
+        return;
+      }
+      if (parts[1] === 'channels-catalog') {
+        __runChannelsCatalogInline();
+        return;
+      }
+    }
+    if (parts[0] === 'pod' && parts[1] && parts[2]) {
+      // Phase B routes this into the per-pod subpage. For Phase A we
+      // hit the existing /api/pod/<action> endpoints directly so the
+      // tray rewires deliver value before Phase B lands. When Phase B
+      // is loaded its listener calls preventDefault() to suppress the
+      // fallback and avoid duplicate POSTs.
+      const pod = parts[1];
+      const action = parts[2];
+      const params = new URLSearchParams(hash.split('?')[1] || '');
+      const evt = new CustomEvent('pod-hash-action',
+        { detail: { pod, action, params }, cancelable: true });
+      window.dispatchEvent(evt);
+      if (!evt.defaultPrevented) __runPhaseAFallback(pod, action);
+      return;
+    }
+  }
+  async function __runPhaseAFallback(pod, action) {
+    // Defense-in-depth: this only runs if no `pod-hash-action`
+    // listener called preventDefault on the dispatched event.
+    // Phase B always registers such a listener (later in this same
+    // script) and always calls preventDefault, so in normal operation
+    // this fallback is unreachable. It exists in case a future
+    // refactor accidentally drops Phase B's listener — the user still
+    // gets the action triggered via the legacy fire-and-forget
+    // endpoints.
+    //
+    // No confirm() calls here on purpose. If this fallback IS
+    // reached, Phase B is missing entirely; we don't have its
+    // confirmation UX either way. A bare POST without confirm is the
+    // historical tray behavior (the prior Terminal-spawn flow had no
+    // confirm step), so this preserves that contract for the
+    // degenerate case.
+    try {
+      switch (action) {
+        case 'restart': {
+          await fetch(`/api/pod/restart?pod=${encodeURIComponent(pod)}`, { method: 'POST' });
+          showToast(`Pod ${pod} restarting…`);
+          break;
+        }
+        case 'stop-forwarder': {
+          await fetch(`/api/pod/stop-forwarder?pod=${encodeURIComponent(pod)}`, { method: 'POST' });
+          showToast(`Pod ${pod} forwarder stopping…`);
+          break;
+        }
+        case 'open': {
+          await fetch(`/api/pod/open?pod=${encodeURIComponent(pod)}`, { method: 'POST' });
+          break;
+        }
+        // Intentionally absent: revoke, uninstall, doctor.
+        //   revoke / uninstall — destructive. Without Phase B's
+        //     confirm() there is no safe fallback. We'd rather no-op
+        //     than silently delete a pod's workspace.
+        //   doctor — has no fire-and-forget endpoint (only the
+        //     streamed /api/pod/NN/run-streamed); a bare POST here
+        //     would 404. Phase B owns it.
+        // Channels actions land on the channels strip; Phase B opens
+        // the dedicated subpage. For Phase A the strip auto-renders
+        // when its parent panel is visible, so a no-op is fine.
+        default: break;
+      }
+      // Refresh state so the running-session badge / pod URL reflects
+      // the new lifecycle state. /api/state isn't auto-polled.
+      loadBudget();
+    } catch (err) {
+      showToast(`Action failed: ${err}`, 'err');
+    }
+  }
+  async function __runChannelsCatalogInline() {
+    // Opportunistically reuse the existing #doctor-panel for output —
+    // it's already styled and has a close button. The Troubleshoot
+    // <details> needs to be open for the panel to be visible.
+    const trouble = document.getElementById('troubleshoot');
+    if (trouble) trouble.open = true;
+    const panel = $('doctor-panel');
+    const title = $('doctor-panel-title');
+    const log = $('doctor-panel-log');
+    if (!panel || !title || !log) return;
+    panel.classList.remove('hidden', 'ok', 'err');
+    title.textContent = 'Loading channels catalog…';
+    log.textContent = '';
+    try {
+      const res = await fetch('/api/channels/catalog', { method: 'POST' });
+      const body = await res.json();
+      if (body.error) {
+        panel.classList.add('err');
+        title.textContent = 'Channels catalog failed to load';
+        log.textContent = body.error;
+      } else {
+        panel.classList.add(body.ok ? 'ok' : 'err');
+        title.textContent = body.ok
+          ? 'Channels catalog'
+          : `Channels catalog (exit ${body.exit_code})`;
+        log.textContent =
+          (body.stdout || '') +
+          (body.stderr ? `\n\n[stderr]\n${body.stderr}` : '');
+      }
+    } catch (err) {
+      panel.classList.add('err');
+      title.textContent = 'Channels catalog errored';
+      log.textContent = String(err);
+    }
+  }
+  // ── Phase C: token modal ──────────────────────────────────────
+  //
+  // Opens a native <dialog> for collecting a channel bot token
+  // without spawning Terminal. Submit POSTs JSON to
+  // /api/channels/add — the token rides only the request body and
+  // never touches the URL bar, address history, or browser logs.
+  function openTokenModal(podId, channel, channelLabel, onDone) {
+    const dlg = $('token-modal');
+    if (!dlg || typeof dlg.showModal !== 'function') {
+      // Defensive — older browsers without <dialog>; fall back to a
+      // prompt rather than refusing the action entirely.
+      const tok = window.prompt(`Paste your ${channelLabel} bot token:`);
+      if (!tok) return;
+      __submitToken(podId, channel, tok, channelLabel, onDone);
+      return;
+    }
+    const titleEl = $('token-modal-title');
+    const hintEl  = $('token-modal-hint');
+    const input   = $('token-input');
+    const errEl   = $('token-error');
+    const cancel  = $('token-cancel');
+    const form    = $('token-form');
+    titleEl.textContent = `Add ${channelLabel} to pod ${podId}`;
+    hintEl.textContent =
+      `Paste your ${channelLabel} bot token. It's sent only to your local ` +
+      `Tytus process on 127.0.0.1, then forwarded to the pod over TLS.`;
+    input.value = '';
+    errEl.textContent = '';
+    errEl.classList.add('hidden');
+
+    const close = () => {
+      try { dlg.close(); } catch {}
+      form.onsubmit = null;
+      cancel.onclick = null;
+    };
+    cancel.onclick = (e) => { e.preventDefault(); close(); };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const token = input.value.trim();
+      if (!token) {
+        errEl.textContent = 'Token is empty.';
+        errEl.classList.remove('hidden');
+        return;
+      }
+      const submit = $('token-submit');
+      submit.disabled = true;
+      const prev = submit.textContent;
+      submit.textContent = 'Adding…';
+      try {
+        const res = await __submitTokenFetch(podId, channel, token);
+        if (res.ok) {
+          close();
+          showToast(`${channelLabel} added to pod ${podId}.`);
+          if (typeof onDone === 'function') onDone();
+        } else {
+          errEl.textContent = res.error ||
+            (res.exit_code !== undefined ? `Failed (exit ${res.exit_code}).` : 'Failed.');
+          if (res.stderr) errEl.textContent += `\n${res.stderr}`;
+          errEl.classList.remove('hidden');
+        }
+      } catch (ex) {
+        errEl.textContent = String(ex);
+        errEl.classList.remove('hidden');
+      } finally {
+        submit.disabled = false;
+        submit.textContent = prev;
+      }
+    };
+    dlg.showModal();
+    setTimeout(() => input.focus(), 0);
+  }
+  async function __submitTokenFetch(podId, channel, token) {
+    const r = await fetch('/api/channels/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pod: podId, channel, token }),
+    });
+    return r.json();
+  }
+  async function __submitToken(podId, channel, token, label, onDone) {
+    try {
+      const r = await __submitTokenFetch(podId, channel, token);
+      if (r.ok) {
+        showToast(`${label} added to pod ${podId}.`);
+        if (typeof onDone === 'function') onDone();
+      } else {
+        showToast(r.error || `Failed (exit ${r.exit_code})`, 'err');
+      }
+    } catch (e) {
+      showToast(String(e), 'err');
+    }
+  }
+
+  window.addEventListener('state-ready', () => {
+    __stateReady = true;
+    if (__pendingHash) {
+      const h = __pendingHash;
+      __pendingHash = null;
+      __runHashAction(h);
+    }
+  });
+  window.addEventListener('hashchange', () => {
+    if (__stateReady) __runHashAction(location.hash);
+    else __pendingHash = location.hash;
+  });
+
+  // ── Phase B: per-pod subpage (viewPod) ────────────────────────
+  //
+  // Hash routes:
+  //   #/pod/<NN>             → viewPod.show(NN, 'overview')
+  //   #/pod/<NN>/<tab>       → viewPod.show(NN, <tab>)  tab ∈ overview|output|channels
+  //   #/pod/<NN>/<action>    → viewPod.show(NN, 'output'); run action streamed
+  //                            (action ∈ restart|revoke|uninstall|stop-forwarder)
+  //
+  // Global commands `doctor` and `test` are intentionally NOT in the
+  // per-pod action set — they aren't pod-scoped (CLI takes no --pod
+  // flag for them), so they live on `#/run/doctor` / `#/run/test`
+  // which target the global Tower handlers.
+  //
+  // body.pod-mode is the visibility switch (CSS). Install flow's
+  // view.show() is unaffected — it manages chooser/installing/success/
+  // failure within the (now-hidden) overview stack.
+  const viewPod = (() => {
+    const TABS = ['overview', 'output', 'channels'];
+    // Actions that mount the Output tab and run a streamed subprocess.
+    // `doctor` and `test` are intentionally excluded — they're global
+    // commands (no --pod flag in the CLI), so they live on the Tower
+    // header / Troubleshoot section, not as per-pod actions.
+    const ACTION_TABS = new Set(['restart', 'revoke', 'uninstall', 'stop-forwarder']);
+    let currentPod = null;
+    let currentTab = null;
+    let activeStream = null; // { es, jobId, podId }
+
+    function show(pod, tabOrAction, params) {
+      currentPod = pod;
+      document.body.classList.add('pod-mode');
+      // Make sure we're not stuck inside a sub-flow.
+      const dest = (tabOrAction && ACTION_TABS.has(tabOrAction))
+        ? 'output' : (tabOrAction || 'overview');
+      switchTab(dest);
+      renderHeader(pod);
+      if (dest === 'overview') renderOverview(pod);
+      if (dest === 'channels') renderChannels(pod, params);
+      if (dest === 'output' && tabOrAction && ACTION_TABS.has(tabOrAction)) {
+        // Phase B's hash-driven action runner. Confirm destructive
+        // actions before kicking off the streamed subprocess.
+        runStreamedAction(pod, tabOrAction);
+      }
+    }
+    function hide() {
+      document.body.classList.remove('pod-mode');
+      currentPod = null;
+      currentTab = null;
+      // Don't tear down the EventSource — let the user revisit and see
+      // accumulated output. Page reload will reap.
+    }
+    function switchTab(tab) {
+      if (!TABS.includes(tab)) tab = 'overview';
+      currentTab = tab;
+      for (const t of TABS) {
+        const pane = document.getElementById(`pod-tab-${t}`);
+        const btn  = document.getElementById(`pod-tab-${t}-btn`);
+        if (pane) pane.classList.toggle('hidden', t !== tab);
+        if (btn)  btn.classList.toggle('tab-active', t === tab);
+      }
+    }
+    function findPod(pod) {
+      const s = budgetState || {};
+      const list = (s.agents || []).concat(s.included || []);
+      return list.find((a) => a.pod_id === pod) || null;
+    }
+    function renderHeader(pod) {
+      const a = findPod(pod);
+      const titleEl = document.getElementById('pod-sub-name');
+      const iconEl  = document.getElementById('pod-sub-icon');
+      if (iconEl) iconEl.innerHTML = '';
+      if (a) {
+        const override = DISPLAY[a.agent_type] || {};
+        const name = override.display_name || a.agent_type || 'Pod';
+        if (titleEl) titleEl.textContent = `${name} — Pod ${pod}`;
+        if (override.icon && iconEl) {
+          const img = document.createElement('img');
+          img.src = override.icon; img.alt = '';
+          iconEl.appendChild(img);
+        }
+      } else {
+        if (titleEl) titleEl.textContent = `Pod ${pod}`;
+      }
+    }
+    function renderOverview(pod) {
+      const host = document.getElementById('pod-tab-overview');
+      if (!host) return;
+      const a = findPod(pod);
+      if (!a) {
+        host.innerHTML = `<p class="muted">Pod ${pod} not found in current state.</p>`;
+        return;
+      }
+      const apiUrl = a.api_url || a.public_url || '— provisioning —';
+      host.innerHTML = `
+        <div class="pod-url-row">
+          <span class="pod-url-label">API URL</span>
+          <code class="pod-url"></code>
+        </div>
+        <div class="pod-actions" style="margin-top:12px"></div>
+      `;
+      host.querySelector('.pod-url').textContent = apiUrl;
+      const actions = host.querySelector('.pod-actions');
+      const mkBtn = (label, cls, onClick) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = `pod-btn ${cls}`;
+        b.textContent = label;
+        b.addEventListener('click', onClick);
+        return b;
+      };
+      if (a.public_url) {
+        actions.appendChild(mkBtn('Open in Browser', 'pod-btn-primary', async () => {
+          await fetch(`/api/pod/open?pod=${encodeURIComponent(pod)}`, { method: 'POST' });
+        }));
+      }
+      actions.appendChild(mkBtn('Copy API URL', 'pod-copy-url', () => {
+        if (a.api_url) {
+          navigator.clipboard?.writeText(a.api_url);
+          showToast('API URL copied');
+        }
+      }));
+      actions.appendChild(mkBtn('Output ▸', 'pod-btn', () => {
+        location.hash = `#/pod/${pod}/output`;
+      }));
+      actions.appendChild(mkBtn('Channels ▸', 'pod-btn', () => {
+        location.hash = `#/pod/${pod}/channels`;
+      }));
+    }
+    function renderChannels(pod, params) {
+      const host = document.getElementById('pod-tab-channels');
+      if (!host) return;
+      // Reuse the existing helper that renders the channels strip.
+      renderPodChannels(host, pod);
+      // Phase C: tray menu deep-link `?action=add&type=X` opens the
+      // token modal directly. Same shape `?action=remove&type=X` is
+      // handled inside renderPodChannels (confirm + fetch).
+      if (params && typeof params.get === 'function') {
+        const action = params.get('action');
+        const type = params.get('type');
+        if (action === 'add' && type) {
+          const label = (CHANNELS.find((c) => c.id === type) || {}).label || type;
+          openTokenModal(pod, type, label, () => {
+            setTimeout(() => renderPodChannels(host, pod), 20000);
+          });
+        }
+      }
+    }
+
+    function streamForPod(pod, jobId, statusEl, onExit) {
+      // Tear down any existing stream — only one per pod at a time.
+      if (activeStream) {
+        try { activeStream.es.close(); } catch {}
+        activeStream = null;
+      }
+      const logEl = document.getElementById('pod-output-log');
+      if (statusEl) {
+        statusEl.classList.remove('ok', 'err');
+        statusEl.textContent = 'Streaming…';
+      }
+      const es = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/stream`);
+      activeStream = { es, jobId, podId: pod };
+      es.addEventListener('log', (ev) => {
+        const line = (ev.data || '').replace(/\\n/g, '\n');
+        logEl.textContent += line + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      });
+      // Local handle so we can detect "this stream got superseded by
+      // a newer one before its exit handler ran" — see refreshIfMine.
+      const myStream = activeStream;
+      const refreshIfMine = () => {
+        // Only refresh budget when this is still the live stream; a
+        // superseded stream's exit must NOT call loadBudget because a
+        // transient fetch failure there would null budgetState while
+        // the new stream is still rendering — UI flicker.
+        if (activeStream === myStream || activeStream === null) loadBudget();
+      };
+      es.addEventListener('exit', (ev) => {
+        let code = -1;
+        try { code = (JSON.parse(ev.data || '{}').code) ?? -1; } catch {}
+        if (statusEl) {
+          statusEl.classList.add(code === 0 ? 'ok' : 'err');
+          statusEl.textContent = code === 0
+            ? `Done (exit 0).`
+            : `Failed (exit ${code}).`;
+        }
+        es.close();
+        if (activeStream === myStream) activeStream = null;
+        // Refresh budget so the running-session dot clears and the
+        // pod state reflects any lifecycle change (revoke/uninstall).
+        refreshIfMine();
+        // Caller-supplied post-exit hook (e.g. revoke navigates back
+        // to Tower on success). Fired only for the live stream — a
+        // superseded stream's onExit must not run, otherwise a stale
+        // revoke handler could redirect the user away from a pod
+        // they navigated to fresh.
+        if (typeof onExit === 'function' && (activeStream === null || activeStream === myStream)) {
+          try { onExit(code); } catch {}
+        }
+      });
+      es.addEventListener('fail', (ev) => {
+        if (statusEl) {
+          statusEl.classList.add('err');
+          statusEl.textContent = `Job failed: ${ev.data || 'unknown error'}`;
+        }
+        es.close();
+        if (activeStream === myStream) activeStream = null;
+        refreshIfMine();
+      });
+      es.onerror = () => {
+        if (statusEl && !statusEl.textContent.startsWith('Done')) {
+          statusEl.classList.add('err');
+          statusEl.textContent = 'Stream lost.';
+        }
+        es.close();
+        if (activeStream === myStream) activeStream = null;
+      };
+    }
+
+    async function runStreamedAction(pod, action) {
+      // Switch to Output tab so the user sees the stream.
+      switchTab('output');
+      const logEl = document.getElementById('pod-output-log');
+      const statusEl = document.getElementById('pod-output-status');
+      // Confirm destructive actions in-page (tray no longer confirms).
+      if (action === 'revoke') {
+        const ok = window.confirm(
+          `Revoke pod ${pod}?\n\nFrees its units and wipes the agent's workspace. Cannot be undone.`);
+        if (!ok) {
+          if (statusEl) {
+            statusEl.classList.remove('ok', 'err');
+            statusEl.textContent = 'Cancelled.';
+          }
+          return;
+        }
+      }
+      if (action === 'uninstall') {
+        const ok = window.confirm(
+          `Uninstall the agent on pod ${pod}?\n\nThe pod slot stays allocated; AIL keeps working.`);
+        if (!ok) {
+          if (statusEl) {
+            statusEl.classList.remove('ok', 'err');
+            statusEl.textContent = 'Cancelled.';
+          }
+          return;
+        }
+      }
+      // Status hint while the POST is in flight; the log header is
+      // written ONLY after we get a 202 + job_id back. That avoids a
+      // misleading `$ tytus …` line preceding a 409 'pod busy'
+      // response (where no subprocess actually ran).
+      if (statusEl) {
+        statusEl.classList.remove('ok', 'err');
+        statusEl.textContent = 'Starting…';
+      }
+      try {
+        const res = await fetch(
+          `/api/pod/${encodeURIComponent(pod)}/run-streamed`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+          });
+        const body = await res.json();
+        if (res.status === 409) {
+          if (statusEl) {
+            statusEl.classList.add('err');
+            statusEl.textContent = body.error || 'Pod is busy.';
+          }
+          return;
+        }
+        if (!res.ok || !body.job_id) {
+          if (statusEl) {
+            statusEl.classList.add('err');
+            statusEl.textContent = body.error || 'Failed to start.';
+          }
+          return;
+        }
+        // Subprocess is starting — now safe to show the command header
+        // in the log. Append (don't replace) so a fresh action keeps
+        // any prior output visible until the user explicitly clears.
+        if (logEl) logEl.textContent += `$ tytus ${action} (pod ${pod})\n`;
+        // Refresh state so overview pod-rows show the running dot for
+        // this pod while the stream runs.
+        loadBudget();
+        // Q3: revoke removes the pod from /api/state.agents on
+        // success. Auto-navigate back to Tower when its exit code is
+        // 0 — leaving the user on `#/pod/<NN>/output` would show a
+        // 'Pod not found' screen which is disorienting. We pass a
+        // post-exit hook to streamForPod for this.
+        const onExit = (action === 'revoke')
+          ? (code) => {
+              if (code === 0) {
+                // Small delay so the user sees the success line before
+                // the page-context flips.
+                setTimeout(() => { location.hash = ''; }, 1200);
+              }
+            }
+          : null;
+        streamForPod(pod, body.job_id, statusEl, onExit);
+      } catch (err) {
+        if (statusEl) {
+          statusEl.classList.add('err');
+          statusEl.textContent = `Failed: ${err}`;
+        }
+      }
+    }
+
+    return { show, hide, switchTab, runStreamedAction };
+  })();
+
+  // Wire pod-back button + tab clicks (resolved at first click since
+  // the sections might mount lazily — but in this build they're all
+  // baked into tower.html, so direct binding is safe).
+  document.getElementById('pod-back')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    location.hash = '';
+  });
+  for (const t of ['overview', 'output', 'channels']) {
+    document.getElementById(`pod-tab-${t}-btn`)?.addEventListener('click', (e) => {
+      e.preventDefault();
+      const pod = (location.hash.match(/^#\/pod\/([0-9]+)/) || [])[1];
+      if (pod) location.hash = `#/pod/${pod}/${t}`;
+    });
+  }
+  // Output toolbar buttons → run streamed actions on the current pod.
+  // Only per-pod actions appear here; global commands (doctor/test)
+  // live on the Tower header and inside Troubleshoot.
+  for (const [btnId, action] of [
+    ['pod-run-restart', 'restart'],
+    ['pod-run-stop-fwd', 'stop-forwarder'],
+    ['pod-run-uninstall', 'uninstall'],
+    ['pod-run-revoke', 'revoke'],
+  ]) {
+    document.getElementById(btnId)?.addEventListener('click', () => {
+      const pod = (location.hash.match(/^#\/pod\/([0-9]+)/) || [])[1];
+      if (pod) viewPod.runStreamedAction(pod, action);
+    });
+  }
+  document.getElementById('pod-output-clear')?.addEventListener('click', () => {
+    const log = document.getElementById('pod-output-log');
+    if (log) log.textContent = '';
+  });
+
+  // Extend the hash router: pod routes route through viewPod.
+  window.addEventListener('pod-hash-action', (e) => {
+    // Suppress the Phase A fallback fetch — viewPod owns the action now.
+    e.preventDefault();
+    const { pod, action, params } = e.detail || {};
+    if (pod) viewPod.show(pod, action, params);
+  });
+  // Mount the pod view for the bare `#/pod/<NN>` route (no segment).
+  // Routes WITH a segment — both tabs (`/overview`, `/output`,
+  // `/channels`) and actions (`/restart`, `/revoke`, `/uninstall`,
+  // `/stop-forwarder`, `/doctor`) — are claimed by the
+  // `pod-hash-action` listener above. That listener fires
+  // synchronously on the same hashchange, so we let it handle every
+  // seg case to avoid redundant `viewPod.show()` renders. Action
+  // segments doubly so: a duplicate mount would `runStreamedAction`
+  // twice and the second POST would hit 409 Conflict from the
+  // Registry::create_pod busy-check.
+  //
+  // Also handles the leave-pod-mode case: hash no longer matches a
+  // pod route → hide #view-pod and fall back to the overview stack.
+  function __maybeMountPodView() {
+    const m = location.hash.match(/^#\/pod\/([0-9]+)(?:\/([a-zA-Z-]+))?/);
+    if (m) {
+      // Seg present (tab or action) → owned by pod-hash-action.
+      if (m[2]) return;
+      viewPod.show(m[1], 'overview');
+    } else if (document.body.classList.contains('pod-mode')) {
+      viewPod.hide();
+    }
+  }
+  window.addEventListener('hashchange', __maybeMountPodView);
+  window.addEventListener('state-ready', __maybeMountPodView);
+
   // Cached budget snapshot — populated by loadBudget(), read by
   // renderCatalog() to mark cards enabled/disabled against the
   // remaining unit headroom. We fetch it on page load in parallel
@@ -312,7 +935,19 @@
       panel.querySelector('.pod-icon').appendChild(img);
     }
     panel.querySelector('.pod-name-text').textContent = name;
-    panel.querySelector('.pod-id').textContent = `Pod ${a.pod_id}`;
+    // Phase B: prepend a running-job dot when the per-pod registry has
+    // an active streamed action for this pod. budgetState carries
+    // active_jobs_per_pod from /api/state.
+    const podIdEl = panel.querySelector('.pod-id');
+    podIdEl.textContent = '';
+    const activeMap = (budgetState && budgetState.active_jobs_per_pod) || {};
+    if (activeMap[a.pod_id]) {
+      const dot = document.createElement('span');
+      dot.className = 'pod-running-job-dot';
+      dot.title = 'Action streaming…';
+      podIdEl.appendChild(dot);
+    }
+    podIdEl.appendChild(document.createTextNode(`Pod ${a.pod_id}`));
     panel.querySelector('.pod-units-badge').textContent =
       `${a.units} unit${a.units === 1 ? '' : 's'}`;
     panel.querySelector('.pod-url').textContent = apiUrlDisplay;
@@ -737,18 +1372,18 @@
         const name = ev.currentTarget.dataset.name;
         addWrap.removeAttribute('open');
         if (name === '__browse') {
-          await fetch('/api/channels/catalog', { method: 'POST' });
-          showToast('Opening catalog in Terminal…');
+          // Phase A migrated catalog to inline JSON; show in-page.
+          __runChannelsCatalogInline();
           return;
         }
-        await fetch(
-          `/api/channels/add?pod=${encodeURIComponent(podId)}&name=${encodeURIComponent(name)}`,
-          { method: 'POST' }
-        );
-        showToast(`Terminal opened — paste your ${name} token there.`);
-        // Refresh list when the user likely finished (slower than
-        // remove — CLI redeploys agent container, ~15-20s total).
-        setTimeout(() => renderPodChannels(host, podId), 20000);
+        // Phase C: open the token modal in-page; Terminal is no
+        // longer involved. On submit the modal POSTs the token in
+        // the request body to /api/channels/add.
+        const label = (CHANNELS.find((c) => c.id === name) || {}).label || name;
+        openTokenModal(podId, name, label, () => {
+          // Refresh after the redeploy (15-20s).
+          setTimeout(() => renderPodChannels(host, podId), 20000);
+        });
       });
     });
     rows.appendChild(addWrap);
@@ -1851,6 +2486,9 @@
     await loadCatalog(false);
     refreshHeaderConn();
     refreshSettings();
+    // Hash deep-links (#/run/doctor, #/pod/02/restart) wait for this
+    // signal so pod panels exist before we try to interact with them.
+    window.dispatchEvent(new CustomEvent('state-ready'));
     // Gentle poll so tunnel-state flips (from other surfaces like the
     // tray menu) are reflected without a manual refresh.
     setInterval(refreshHeaderConn, 10000);

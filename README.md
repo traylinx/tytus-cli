@@ -257,6 +257,24 @@ Codex, Cursor, Aider, Vibe, Cody, Amp, or Terminal), Copy Connection Info,
 Run Health Test, Configure Agent, Sign Out, Doctor, View Daemon/Startup Log,
 Start/Stop/Restart Daemon, Auto-start toggles, Documentation, About, Quit.
 
+Most non-interactive actions (`Run Health Test`, `Doctor`, per-pod
+`Restart` / `Uninstall` / `Revoke` / `Stop forwarder`, `Channels catalog`,
+`Add channel`) now run **in the Tower web UI** instead of opening a
+Terminal window. The tray menu deep-links the browser at
+`http://127.0.0.1:<port>/tower#/<action>`; output streams in-page via
+SSE. Sudo / browser-auth / interactive-wizard commands (`Connect`,
+`Sign In`, `Configure Agent`, `tytus tray install`, editor launches)
+still spawn a Terminal because they need a TTY.
+
+Each pod has its own subpage at `#/pod/<NN>` with three tabs:
+**Overview** (URL strip + per-pod actions), **Output** (live log of
+the latest streamed action — Restart / Stop forwarder / Uninstall /
+Revoke), and **Channels** (add / remove the messengers each pod can
+talk through). A purple dot appears next to a pod's row on the Tower
+overview while a streamed action is running on it. Adding a channel
+opens a native `<dialog>` in the page for the bot token — no more
+Terminal `read -rs` prompt.
+
 ---
 
 ## Native AI tool integration
