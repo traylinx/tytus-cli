@@ -7,6 +7,13 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-04-25
+
+Tower becomes the output surface for non-interactive tray actions.
+No more cascade of Terminal windows for routine operations; per-pod
+state, action streams, and channel-add token entry all live inside
+one local web page now.
+
 - **Tower in-page actions + per-pod subpages** — tray menu items that
   used to spawn Terminal.app for `test`, `doctor`, per-pod
   `restart` / `revoke` / `uninstall` / `stop-forwarder`,
@@ -62,6 +69,52 @@ bumps are allowed to break compat.
   clippy` clean (no new warnings). Verified across 5 lope review
   rounds with `pi` + `qwen` validators.
   Sprint doc: `~/Projects/makakoo/sprints/wannolot-embedded-terminal-2026-04-24/SPRINT.md`.
+
+- **fix(tower): Run Doctor / Run Health Test stream output line-by-line**
+  — both endpoints now respond `{job_id}` (HTTP 202) and stream
+  subprocess output via SSE on `/api/jobs/<id>/stream`, same pipeline
+  as the install flow + per-pod streamed actions. Pre-fix the page
+  showed an empty `<pre>` for ~10 s then dumped the whole output at
+  once, because `handle_test`/`handle_doctor` used `Command::output()`
+  which blocks until exit. Refactored to spawn-piped + Registry
+  pattern. Required pairing with the next two fixes (`wizard::flush()`
+  + `with_chunked_threshold(0)`) to actually reach the browser as
+  bytes arrive.
+
+- **fix(cli): wizard helpers flush stdout per line**
+  (`cli/src/wizard.rs::flush()`) — when `tytus test` / `tytus doctor`
+  are spawned with `Stdio::piped()` (which the tray now does for the
+  streaming pipeline), Rust block-buffers `println!` output. Every
+  spinner / finish_ok / print_* line accumulated in stdout's
+  `BufWriter` and only flushed at process exit. Added an explicit
+  flush after every println in the non-TTY branches of `spinner` /
+  `finish_ok` / `finish_fail` / `print_box` plus unconditionally in
+  `print_header` / `print_step` / `print_ok` / `print_fail` /
+  `print_warn` / `print_info` / `print_hint` / `print_logo` /
+  `print_success_banner`. No-op when running in a TTY (already
+  line-buffered).
+
+- **fix(tower): force chunked transfer encoding on SSE responses**
+  (`tray/src/web_server.rs::sse_response` →
+  `.with_chunked_threshold(0)`) — tiny_http's default chunked
+  threshold is 32 KB. When the response body length is unknown AND
+  total output is shorter, tiny_http BUFFERS the entire body to
+  compute `Content-Length` — defeating SSE streaming entirely.
+  `tytus test` output is ~1 KB so all frames were buffered to the
+  end. Setting `chunked_threshold(0)` forces chunked from the first
+  byte: each pipe `read()` produces a chunk that flushes immediately.
+  Verified end-to-end with `curl -sN /api/jobs/<id>/stream` piped
+  through a millisecond-precision timestamper — frames now spread
+  across the subprocess's actual runtime instead of clustering at
+  process exit. The install flow's apparent streaming under the old
+  code was coincidental: install output crosses the 32 KB threshold
+  mid-run, so it switched to chunked then. All other SSE consumers
+  (test, doctor, per-pod actions) silently 100% buffered until now.
+
+Hard-won lessons captured as durable memories in the project's
+auto-memory store: `feedback_tray_binary_staleness` (rebuild + swap
+recipe after tray edits) and `feedback_tiny_http_chunked_threshold`
+(the one-line streaming gate).
 
 ## [0.5.0] — 2026-04-24
 
