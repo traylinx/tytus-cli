@@ -1286,8 +1286,34 @@ fn build_menu(state: &TrayState) -> Menu {
             if folder_helper_present { "Shared Folders" } else { "Shared Folders  (install garagetytus)" },
             folder_helper_present,
         );
+        // ── Dynamic per-binding entries (click → open in Finder) ──
+        // Each entry shows "<bucket>  ↔  <local-path>". Sidecar JSONs
+        // at ~/.cache/garagetytus/bisync/*.bindings.json are the source
+        // of truth — written by garagetytus folder bind v0.5.3+.
+        let bindings = shared_folders::list_bindings();
+        if bindings.is_empty() {
+            let _ = shared_sub.append(&MenuItem::with_id(
+                "shared_folders_none",
+                "No folders bound yet",
+                false, None,
+            ));
+        } else {
+            for b in &bindings {
+                // Compress home prefix for readability ("~/Documents/work")
+                let display_path = std::env::var("HOME")
+                    .ok()
+                    .and_then(|h| b.local_path.strip_prefix(&h).map(|s| format!("~{}", s)))
+                    .unwrap_or_else(|| b.local_path.clone());
+                let _ = shared_sub.append(&MenuItem::with_id(
+                    shared_folders::menu_id_open_binding(&b.safe_name),
+                    format!("{}  ↔  {}", b.bucket, display_path),
+                    true, None,
+                ));
+            }
+        }
+        let _ = shared_sub.append(&PredefinedMenuItem::separator());
         let _ = shared_sub.append(&MenuItem::with_id(
-            shared_folders::ID_LIST_BINDINGS, "List bindings…", true, None,
+            shared_folders::ID_LIST_BINDINGS, "List bindings (full table)…", true, None,
         ));
         let _ = shared_sub.append(&MenuItem::with_id(
             shared_folders::ID_STATUS, "Status (with pod check)…", true, None,
@@ -1848,6 +1874,12 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         }
         shared_folders::ID_OPEN_CACHE => {
             shared_folders::open_cache_dir();
+        }
+        // Click → open one binding's local folder in Finder.
+        // ID shape: shared_folders_open_binding_<safe-name>
+        other if shared_folders::parse_open_binding_id(other).is_some() => {
+            let safe_name = shared_folders::parse_open_binding_id(other).unwrap();
+            shared_folders::open_binding_in_finder(&safe_name);
         }
         shared_folders::ID_REFRESH_ALL => {
             notify("Tytus", "Running garagetytus-refresh-watchdog across every pod…");

@@ -7,6 +7,28 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-04-26
+
+The Shared Folders submenu becomes useful at a glance. Each active
+binding now appears at the top of the submenu as a click target —
+clicking opens the bound local folder in Finder. No more "where
+did I bind that to again?"
+
+- **Dynamic per-binding entries** at the top of the Shared Folders
+  submenu. One row per active binding in the format
+  `<bucket>  ↔  <local-path>` (home prefix compressed to `~/`).
+  Click opens the local folder in Finder. Sidecar JSONs at
+  `~/.cache/garagetytus/bisync/*.bindings.json` (written by
+  `garagetytus folder bind` v0.5.3+) are the source of truth.
+  Empty case shows a disabled "No folders bound yet" item so the
+  user can tell the difference between "nothing bound" and
+  "garagetytus not installed".
+- New `shared_folders::list_bindings()`, `Binding` struct,
+  `menu_id_open_binding`, `parse_open_binding_id`, and
+  `open_binding_in_finder` helpers — all in
+  `tray/src/shared_folders.rs`. 2 new unit tests (round-trip the
+  ID + reject unrelated IDs); 17 tray tests total.
+
 ## [0.5.2] — 2026-04-26
 
 The tray learns about garagetytus shared folders. Two integration

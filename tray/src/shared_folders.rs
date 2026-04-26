@@ -41,6 +41,12 @@ pub const ID_CONFLICTS: &str = "shared_folders_conflicts";
 pub const ID_OPEN_CACHE: &str = "shared_folders_open_cache";
 pub const ID_REFRESH_ALL: &str = "shared_folders_refresh_all";
 
+// Prefix for dynamic per-binding "open in Finder" items at the top
+// of the Shared Folders submenu. The full menu ID is
+// `shared_folders_open_<safe-name>` where safe-name comes from the
+// sidecar. Click handler opens the binding's local_path in Finder.
+pub const ID_OPEN_BINDING_PREFIX: &str = "shared_folders_open_binding_";
+
 // ── Per-pod-id parser (for the two new pod-scoped IDs) ────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +216,82 @@ pub fn spawn_refresh_all() {
     });
 }
 
+// ── Enumerate active bindings from sidecar JSONs ─────────────
+
+/// Lightweight view of one bound folder. Read from the sidecar JSON
+/// that `garagetytus folder bind` writes at
+/// `~/.cache/garagetytus/bisync/<safe-name>.bindings.json`. Sidecar
+/// shape is documented in
+/// `github.com/traylinx/garagetytus/docs/MANUAL.md` §12.
+#[derive(Debug, Clone)]
+pub struct Binding {
+    pub safe_name: String,
+    pub bucket: String,
+    pub local_path: String,
+}
+
+/// Walk `~/.cache/garagetytus/bisync/*.bindings.json` and return one
+/// Binding per readable+parsable sidecar. Returns empty Vec when the
+/// dir doesn't exist (no bindings yet) or jq isn't available — never
+/// errors, so the menu always builds even on a fresh machine.
+pub fn list_bindings() -> Vec<Binding> {
+    let home = match std::env::var("HOME") { Ok(h) => h, Err(_) => return vec![] };
+    let dir = format!("{}/.cache/garagetytus/bisync", home);
+    let entries = match std::fs::read_dir(&dir) { Ok(e) => e, Err(_) => return vec![] };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let safe_name = match name.strip_suffix(".bindings.json") {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => continue };
+        // Parse with serde_json (already a workspace dep). Tolerate
+        // missing fields by falling back to empty strings — broken
+        // sidecars shouldn't poison the menu.
+        let json: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(j) => j, Err(_) => continue,
+        };
+        let bucket = json.get("bucket").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let local_path = json.get("local_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if bucket.is_empty() || local_path.is_empty() { continue; }
+        out.push(Binding { safe_name, bucket, local_path });
+    }
+    // Sort for stable menu order (bucket name asc).
+    out.sort_by(|a, b| a.bucket.cmp(&b.bucket));
+    out
+}
+
+/// Build the menu item ID for "open this binding's local folder".
+/// Round-trips with `parse_open_binding_id`.
+pub fn menu_id_open_binding(safe_name: &str) -> String {
+    format!("{}{}", ID_OPEN_BINDING_PREFIX, safe_name)
+}
+
+/// Inverse of `menu_id_open_binding`. Returns the binding's
+/// safe_name; caller looks the local_path back up via list_bindings().
+pub fn parse_open_binding_id(id: &str) -> Option<String> {
+    id.strip_prefix(ID_OPEN_BINDING_PREFIX).map(String::from)
+}
+
+/// Open one binding's local folder in Finder. No-op if the path no
+/// longer exists on disk (orphan sidecar).
+pub fn open_binding_in_finder(safe_name: &str) {
+    if let Some(b) = list_bindings().into_iter().find(|b| b.safe_name == safe_name) {
+        if std::path::Path::new(&b.local_path).is_dir() {
+            let _ = std::process::Command::new("open")
+                .arg(&b.local_path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    }
+}
+
 // ── Open ~/.cache/garagetytus in Finder ──────────────────────
 
 pub fn open_cache_dir() {
@@ -270,5 +352,20 @@ mod tests {
         // over at runtime.
         let p = helper_path("garagetytus-doesnotexist-xyz");
         assert_eq!(p, "garagetytus-doesnotexist-xyz");
+    }
+
+    #[test]
+    fn open_binding_id_round_trips() {
+        let id = menu_id_open_binding("work-Documents-work");
+        let parsed = parse_open_binding_id(&id).unwrap();
+        assert_eq!(parsed, "work-Documents-work");
+        assert!(id.starts_with(ID_OPEN_BINDING_PREFIX));
+    }
+
+    #[test]
+    fn parse_open_binding_id_rejects_unrelated() {
+        assert!(parse_open_binding_id(ID_LIST_BINDINGS).is_none());
+        assert!(parse_open_binding_id("pod_02_files_bind_folder").is_none());
+        assert!(parse_open_binding_id("random").is_none());
     }
 }
