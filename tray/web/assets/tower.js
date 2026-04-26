@@ -314,6 +314,127 @@
     else __pendingHash = location.hash;
   });
 
+  // ── Phase E (Tower side) — `?` help-icon popover ───────────────
+  //
+  // Every `<button class="help-icon" data-help="<key>">` opens a small
+  // popover near the icon with the matching explainer text + a "More…"
+  // link to the Help tab. Closes on outside-click or Esc. The header
+  // bar's `#hdr-help` button shares the same handler — clicking it is
+  // a shortcut to the global "What's all this?" overview popover.
+  const __HELP_TEXT = {
+    'overview': {
+      title: 'What\'s all this?',
+      body: 'Tytus is your private AI. Chat from this dashboard or any terminal. Your messages never leave the encrypted line between your computer and your AI.',
+      more: 'help',
+    },
+    'share-folder': {
+      title: 'Share a folder',
+      body: 'Pick any Mac folder + give it a short name. Tytus syncs it both ways with your AI — changes show up on both sides within ~60 seconds.',
+      more: 'files',
+    },
+    'bucket-name': {
+      title: 'Folder name on the cloud',
+      body: 'A short label your AI uses to refer to this folder. Lowercase letters, dashes, dots, and digits. 3–63 characters. Examples: "design-files", "client-photos".',
+      more: 'files',
+    },
+    'autostart-tunnel': {
+      title: 'Start at login',
+      body: 'When checked, Tytus connects to your AI automatically every time you log into this Mac. No menu-bar click, no Terminal — just open your laptop and your AI is reachable.',
+      more: 'settings',
+    },
+    'autostart-tray': {
+      title: 'Launch tray at login',
+      body: 'When checked, the Tytus menu-bar T appears the moment your session starts. Same model as Ollama or Docker Desktop — quit anytime, comes back on next reboot.',
+      more: 'settings',
+    },
+  };
+
+  function __helpPopoverEnsure() {
+    let pop = document.getElementById('help-popover');
+    if (pop) return pop;
+    pop = document.createElement('div');
+    pop.id = 'help-popover';
+    pop.className = 'help-popover hidden';
+    pop.setAttribute('role', 'dialog');
+    pop.innerHTML = `
+      <button class="help-popover-close" type="button" aria-label="Close">×</button>
+      <h3 class="help-popover-title"></h3>
+      <p class="help-popover-body"></p>
+      <a class="help-popover-more" href="#help">More in Help →</a>
+    `;
+    document.body.appendChild(pop);
+    pop.querySelector('.help-popover-close').addEventListener('click', __helpPopoverHide);
+    return pop;
+  }
+
+  function __helpPopoverShow(anchor, key) {
+    const text = __HELP_TEXT[key];
+    if (!text) return;
+    const pop = __helpPopoverEnsure();
+    pop.querySelector('.help-popover-title').textContent = text.title;
+    pop.querySelector('.help-popover-body').textContent = text.body;
+    const moreLink = pop.querySelector('.help-popover-more');
+    moreLink.setAttribute('href', '#' + (text.more || 'help'));
+    pop.classList.remove('hidden');
+
+    // Position near the anchor: below + right-aligned, but flip up
+    // when there isn't room below the viewport.
+    const rect = anchor.getBoundingClientRect();
+    const popRect = pop.getBoundingClientRect();
+    const margin = 8;
+    let top = rect.bottom + margin + window.scrollY;
+    let left = Math.max(margin, rect.right - popRect.width + window.scrollX);
+    // Flip up if popover would clip below the viewport.
+    if (rect.bottom + margin + popRect.height > window.innerHeight && rect.top - popRect.height - margin > 0) {
+      top = rect.top - popRect.height - margin + window.scrollY;
+    }
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
+  }
+
+  function __helpPopoverHide() {
+    const pop = document.getElementById('help-popover');
+    if (pop) pop.classList.add('hidden');
+  }
+
+  // Delegated click handler — any `[data-help]` element opens the
+  // matching popover. Listening on `document` keeps newly-added
+  // help icons (e.g. inside dynamically-rendered chooser cards)
+  // working without rewiring.
+  document.addEventListener('click', (ev) => {
+    const helpBtn = ev.target.closest('[data-help]');
+    if (helpBtn) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const key = helpBtn.getAttribute('data-help');
+      __helpPopoverShow(helpBtn, key);
+      return;
+    }
+    // Outside-click closes the popover. The popover itself + its
+    // ancestor are excluded so clicks inside don't dismiss it.
+    const pop = document.getElementById('help-popover');
+    if (pop && !pop.classList.contains('hidden') && !pop.contains(ev.target)) {
+      __helpPopoverHide();
+    }
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') __helpPopoverHide();
+  });
+  // "More…" link inside the popover uses the standard hashchange
+  // mechanism — we just need to dismiss the popover when the link
+  // fires (the hashchange fires after click; popover hangs around
+  // visually otherwise).
+  window.addEventListener('hashchange', __helpPopoverHide);
+  // Belt-and-suspenders: also dismiss on direct click of the More link
+  // for the same-hash case (e.g. clicking More from a #files popover
+  // whose target is also #files — hashchange doesn't fire).
+  document.addEventListener('click', (ev) => {
+    if (ev.target.classList && ev.target.classList.contains('help-popover-more')) {
+      // Tiny defer so the link gets to navigate before we hide.
+      setTimeout(__helpPopoverHide, 0);
+    }
+  });
+
   // ── Phase G: first-run wizard ──────────────────────────────────
   //
   // 4-step overlay shown on first ever Tower load when:

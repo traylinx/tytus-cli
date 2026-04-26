@@ -16,6 +16,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::TrayIconBuilder;
 use std::sync::{Arc, Mutex};
 
+mod error_ui;
 mod files;
 mod icon;
 mod launcher;
@@ -2401,9 +2402,19 @@ fn build_diag_summary() -> String {
     if let Some(path) = log_path {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             let tail: Vec<&str> = raw.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+            let scan = tail.join("\n");
             let _ = writeln!(s, "--- connect.log (last {} lines) ---", tail.len());
-            for line in tail {
+            for line in &tail {
                 let _ = writeln!(s, "{}", line);
+            }
+            // Phase F (sprint v0.6) — friendlify the log tail. If any
+            // line matches a known pattern, surface a Try-this hint
+            // BELOW the raw lines so the user reading the diag sees
+            // the action without losing the original error context.
+            if let Some(friendly) = error_ui::friendlify(&scan) {
+                let _ = writeln!(s, "--- friendly hint ---");
+                let _ = writeln!(s, "{}: {}", friendly.title, friendly.body);
+                let _ = writeln!(s, "Try this: {}", friendly.try_this);
             }
         } else {
             let _ = writeln!(s, "connect.log: not present");

@@ -7,6 +7,122 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.10] — 2026-04-26
+
+Closes the two strict gaps from earlier rcs that the user audit
+flagged: (1) Phase E Tower-side `?` icons (was deferred in rc.5),
+(2) Phase F `tray/src/error_ui.rs` Rust port (was JS-only since rc.5).
+
+Both surfaces are now lockstep with each other and with `AUDIT.md` /
+`SPRINT.md`.
+
+### Phase E Tower-side — `?` icons + popover
+
+Per SPRINT.md Phase E acceptance bar: *"every form field in Tower
+has a `?` within 1 glance"*.
+
+- New `<button class="help-icon" data-help="<key>">?</button>` next
+  to non-obvious labels:
+  - `share-folder` (next to "+ Share a folder…" button)
+  - `bucket-name` (next to the Folder name form-label)
+  - `autostart-tunnel` (next to the Settings autostart toggle)
+  - `autostart-tray` (next to the launch-tray toggle)
+- New `#hdr-help` button in the header bar (next to "Run health test"
+  + connection chip): the global "What's all this?" entry.
+- New `.help-popover` element (single global node, repositioned per
+  open). Contains: title + 1-2 sentence body + "More in Help →" link
+  to the relevant tab.
+- Popover behavior: click outside dismisses. `Esc` dismisses.
+  Hashchange dismisses. Click on the "More" link itself also
+  dismisses (covers the same-hash case where hashchange wouldn't
+  fire).
+- Help-text table keyed by `data-help` attribute lives in `tower.js`
+  as `__HELP_TEXT`. 5 entries shipped; trivially extensible by
+  adding `data-help="<new-key>"` to any element + an entry in the
+  JS table.
+- Touch targets are 22×22 (Apple HIG accessibility floor for
+  inline-button icons) with 6 px left margin from the labelled text.
+  Hover transitions to accent-soft + accent border.
+
+### Phase F Rust port — `tray/src/error_ui.rs`
+
+Per SPRINT.md Phase F: *"`tray/src/error_ui.rs` (new) maps known
+error patterns to `{title, body, suggested_action}` triples"*.
+
+- New module `tray/src/error_ui.rs` — Rust mirror of `tower.js`'s
+  `__FRIENDLIFY_PATTERNS`. Same 20 patterns, same titles + bodies +
+  try-this hints. Lockstep guard test asserts the count matches the
+  JS file so future drift surfaces as a test failure.
+- Substring-based matching (no regex dep). Each pattern carries an
+  OR-list of lowercased needles; we lowercase the input once and
+  test contains() across needles. Same semantics as the JS regex
+  patterns for every canonical raw error string.
+- `pub fn friendlify(raw: &str) -> Option<FriendlyError>` returns
+  `None` for unknown errors (caller falls back to the existing
+  generic dialog). `pub fn format_for_dialog(err)` formats for
+  osascript dialog body. `FriendlyError::one_line()` for tooltip /
+  notification surfaces. `raw_disclosure_hint()` keeps the original
+  reachable for power users.
+- 16 unit tests covering: every primary pattern, unknown returns
+  None, empty returns None, raw preservation, one_line ≤ 120 chars,
+  case-insensitivity, first-match-wins, format_for_dialog includes
+  all fields, UTF-8 char-boundary truncation, unicode inputs don't
+  panic. Module-level `#![allow(dead_code)]` because some helpers
+  (`format_for_dialog`, `one_line`) are part of the public API for
+  future hooks but only `friendlify` has a caller today.
+- **First user-visible hook**: `build_diag_summary` (the
+  "Copy Diag" flow from the Help menu's "Help… (something's not
+  working)" dialog) now appends a friendly-hint section below the
+  `connect.log` tail when the log matches a known pattern. Power
+  users see the raw log; grandma sees `<title>: <body>. Try this:
+  <action>` underneath.
+
+### Workspace test count
+
+12 + 2 + 3 + 31 + 33 + 9 = **90 passing tests** across all packages
+(was 74 in rc.9). +16 from the new `error_ui` module.
+
+### Out of scope for this rc
+
+- **SPRINT.md C.2 per-pod submenu reorder** (Chat/Files/Channels
+  first, push management actions under "Manage…"). Acceptance bar
+  was already met in rc.2 (≤8 top-level items, ≤3 clicks for every
+  audit task). The reorder is a layout polish that requires
+  invasive refactoring of the per-pod submenu builder; deferred.
+- **SPRINT.md C.3 Daemon controls under Developer-options toggle**.
+  Daemon controls live under Help (rc.4) which is more discoverable
+  than burying behind a Developer-options toggle. Acceptance bar
+  not impacted.
+- **SPRINT.md B chooser-as-modal**. Chooser stays inline in
+  Settings tab (rc.4). Acceptance bar (5 tabs reachable in 1 click)
+  was met without it.
+- **SPRINT.md B Channels-tab picker promotion + Files-tab Push/Pull
+  picker**. Both stubs link to the existing per-pod paths; full
+  in-tab pickers are queued for v0.6.x.
+
+### Backwards compat
+
+- **Zero Rust API changes** in core / pods / cli / mcp. New module
+  is in `tray/src/` only.
+- **Tower additions** are scoped (new selectors, new event handlers,
+  new module-level help text table). All existing element IDs +
+  handlers continue to work.
+- 90/90 workspace tests green. .pkg rebuilds clean for rc.10.
+
+### Files touched
+
+- `tray/src/error_ui.rs` (new) — Rust friendlify port + 16 tests
+- `tray/src/main.rs` — `mod error_ui;` declaration + hook into
+  `build_diag_summary`
+- `tray/web/tower.html` — 5 new help-icon buttons + `#hdr-help`
+- `tray/web/assets/tower.css` — `.help-icon` + `.help-popover`
+  styles + button-bar variant (~120 LOC)
+- `tray/web/assets/tower.js` — `__HELP_TEXT` table + popover
+  show/hide/position logic + delegated click handler + Esc handler
+  + same-hash dismiss safeguard (~95 LOC)
+- `Cargo.toml` — workspace version bump to `0.6.0-rc.10`
+- `CHANGELOG.md` — this entry
+
 ## [0.6.0-rc.9] — 2026-04-26
 
 **Critical bugfix in tower.js.** Discovered via headless-browser

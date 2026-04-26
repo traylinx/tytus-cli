@@ -2427,3 +2427,96 @@ body.pod-mode .tabs { display: none; }
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
 }
+
+/* ============================================================
+ * Phase E (Tower side) — `?` help icons + popover
+ * ============================================================
+ * Small inline `?` button next to non-obvious labels. Click → small
+ * popover with a 1-2 sentence explanation + "More…" link to the
+ * Help tab. Touch targets are 24×24 (Apple HIG accessibility floor).
+ * ============================================================ */
+
+.help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 6px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  user-select: none;
+  vertical-align: middle;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.help-icon:hover {
+  background: var(--accent-soft);
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.help-icon:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Header-bar variant — sits among the other btn-hdr buttons. */
+.btn-hdr-help {
+  width: 32px;
+  padding: 0;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* The popover. One global element, repositioned on each open. */
+.help-popover {
+  position: absolute;
+  z-index: 900;
+  max-width: 320px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 0.92rem;
+  color: var(--fg);
+  line-height: 1.5;
+}
+.help-popover.hidden { display: none; }
+.help-popover-title {
+  font-weight: 600;
+  margin: 0 0 6px 0;
+  color: var(--fg);
+}
+.help-popover-body {
+  margin: 0 0 10px 0;
+  color: var(--muted);
+}
+.help-popover-more {
+  display: inline-block;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 0.88rem;
+}
+.help-popover-more:hover { text-decoration: underline; }
+.help-popover-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 2px 6px;
+  line-height: 1;
+}
+.help-popover-close:hover { color: var(--fg); }
