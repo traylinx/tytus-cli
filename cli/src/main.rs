@@ -221,6 +221,7 @@ enum Commands {
         tunnel: bool,
     },
     /// Print the full LLM-facing reference (for AI agents driving tytus-cli)
+    #[command(hide = true)]
     LlmDocs,
     /// Discover the pod's AI gateway catalog — models + provider-native
     /// tools (e.g. MiniMax M2.7's autonomous web_search). One call covers
@@ -237,6 +238,7 @@ enum Commands {
     },
     /// Print a short setup prompt you can paste into any AI tool (Claude Code,
     /// OpenCode, Cursor, etc.) to teach it how to drive Tytus natively.
+    #[command(hide = true)]
     BootstrapPrompt,
     /// Hidden: validated SIGTERM helper for tunnel daemons. Verifies the PID
     /// matches a known tunnel-NN.pid file under /tmp/tytus before killing.
@@ -289,6 +291,7 @@ enum Commands {
     /// Thin shim around `python3 -m tytus_sdk` — the SDK is the source of
     /// truth for the WS + Ed25519 protocol. See docs/DESIGN-TYTUS-LOPE-
     /// TEAMMATES.md.
+    #[command(hide = true)]
     Lope {
         /// Subcommand: ask | install | uninstall | list | identity | lope_validate
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -298,6 +301,7 @@ enum Commands {
     /// Starts an HTTP listener + per-pod outbox pollers.
     /// Subcommands: run | status | rotate-token | test.
     /// Thin shim around `python3 -m tytus_sdk bridge`.
+    #[command(hide = true)]
     Bridge {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

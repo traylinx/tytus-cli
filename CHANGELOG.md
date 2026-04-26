@@ -7,6 +7,46 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.8] — 2026-04-26
+
+`tytus --help` polish — hides four deeply-internal commands that
+target AI agents driving Tytus, not human users. The commands still
+work; they just don't clutter the top-level help dump.
+
+### Hidden from `tytus --help`
+
+- `lope` — drives a pod-hosted agent as a lope teammate. Audience:
+  multi-CLI validator ensembles, not humans. Reachable via
+  `tytus lope --help` and `tytus lope ask` etc.
+- `bridge` — HarveyBridge reverse channel. Audience: pod-internal
+  agents writing to Harvey's brain. Reachable via `tytus bridge run`.
+- `llm-docs` — LLM-facing reference. Audience: AI agents that need
+  the full driving manual. Reachable via `tytus llm-docs`.
+- `bootstrap-prompt` — short setup prompt for pasting into other AI
+  CLIs. Audience: AI-tool integrators. Reachable via
+  `tytus bootstrap-prompt`.
+
+`tytus --help` now lists 26 user-facing commands (was 30). Backwards
+compat: every hidden command is still callable; this is a
+presentation-only change via clap's `#[command(hide = true)]`.
+
+### What did NOT change
+
+- All four hidden commands still work, still produce JSON output,
+  still get pasted into AI CLI bootstraps. They just don't appear in
+  the top-level dump.
+- Per-command `tytus <cmd> --help` works for hidden commands too.
+- Plain-English `tytus help <topic>` (rc.5) lists the same 12
+  user-verb topics; lope / bridge / llm-docs aren't there because
+  they aren't user verbs.
+
+### Files touched
+
+- `cli/src/main.rs` — 4 `#[command(hide = true)]` attributes on the
+  hidden Commands variants
+- `Cargo.toml` — workspace version bump to `0.6.0-rc.8`
+- `CHANGELOG.md` — this entry
+
 ## [0.6.0-rc.7] — 2026-04-26
 
 Phase H scaffolding — the `.pkg` installer pipeline ships unsigned
