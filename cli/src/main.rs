@@ -16,7 +16,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use state::{CliState, PodEntry};
 
 #[derive(Parser)]
-#[command(name = "tytus", about = "Tytus private AI pod — connect from any terminal", version)]
+#[command(name = "tytus", about = "Tytus private AI pod — connect from any terminal", version,
+          disable_help_subcommand = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -435,6 +436,15 @@ enum Commands {
         #[arg(short, long)]
         pod: Option<String>,
     },
+    /// Plain-English explanations of what Tytus commands do. Run
+    /// `tytus help` to list topics, or `tytus help <topic>` for one.
+    /// Different from `tytus <cmd> --help`, which shows the technical
+    /// flag reference.
+    #[command(name = "help")]
+    HelpTopic {
+        /// Topic name. Omit to see the full topic list.
+        topic: Option<String>,
+    },
 }
 
 #[derive(Clone, ValueEnum, Debug)]
@@ -611,7 +621,156 @@ async fn main() {
         Some(Commands::Transfers { tail, pod }) => {
             cmd_transfer::cmd_transfers(tail, pod, cli.json).await
         }
+        Some(Commands::HelpTopic { topic }) => {
+            cmd_help_topic(topic.as_deref(), cli.json);
+        }
     }
+}
+
+/// Plain-English help. `tytus help` lists topics; `tytus help <topic>`
+/// returns a 5-line explanation of that topic. Topics are user verbs
+/// (chat, share, install, sign-in, troubleshoot), not clap subcommand
+/// names — keeps the language grandma-side. The technical reference
+/// stays one keystroke away via `tytus <cmd> --help`.
+fn cmd_help_topic(topic: Option<&str>, json: bool) {
+    let topics: &[(&str, &str, &str)] = &[
+        (
+            "chat",
+            "Talk to your AI",
+            "`tytus chat` opens an interactive chat session with your AI in the\n\
+             terminal. The first response usually arrives in 2-3 seconds. Press\n\
+             Ctrl+D or type `/exit` to leave the session. For a visual chat\n\
+             window in your browser, open Tytus.app and click 💬 Chat now.",
+        ),
+        (
+            "setup",
+            "First-time setup",
+            "`tytus setup` runs a 4-step wizard: it signs you in (browser\n\
+             opens), allocates your default workspace, configures your AI,\n\
+             and sends a test message. Takes about 60 seconds end-to-end.\n\
+             Re-run any time to reset to a clean state.",
+        ),
+        (
+            "connect",
+            "Connect to your AI",
+            "`tytus connect` brings up the encrypted connection between your\n\
+             Mac and your workspace. With no flags it uses your default\n\
+             workspace, allocating one if you don't have any yet. Use\n\
+             `tytus disconnect` to tear it down.",
+        ),
+        (
+            "share",
+            "Share a folder with your AI",
+            "Open Tytus.app → 📁 Files → + Share a folder. Pick any folder on\n\
+             your Mac, give it a short name, click Share folder. The folder\n\
+             syncs both ways automatically — your AI reads and writes it,\n\
+             changes show up on both sides within ~60 seconds.",
+        ),
+        (
+            "channels",
+            "Talk to your AI from Telegram, Discord, or Slack",
+            "Channels let you message your AI from any chat app. Open Tytus.app\n\
+             → 📨 Channels, pick the app you want, paste the bot token when\n\
+             asked. Your AI replies on whichever channel you message it from.",
+        ),
+        (
+            "install",
+            "Install Tytus on a new Mac",
+            "Run this in Terminal:\n\
+             \n  curl -fsSL https://get.traylinx.com/install.sh | bash\n\n\
+             That installs the `tytus` CLI plus Tytus.app menu-bar app and\n\
+             grants it permission to bring up the connection without asking\n\
+             for your password every time. ~60 seconds end-to-end.",
+        ),
+        (
+            "sign-in",
+            "Sign in to Tytus",
+            "`tytus login` opens your browser to approve the device. After\n\
+             you click Allow, the CLI confirms and you're signed in. Sign-in\n\
+             persists until you run `tytus logout` or revoke from the\n\
+             Traylinx dashboard.",
+        ),
+        (
+            "uninstall",
+            "Remove Tytus from this Mac",
+            "Quit Tytus.app from the menu bar, then run:\n\
+             \n  tytus logout                        # revoke pods, clear creds\n\
+             tytus tray uninstall                  # remove menu-bar app\n\
+             rm ~/bin/tytus ~/bin/tytus-tray ~/bin/tytus-mcp\n\n\
+             That's it. No leftover services, no autostart entries.",
+        ),
+        (
+            "troubleshoot",
+            "Something's not working",
+            "First, click the menu-bar T → Help → Run diagnostics. That walks\n\
+             through every layer (sign-in, connection, AI gateway). Each\n\
+             failure ends with a Try this → action you can click. If diagnostics\n\
+             pass but the chat still fails, try Quick actions → Disconnect, then\n\
+             Connect again.",
+        ),
+        (
+            "disconnect",
+            "Stop the connection",
+            "`tytus disconnect` tears down the encrypted line and frees the\n\
+             tunnel pidfile. Your workspace stays allocated — just the\n\
+             connection drops. Re-run `tytus connect` to come back.",
+        ),
+        (
+            "doctor",
+            "Run diagnostics",
+            "`tytus doctor` checks every layer between you and your AI: sign-in\n\
+             token validity, workspace allocation, encrypted-connection state,\n\
+             AI gateway reachability. Output is verbose by design — for grandma-\n\
+             friendly results click the menu-bar T → Help → Run diagnostics\n\
+             instead, which shows Try this → suggestions for each failure.",
+        ),
+        (
+            "env",
+            "Connect other apps to your AI",
+            "Other tools (Cursor, Claude Desktop, OpenCode, any OpenAI SDK) can\n\
+             talk to your private AI through a stable URL + key:\n\
+             \n  eval \"$(tytus env --export)\"\n\n\
+             That sets OPENAI_BASE_URL and OPENAI_API_KEY in your shell. The\n\
+             pair never changes (even if your workspace gets rotated), so you\n\
+             can paste it into any OpenAI-compatible app once and forget it.",
+        ),
+    ];
+
+    if json {
+        let arr: Vec<_> = topics.iter().map(|(k, t, b)| {
+            serde_json::json!({"topic": k, "title": t, "body": b})
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!(arr)).unwrap_or_default());
+        return;
+    }
+
+    if let Some(name) = topic {
+        let lower = name.to_lowercase();
+        if let Some((_, title, body)) = topics.iter().find(|(k, _, _)| k.eq_ignore_ascii_case(&lower)) {
+            wizard::print_header(title);
+            println!("{}", body);
+            println!();
+            wizard::print_hint(&format!("Technical reference: tytus {} --help", lower));
+            println!();
+            return;
+        }
+        wizard::print_fail(&format!("No help topic '{}'.", name));
+        println!();
+        wizard::print_hint("Run `tytus help` to list topics.");
+        return;
+    }
+
+    // No topic → list all.
+    wizard::print_header("Tytus help");
+    println!();
+    println!("  Plain-English explanations. Pick a topic:");
+    println!();
+    for (k, t, _) in topics {
+        println!("    tytus help {:<14} — {}", k, t);
+    }
+    println!();
+    wizard::print_hint("Or run `tytus <command> --help` for the technical reference.");
+    println!();
 }
 
 async fn cmd_daemon(action: DaemonAction, json: bool) {

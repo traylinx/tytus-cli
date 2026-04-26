@@ -7,6 +7,111 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.5] — 2026-04-26
+
+Phase F (error UX friendlify layer) + Phase E (in-context help — CLI
+side). Tower toasts now turn raw subprocess errors into "<title>:
+<body>. Try this → <action>" hints. New `tytus help <topic>` command
+gives plain-English explanations of every primary user verb without
+the clap reference dump.
+
+### Phase F — Error UX friendlify layer
+
+- New `friendlifyError(rawMsg)` helper in `tray/web/assets/tower.js`.
+  20 canned patterns mapped to `{title, body, try}` triples covering
+  the failure modes from `AUDIT.md`:
+  - Keychain dialog pending
+  - No workspace yet
+  - Sign-in expired (invalid API key / token expired)
+  - Connection blocked (other VPN)
+  - Tytus already connecting (daemon already running)
+  - Workspace not ready
+  - Form data went wrong (bad JSON)
+  - Tytus not installed (command not found)
+  - AI hit an error (HTTP 5xx)
+  - macOS permission denied
+  - Tytus isn't running (connection refused)
+  - Port already taken
+  - Computer offline
+  - Folder name taken / invalid
+  - Disk full
+  - WireGuard not installed
+  - Workspace would orphan unsaved data
+  - Not signed in
+- `showToast(msg, 'err')` runs every error toast through
+  `friendlifyError`. When a pattern matches, the toast shows
+  `"<title>: <body>. Try this → <action>"` for 6.5s (longer than
+  the default 2.8s — friendly errors deserve a read).
+- `streamGlobalAction`'s SSE `fail` event handler appends the same
+  Try-this hint at the bottom of the streamed log when a pattern
+  matches the failure data. The full raw error stays above for
+  power users.
+- Patterns tested in order; first match wins. Unmatched lines fall
+  through to the raw text — no false-positive friendlification.
+- `window.__friendlifyError` exposed for devtools-side debugging.
+
+### Phase E — `tytus help <topic>` plain-English help
+
+- New CLI subcommand `tytus help` (replaces clap's auto-`help`
+  subcommand for grandma-side language). 12 topics:
+  - chat — Talk to your AI
+  - setup — First-time setup
+  - connect — Connect to your AI
+  - share — Share a folder with your AI
+  - channels — Talk to your AI from Telegram, Discord, or Slack
+  - install — Install Tytus on a new Mac
+  - sign-in — Sign in to Tytus
+  - uninstall — Remove Tytus from this Mac
+  - troubleshoot — Something's not working
+  - disconnect — Stop the connection
+  - doctor — Run diagnostics
+  - env — Connect other apps to your AI
+- `tytus help` → lists topics with one-line summaries.
+- `tytus help <topic>` → 5-line plain-English explanation + a hint
+  pointing at `tytus <command> --help` for the technical reference.
+- `tytus help bogus` → graceful "No help topic 'bogus'" + topic-list
+  hint (no panic, no clap error).
+- `--json` mode emits the full topic table as JSON for tooling.
+- `disable_help_subcommand = true` on the top-level Cli struct so
+  clap's auto-help doesn't shadow the new command. `tytus <cmd>
+  --help` still works (clap auto-flag, not subcommand).
+
+### Phase E — Tower side (defer)
+
+The `?` icon + popover system on Tower tabs / form fields is
+intentionally deferred to a later rc — Phase E in rc.5 ships the
+CLI side which is the higher-signal piece (a non-tech user trying
+`tytus help` in Terminal is plausible; clicking `?` icons inside
+Tower already lives behind the existing autocomplete-y `settings-
+hint` text under most fields).
+
+### Backwards compat
+
+- `tytus <cmd> --help` continues to print the clap reference for
+  every subcommand (auto-flag is unchanged).
+- `tytus help <command-name>` historically returned the clap help
+  for that command (clap's auto-subcommand). v0.6 makes `tytus help
+  <topic>` the friendly help instead. Topics overlap with clap
+  subcommand names where it makes sense (chat, setup, connect,
+  doctor, env, disconnect) and add grandma verbs where clap doesn't
+  have one (share, install, sign-in, uninstall, troubleshoot,
+  channels). Power users hit `tytus <cmd> --help` for the technical
+  flag reference.
+- Tower JS additions are scoped — only `showToast` and
+  `streamGlobalAction`'s `fail` handler call `friendlifyError`. All
+  existing call sites continue to work.
+- 74/74 workspace tests green.
+
+### Files touched
+
+- `cli/src/main.rs` — `HelpTopic` variant + `cmd_help_topic` + Cli
+  attribute `disable_help_subcommand = true`
+- `tray/web/assets/tower.js` — `__FRIENDLIFY_PATTERNS` table,
+  `friendlifyError` helper, `showToast` wrap, streamGlobalAction
+  `fail` handler hook
+- `Cargo.toml` — workspace version bump to `0.6.0-rc.5`
+- `CHANGELOG.md` — this entry
+
 ## [0.6.0-rc.4] — 2026-04-26
 
 Phase B + Phase D Tower-side. Tower converts from a single scrollable

@@ -2274,15 +2274,173 @@
   // Settings: two autostart toggles + Sign Out. Toggle state mirrors
   // the LaunchAgent plists on disk (read via /api/settings).
 
+  // ── Phase F: error UX friendlify layer ─────────────────────────
+  //
+  // Every known raw error pattern maps to {title, body, action}. The
+  // user sees "<title>: <body>. Try this → <action>" instead of the
+  // raw subprocess output / HTTP error JSON / clap message. Patterns
+  // are tested in order — first match wins; unmatched lines fall
+  // through to "Something went wrong: <raw>" with no Try-this hint.
+  //
+  // Each pattern object: { match: RegExp | string, title, body, try: action-text }.
+  // `match` is tested case-insensitively. RegExp captures can be
+  // referenced from `body` / `try` via `$1`, `$2`, … (rare; most
+  // patterns are static).
+  const __FRIENDLIFY_PATTERNS = [
+    {
+      match: /keychain.*get_refresh_token timed out|keychain access pending|keychain.*timeout/i,
+      title: 'Keychain dialog pending',
+      body: 'Tytus is waiting for you to approve a Mac dialog.',
+      try:  'Open Keychain Access and approve the pending request, or quit + relaunch Tytus.',
+    },
+    {
+      match: /no pods?\.|no pod allocated|no workspace yet|state\.pods is empty/i,
+      title: 'No workspace yet',
+      body:  "You haven't set up a workspace.",
+      try:   'tytus connect',
+    },
+    {
+      match: /invalid api[ _]?key/i,
+      title: 'Sign-in expired',
+      body:  'Your AI rebooted itself and needs a new key.',
+      try:   'Wait 2 seconds, then click again.',
+    },
+    {
+      match: /tunnel up.*time(s|d) out|gateway.*unreachable.*tunnel.*active/i,
+      title: 'Connection blocked',
+      body:  'Another VPN is blocking your AI connection.',
+      try:   'Disconnect other VPNs, then reconnect.',
+    },
+    {
+      match: /tunnel daemon (already running|conflict)/i,
+      title: 'Tytus is already connecting',
+      body:  'A previous Connect attempt is still in flight.',
+      try:   'Wait a few seconds, or quit + relaunch Tytus.',
+    },
+    {
+      match: /pod config not ready|peer\.conf missing/i,
+      title: "Workspace isn't ready",
+      body:  "Your workspace isn't ready on our end yet.",
+      try:   'Wait 30 seconds and retry.',
+    },
+    {
+      match: /bad json|missing field [a-z_]+|invalid request body/i,
+      title: 'Form data went wrong',
+      body:  'Tytus received the form incorrectly.',
+      try:   'Reopen the form and try again.',
+    },
+    {
+      match: /command not found|tytus: command not found|Failed to launch tytus/i,
+      title: 'Tytus not installed',
+      body:  "The tytus CLI isn't on your PATH.",
+      try:   'Run the installer: curl -fsSL https://get.traylinx.com/install.sh | bash',
+    },
+    {
+      match: /HTTP 5\d\d|gateway.*5\d\d response|Internal Server Error/i,
+      title: 'AI hit an error',
+      body:  'Your AI gateway returned a server error.',
+      try:   'tytus test',
+    },
+    {
+      match: /permission denied|EACCES|operation not permitted/i,
+      title: "Tytus can't access this",
+      body:  'macOS blocked the operation.',
+      try:   'System Settings → Privacy & Security → Files & Folders, grant Tytus access.',
+    },
+    {
+      match: /connection refused|ECONNREFUSED|EOF on stdin/i,
+      title: "Tytus isn't running",
+      body:  "The background service isn't reachable.",
+      try:   'Click the menu-bar T → Quick actions → Connect.',
+    },
+    {
+      match: /address already in use|EADDRINUSE|port.*in use/i,
+      title: 'Port already taken',
+      body:  "Another app is using a port Tytus needs.",
+      try:   'Quit Tytus, restart your Mac, then relaunch.',
+    },
+    {
+      match: /network unreachable|ENETUNREACH|no route to host|DNS.*fail/i,
+      title: 'Computer is offline',
+      body:  "Your Mac can't reach the network.",
+      try:   'Reconnect to Wi-Fi and try again.',
+    },
+    {
+      match: /bucket.*already exists|BucketAlreadyOwnedByYou|conflict on bucket/i,
+      title: 'Folder name taken',
+      body:  'A shared folder with that name already exists.',
+      try:   'Pick a different name.',
+    },
+    {
+      match: /(bucket|folder) name (invalid|too short|too long)|invalid bucket name/i,
+      title: 'Invalid folder name',
+      body:  'Names need 3–63 characters, lowercase letters, dashes, and dots.',
+      try:   'Pick a name like "design-files" or "client-photos".',
+    },
+    {
+      match: /no space left|disk full|ENOSPC/i,
+      title: 'Computer is out of space',
+      body:  'Your Mac has no disk space left.',
+      try:   'Empty the Trash or delete large files.',
+    },
+    {
+      match: /WireGuard.*not (installed|found)|wg-quick: not found/i,
+      title: 'Tytus needs WireGuard',
+      body:  "The WireGuard tools aren't installed.",
+      try:   'brew install wireguard-tools',
+    },
+    {
+      match: /revoke.*orphan|would lose.*data|unsynced bindings/i,
+      title: 'Workspace has unsaved files',
+      body:  'Revoking would lose unsaved files.',
+      try:   'tytus pull <pod> first, then revoke.',
+    },
+    {
+      match: /token.*expired|refresh token.*invalid|sentinel.*401/i,
+      title: 'Sign-in expired',
+      body:  'Your Tytus account session ran out.',
+      try:   'tytus login',
+    },
+    {
+      match: /not logged in|sentinel.*unauthorized/i,
+      title: 'Not signed in',
+      body:  "You're not signed in to Tytus.",
+      try:   'tytus login',
+    },
+  ];
+
+  function friendlifyError(raw) {
+    if (!raw) return null;
+    const text = String(raw);
+    for (const p of __FRIENDLIFY_PATTERNS) {
+      let re = p.match instanceof RegExp ? p.match : new RegExp(escapeRegex(p.match), 'i');
+      if (re.test(text)) {
+        return { ...p, raw: text };
+      }
+    }
+    return null;
+  }
+  function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
   function showToast(msg, kind = 'ok', ms = 2800) {
     const t = $('toast');
     if (!t) return;
-    t.textContent = msg;
+    let display = msg;
+    if (kind === 'err') {
+      const f = friendlifyError(msg);
+      if (f) {
+        display = `${f.title}: ${f.body}. Try this → ${f.try}`;
+        ms = Math.max(ms, 6500); // friendly errors deserve a longer read
+      }
+    }
+    t.textContent = display;
     t.className = `toast ${kind}`;
     t.classList.remove('hidden');
     clearTimeout(showToast._h);
     showToast._h = setTimeout(() => t.classList.add('hidden'), ms);
   }
+  // Expose for unit-style debugging from devtools.
+  window.__friendlifyError = friendlifyError;
 
   async function refreshHeaderConn() {
     try {
@@ -2380,7 +2538,15 @@
     es.addEventListener('fail', (ev) => {
       panel.classList.add('err');
       title.textContent = errorTitle;
-      log.textContent += `\n[error] ${ev.data || 'job failed'}`;
+      const raw = ev.data || 'job failed';
+      log.textContent += `\n[error] ${raw}`;
+      // Phase F: append a Try-this hint when the failure matches a
+      // known pattern. The full raw error stays above for power users.
+      const f = friendlifyError(raw) || friendlifyError(log.textContent);
+      if (f) {
+        log.textContent += `\n\n→ ${f.title}: ${f.body}\n   Try this: ${f.try}`;
+      }
+      log.scrollTop = log.scrollHeight;
       es.close();
       restoreBtn();
     });
