@@ -2492,6 +2492,183 @@
     $('footer-about-panel')?.classList.toggle('hidden');
   });
 
+  // ── Shared Folders panel (v0.5.4 — parity with the tray submenu) ──
+  // Read-only listing of bound folders + streamed status / conflicts /
+  // refresh-all actions. Bind stays tray-only because the browser
+  // sandbox can't surface a real OS folder path.
+  async function refreshSharedFoldersList() {
+    const host = $('sf-bindings');
+    if (!host) return;
+    try {
+      const res = await fetch('/api/shared-folders/list');
+      const body = await res.json();
+      const bindings = (body && body.bindings) || [];
+      if (bindings.length === 0) {
+        host.innerHTML = '<span class="settings-hint">No folders bound yet. Bind via the menu-bar tray (Pods → ▸ Files → Bind a Mac folder…) or run <code>garagetytus folder bind</code> in your shell.</span>';
+        return;
+      }
+      // No /api/state.home today → show absolute paths (the bindings
+      // list is already wide; saving 14 chars isn't worth a state-shape
+      // change). Tray-side does compress to ~/… because it has direct
+      // access to $HOME.
+      host.innerHTML = '';
+      bindings
+        .slice()
+        .sort((a, b) => (a.bucket || '').localeCompare(b.bucket || ''))
+        .forEach((b) => {
+          const localPath = b.local_path || '';
+          const display = localPath;
+          const pods = (b.pods_provisioned || []).join(', ') || '—';
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'btn-secondary sf-binding-row';
+          btn.title = `Open ${localPath} in Finder · pods: ${pods}`;
+          btn.innerHTML = `<strong>${escapeHtml(b.bucket || '')}</strong>` +
+            `<span class="sf-arrow">  ↔  </span>` +
+            `<span class="sf-path">${escapeHtml(display)}</span>` +
+            (pods !== '—' ? `<span class="sf-pods"> · pods: ${escapeHtml(pods)}</span>` : '');
+          btn.addEventListener('click', async () => {
+            try {
+              const r = await fetch('/api/shared-folders/open', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ local_path: localPath }),
+              });
+              if (!r.ok) {
+                const j = await r.json().catch(() => ({}));
+                showToast(j.error || `Open failed (${r.status})`, 'err');
+              }
+            } catch (err) {
+              showToast(`Open: ${err}`, 'err');
+            }
+          });
+          host.appendChild(btn);
+        });
+    } catch (err) {
+      host.innerHTML = `<span class="settings-hint">Failed to load bindings: ${escapeHtml(String(err))}</span>`;
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function sfRunStreamed(action, runningTitle, okTitle, errTitlePrefix) {
+    const panel = $('sf-panel');
+    const title = $('sf-panel-title');
+    const log = $('sf-panel-log');
+    if (!panel || !title || !log) return;
+    panel.classList.remove('hidden', 'ok', 'err');
+    title.textContent = runningTitle;
+    log.textContent = '';
+    const btnIds = { status: 'sf-status', conflicts: 'sf-conflicts',
+                     list: 'sf-list', 'refresh-all': 'sf-refresh-all' };
+    const btn = $(btnIds[action]);
+    const prev = btn ? btn.textContent : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+    streamGlobalAction({
+      url: `/api/shared-folders/run-streamed?action=${encodeURIComponent(action)}`,
+      panel, title, log, btn, prevText: prev,
+      okTitle,
+      errTitle: (code) => `${errTitlePrefix} (exit ${code})`,
+      runningTitle,
+      errorTitle: `${errTitlePrefix} — request failed`,
+    });
+  }
+
+  $('sf-status')?.addEventListener('click', () => sfRunStreamed(
+    'status', 'Running garagetytus folder status…',
+    'All bindings healthy ✓', 'Status reports issues',
+  ));
+  $('sf-conflicts')?.addEventListener('click', () => sfRunStreamed(
+    'conflicts', 'Scanning for unresolved conflicts…',
+    'No conflicts ✓', 'Conflicts found',
+  ));
+  $('sf-list')?.addEventListener('click', () => sfRunStreamed(
+    'list', 'Listing bindings…',
+    'List complete ✓', 'List failed',
+  ));
+  $('sf-refresh-all')?.addEventListener('click', () => sfRunStreamed(
+    'refresh-all', 'Running refresh watchdog across every pod…',
+    'Refresh complete ✓', 'Refresh reported issues',
+  ));
+  $('sf-panel-close')?.addEventListener('click', () => {
+    $('sf-panel').classList.add('hidden');
+  });
+  $('sf-open-cache')?.addEventListener('click', async () => {
+    try {
+      await fetch('/api/shared-folders/open-cache', { method: 'POST' });
+    } catch (err) {
+      showToast(`Open cache: ${err}`, 'err');
+    }
+  });
+
+  // Refresh the bindings list whenever the Shared Folders details opens
+  // and at a slow background cadence while it stays open.
+  let sfTimer = null;
+  $('shared-folders')?.addEventListener('toggle', (e) => {
+    if (e.currentTarget.open) {
+      refreshSharedFoldersList();
+      sfTimer = setInterval(refreshSharedFoldersList, 15000);
+    } else {
+      if (sfTimer) { clearInterval(sfTimer); sfTimer = null; }
+    }
+  });
+
+  // ── Per-pod Refresh creds button (Output toolbar) ──────────────
+  // Lives in the same toolbar as Restart / Stop forwarder / Uninstall /
+  // Revoke. Streams the garagetytus-pod-refresh job into the same
+  // pod-output-log panel that the other per-pod actions use.
+  $('pod-run-refresh-creds')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const podName = $('pod-sub-name')?.textContent || '';
+    const pod = (podName.match(/(\d+)/) || [])[1];
+    if (!pod) { showToast('No pod active', 'err'); return; }
+    const log = $('pod-output-log');
+    const status = $('pod-output-status');
+    const prev = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Refreshing…';
+    if (log) log.textContent = '';
+    if (status) status.textContent = `Refreshing pod-${pod} credentials…`;
+    let res, body;
+    try {
+      res = await fetch(`/api/pod/refresh-creds?pod=${encodeURIComponent(pod)}`,
+                       { method: 'POST' });
+      body = await res.json();
+    } catch (err) {
+      if (status) status.textContent = `Request failed: ${err}`;
+      btn.disabled = false; btn.textContent = prev;
+      return;
+    }
+    if (!res.ok || !body || !body.job_id) {
+      if (status) status.textContent =
+        (body && body.error) || `Failed (HTTP ${res.status})`;
+      btn.disabled = false; btn.textContent = prev;
+      return;
+    }
+    const es = new EventSource(`/api/jobs/${encodeURIComponent(body.job_id)}/stream`);
+    es.addEventListener('log', (ev) => {
+      const line = (ev.data || '').replace(/\\n/g, '\n');
+      if (log) { log.textContent += line + '\n'; log.scrollTop = log.scrollHeight; }
+    });
+    es.addEventListener('exit', (ev) => {
+      let code = -1;
+      try { code = (JSON.parse(ev.data || '{}').code) ?? -1; } catch {}
+      if (status) status.textContent = code === 0
+        ? `pod-${pod} credentials rotated ✓`
+        : `Refresh failed (exit ${code})`;
+      es.close();
+      btn.disabled = false; btn.textContent = prev;
+    });
+    es.addEventListener('fail', (ev) => {
+      if (status) status.textContent = `Failed: ${ev.data || 'job failed'}`;
+      es.close();
+      btn.disabled = false; btn.textContent = prev;
+    });
+  });
+
   // Lazy-start the log tail the first time Troubleshoot is opened so
   // we don't poll a never-viewed surface. Also refresh daemon status
   // every 5s while Troubleshoot is open.

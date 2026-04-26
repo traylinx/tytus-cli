@@ -189,6 +189,67 @@
       </div>
     </section>
 
+    <!-- ── v0.5.4: Shared Folders parity with the tray ──────── -->
+    <!-- Read-only list of bindings + streamed status / conflicts /
+         refresh-all actions. Bind stays tray-only because the browser
+         sandbox can't surface a real OS folder path. -->
+    <details id="shared-folders" class="troubleshoot">
+      <summary class="troubleshoot-summary">Shared Folders</summary>
+      <div class="troubleshoot-body">
+
+        <div class="trouble-row">
+          <div class="trouble-label">Active bindings</div>
+          <div id="sf-bindings" class="trouble-actions sf-bindings">
+            <span class="settings-hint">Loading…</span>
+          </div>
+          <div class="settings-hint">
+            Each row is one folder bound by <code>garagetytus folder bind</code>.
+            Click to open in Finder. Bindings are local; bind from the menu-bar tray
+            (or the CLI) since the browser sandbox can't pick a real folder path.
+          </div>
+        </div>
+
+        <div class="trouble-row">
+          <div class="trouble-label">Diagnostics</div>
+          <div class="trouble-actions">
+            <button id="sf-status"      class="btn-secondary" type="button">Run Status</button>
+            <button id="sf-conflicts"   class="btn-secondary" type="button">Find Conflicts</button>
+            <button id="sf-list"        class="btn-secondary" type="button">List (full table)</button>
+          </div>
+          <div class="settings-hint">Streams output below. Each rerun replaces the panel content.</div>
+        </div>
+
+        <section id="sf-panel" class="health-panel hidden">
+          <div class="health-panel-head">
+            <h2 id="sf-panel-title">Running…</h2>
+            <button id="sf-panel-close" class="health-panel-close" type="button" aria-label="Close">×</button>
+          </div>
+          <pre id="sf-panel-log" class="log"></pre>
+        </section>
+
+        <div class="trouble-row">
+          <div class="trouble-label">Credential rotation</div>
+          <div class="trouble-actions">
+            <button id="sf-refresh-all" class="btn-secondary" type="button">Refresh now (every pod)</button>
+          </div>
+          <div class="settings-hint">
+            Walks every running tytus-NN container, rotates any whose
+            <code>next_refresh_due</code> is within 7 days. Pod wrapper re-reads
+            credentials per call — no pod restart needed.
+          </div>
+        </div>
+
+        <div class="trouble-row">
+          <div class="trouble-label">Cache</div>
+          <div class="trouble-actions">
+            <button id="sf-open-cache" class="btn-secondary" type="button">Open ~/.cache/garagetytus</button>
+          </div>
+          <div class="settings-hint">Bisync workdir + sidecar binding metadata live here.</div>
+        </div>
+
+      </div>
+    </details>
+
     <details id="troubleshoot" class="troubleshoot">
       <summary class="troubleshoot-summary">Troubleshoot</summary>
       <div class="troubleshoot-body">
@@ -272,6 +333,7 @@
                  section, not on a per-pod page. -->
             <button id="pod-run-restart"    class="btn-secondary" type="button">Restart</button>
             <button id="pod-run-stop-fwd"   class="btn-secondary" type="button">Stop forwarder</button>
+            <button id="pod-run-refresh-creds" class="btn-secondary" type="button" title="Rotate this pod's garagetytus shared-folder credentials in place (no pod restart needed)">Refresh creds</button>
             <button id="pod-run-uninstall"  class="btn-danger"    type="button">Uninstall</button>
             <button id="pod-run-revoke"     class="btn-danger"    type="button">Revoke</button>
             <span class="pod-output-spacer"></span>

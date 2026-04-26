@@ -7,6 +7,56 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-04-26
+
+Tower learns about garagetytus shared folders. Read-only parity
+with the v0.5.2/v0.5.3 tray submenu — list bindings, status,
+conflicts, refresh credentials — plus a new per-pod "Refresh creds"
+button on the Output toolbar. Bind stays tray-only because the
+browser sandbox can't surface a real OS folder path.
+
+### Tower additions
+- **New "Shared Folders" details section** between Settings and
+  Troubleshoot. Auto-refreshing list of bindings (one click =
+  open in Finder) reads `~/.cache/garagetytus/bisync/*.bindings.json`
+  via the new `GET /api/shared-folders/list` endpoint. Empty case
+  shows guidance pointing at the tray + CLI for binding.
+- **Streamed action buttons** for Status / Conflicts / List
+  (full table) / Refresh-all wire to a new shared `sf-panel` log
+  surface mirroring the Doctor / Health Test pattern. SSE event
+  stream from `POST /api/shared-folders/run-streamed?action=…`
+  via the existing job-event Registry.
+- **"Open ~/.cache/garagetytus" button** for direct Finder access
+  to bisync workdir + sidecar metadata.
+- **Per-pod "Refresh creds" button** added to the Output toolbar
+  alongside Restart / Stop forwarder / Uninstall / Revoke. Streams
+  `garagetytus-pod-refresh <NN>` into the same per-pod log panel.
+
+### Backend additions
+- `GET  /api/shared-folders/list` — returns sidecar JSON list
+- `POST /api/shared-folders/run-streamed?action=<status|conflicts|list|refresh-all>`
+  — returns `{ job_id }`, output via existing `/api/jobs/<id>/stream`
+- `POST /api/shared-folders/open` — body `{local_path}`, opens in
+  Finder; 404 on orphan sidecar so the UI can flag it
+- `POST /api/shared-folders/open-cache` — opens `~/.cache/garagetytus`
+- `POST /api/pod/refresh-creds?pod=NN` — returns `{ job_id }` for a
+  per-pod cred rotation
+- New `resolve_garagetytus_helper(name)` mirrors the resolver in
+  `tray/src/shared_folders.rs::helper_path` so backend + tray agree
+  on which binary to invoke (`/usr/local/bin/`, `/opt/homebrew/bin/`,
+  `~/garagetytus/bin/`, then bare PATH lookup)
+- New generic `spawn_external_command(job, bin, args)` mirrors
+  `spawn_pod_action`'s line-buffered stdout+stderr streaming but
+  parameterized over the binary path, so any garagetytus-* helper
+  (or future external) can stream into Tower's job channel
+
+### Out of scope (intentional)
+- **Bind from Tower** — needs a real OS folder path picker, which
+  the browser sandbox doesn't expose. Stays tray-only; the empty-
+  state hint links to the tray and the CLI.
+- **Unbind from Tower** — destructive op better with native modal
+  confirmations than a web button.
+
 ## [0.5.3] — 2026-04-26
 
 The Shared Folders submenu becomes useful at a glance. Each active

@@ -402,6 +402,22 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/configure") => {
             handle_configure(request);
         }
+        // ── Tower Wave 5 (v0.5.4): garagetytus shared-folders parity ──
+        (Method::Get, "/api/shared-folders/list") => {
+            handle_shared_folders_list(request);
+        }
+        (Method::Post, "/api/shared-folders/run-streamed") => {
+            handle_shared_folders_run_streamed(request, &registry, &query);
+        }
+        (Method::Post, "/api/shared-folders/open") => {
+            handle_shared_folders_open(request);
+        }
+        (Method::Post, "/api/shared-folders/open-cache") => {
+            handle_shared_folders_open_cache(request);
+        }
+        (Method::Post, "/api/pod/refresh-creds") => {
+            handle_pod_refresh_creds(request, &registry, &query);
+        }
         _ => {
             let resp = Response::from_string("not found")
                 .with_status_code(StatusCode(404));
@@ -1485,6 +1501,233 @@ fn spawn_pod_action(job: Arc<Mutex<Job>>, argv: Vec<String>) {
         };
         push_event(&job, JobEvent::Exit { code });
     });
+}
+
+// ── Tower Wave 5: Shared Folders parity (v0.5.4) ────────────
+//
+// Mirrors the tray's Shared Folders submenu (introduced in v0.5.2 +
+// v0.5.3) on the local web UI. Read-only operations (list / status /
+// conflicts) plus credential refresh — Bind stays tray-only because
+// the browser sandbox can't surface a real OS folder path. Helpers
+// shipped in github.com/traylinx/garagetytus/bin/.
+
+/// Locate a garagetytus-* helper script. Mirrors the resolver in
+/// `tray/src/shared_folders.rs::helper_path` so backend + frontend
+/// agree on which binary to invoke.
+fn resolve_garagetytus_helper(name: &str) -> String {
+    let candidates = [
+        format!("/usr/local/bin/{}", name),
+        format!("/opt/homebrew/bin/{}", name),
+        std::env::var("HOME")
+            .map(|h| format!("{}/garagetytus/bin/{}", h, name))
+            .unwrap_or_default(),
+    ];
+    for c in &candidates {
+        if !c.is_empty() && std::path::Path::new(c).is_file() {
+            return c.clone();
+        }
+    }
+    name.to_string()
+}
+
+/// Generic external-command spawner. Same architecture as
+/// `spawn_pod_action` (line-buffered stdout+stderr via channels) but
+/// parameterized over the binary path so we can spawn any
+/// garagetytus-* helper.
+fn spawn_external_command(job: Arc<Mutex<Job>>, bin: String, args: Vec<String>) {
+    thread::spawn(move || {
+        let mut cmd = Command::new(&bin);
+        for a in &args { cmd.arg(a); }
+        cmd.stdin(Stdio::null())
+           .stdout(Stdio::piped())
+           .stderr(Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                push_event(&job, JobEvent::Fail {
+                    message: format!("failed to launch `{}`: {}", bin, e),
+                });
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let job_so = job.clone();
+        let stdout_t = stdout.map(|mut h| thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut carry = String::new();
+            while let Ok(n) = h.read(&mut buf) {
+                if n == 0 { break; }
+                carry.push_str(&String::from_utf8_lossy(&buf[..n]));
+                while let Some(idx) = carry.find('\n') {
+                    let line = carry[..idx].to_string();
+                    carry = carry[idx + 1..].to_string();
+                    push_event(&job_so, JobEvent::Log(line));
+                }
+            }
+            if !carry.is_empty() {
+                push_event(&job_so, JobEvent::Log(carry));
+            }
+        }));
+
+        let job_se = job.clone();
+        let stderr_t = stderr.map(|mut h| thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut carry = String::new();
+            while let Ok(n) = h.read(&mut buf) {
+                if n == 0 { break; }
+                carry.push_str(&String::from_utf8_lossy(&buf[..n]));
+                while let Some(idx) = carry.find('\n') {
+                    let line = carry[..idx].to_string();
+                    carry = carry[idx + 1..].to_string();
+                    push_event(&job_se, JobEvent::Log(line));
+                }
+            }
+            if !carry.is_empty() {
+                push_event(&job_se, JobEvent::Log(carry));
+            }
+        }));
+
+        let status = child.wait();
+        let _ = stdout_t.and_then(|h| h.join().ok());
+        let _ = stderr_t.and_then(|h| h.join().ok());
+
+        let code = match status {
+            Ok(s) => s.code().unwrap_or(-1),
+            Err(_) => -1,
+        };
+        push_event(&job, JobEvent::Exit { code });
+    });
+}
+
+/// GET /api/shared-folders/list — returns the binding sidecar list as
+/// `{"bindings": [{bucket, local_path, pods_provisioned, auto_sync,
+/// interval_sec, label}]}`. Reads
+/// `~/.cache/garagetytus/bisync/*.bindings.json` (written by
+/// `garagetytus folder bind` v0.5.3+). Returns empty `bindings` when
+/// the dir doesn't exist (no bindings yet) — never errors.
+fn handle_shared_folders_list(request: Request) {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => {
+            respond_json(request, 200, &serde_json::json!({"bindings": []}));
+            return;
+        }
+    };
+    let dir = format!("{}/.cache/garagetytus/bisync", home);
+    let mut bindings = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if !name.ends_with(".bindings.json") { continue; }
+            let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => continue };
+            let json: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(j) => j, Err(_) => continue,
+            };
+            bindings.push(json);
+        }
+    }
+    respond_json(request, 200, &serde_json::json!({"bindings": bindings}));
+}
+
+/// POST /api/shared-folders/run-streamed?action=<status|conflicts|refresh-all|list>
+/// — spawns the corresponding garagetytus-* helper and streams output
+/// via the existing job-event SSE channel. Returns `{ job_id }`.
+fn handle_shared_folders_run_streamed(request: Request, registry: &Registry, query: &str) {
+    let action = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("action="))
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let (helper, args): (&str, Vec<String>) = match action.as_str() {
+        "list"        => ("garagetytus-folder-list",      vec![]),
+        "status"      => ("garagetytus-folder-status",    vec!["--check-pods".to_string()]),
+        "conflicts"   => ("garagetytus-folder-conflicts", vec![]),
+        "refresh-all" => ("garagetytus-refresh-watchdog", vec!["--threshold-days".to_string(), "7".to_string()]),
+        _ => {
+            respond_json(request, 400, &serde_json::json!({
+                "error": "action must be one of: list, status, conflicts, refresh-all"
+            }));
+            return;
+        }
+    };
+    let bin = resolve_garagetytus_helper(helper);
+    let (job_id, job) = registry.create();
+    spawn_external_command(job, bin, args);
+    respond_json(request, 202, &serde_json::json!({"job_id": job_id, "action": action}));
+}
+
+/// POST /api/shared-folders/open — body `{"local_path":"..."}`. Opens
+/// the path in Finder via macOS `open`. Returns 400 if the path
+/// doesn't exist (orphan sidecar) so the UI can flag the binding.
+fn handle_shared_folders_open(mut request: Request) {
+    #[derive(serde::Deserialize)]
+    struct Body { local_path: String }
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: Body = match serde_json::from_str(&buf) {
+        Ok(b) => b,
+        Err(_) => {
+            respond_json(request, 400, &serde_json::json!({"error":"bad json"}));
+            return;
+        }
+    };
+    if !std::path::Path::new(&body.local_path).is_dir() {
+        respond_json(request, 404, &serde_json::json!({
+            "error": "local path does not exist (orphan sidecar?)",
+            "local_path": body.local_path,
+        }));
+        return;
+    }
+    let _ = Command::new("open")
+        .arg(&body.local_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    respond_json(request, 200, &serde_json::json!({"ok": true}));
+}
+
+/// POST /api/shared-folders/open-cache — opens
+/// `~/.cache/garagetytus` in Finder.
+fn handle_shared_folders_open_cache(request: Request) {
+    let path = std::env::var("HOME")
+        .map(|h| format!("{}/.cache/garagetytus", h))
+        .unwrap_or_else(|_| "/tmp".to_string());
+    let _ = std::fs::create_dir_all(&path);
+    let _ = Command::new("open")
+        .arg(&path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    respond_json(request, 200, &serde_json::json!({"ok": true}));
+}
+
+/// POST /api/pod/refresh-creds?pod=NN — spawns
+/// `garagetytus-pod-refresh NN` and streams via job. Pod's wrapper
+/// re-reads credentials.json on every call so no pod restart is
+/// needed after rotation.
+fn handle_pod_refresh_creds(request: Request, registry: &Registry, query: &str) {
+    let pod_id = match parse_pod_id(query) {
+        Some(p) => p,
+        None => {
+            respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
+            return;
+        }
+    };
+    let bin = resolve_garagetytus_helper("garagetytus-pod-refresh");
+    let (job_id, job) = registry.create();
+    spawn_external_command(job, bin, vec![pod_id.clone()]);
+    respond_json(request, 202, &serde_json::json!({"job_id": job_id, "pod": pod_id}));
 }
 
 /// Probe whether a just-installed pod is actually reachable. The CLI's
