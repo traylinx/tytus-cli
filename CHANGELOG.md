@@ -7,6 +7,104 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-04-26
+
+**Tytus v0.6 — grandma-easy across CLI + tray + Tower.** First public
+release of the v0.6 line. Closes the full SPRINT.md scope: 9 phases
+shipped (Phase 0 audit/vocab → Phase H .pkg scaffolding) + every soft
+gap from PHASE-A/B/C-RESULTS closed during rc.10 → rc.13.
+
+### Distribution decision: curl-pipe + Homebrew (signed `.pkg` deferred)
+
+The original sprint goal #1 was a double-click `.pkg` install. Closing
+that requires Apple Developer Program enrollment ($99/yr). After the
+2026-04-26 audit (`development/audits/apple-signing-cost-2026-04-26.md`
+in MAKAKOO), the decision is **Option 2: ship beta via the unsigned
+curl-pipe + Homebrew path; defer the signed `.pkg` until a public-launch
+or revenue milestone justifies the spend.**
+
+Install lead is now:
+
+```bash
+curl -fsSL https://get.traylinx.com/install.sh | bash
+tytus setup
+```
+
+Or via Homebrew tap:
+
+```bash
+brew install traylinx/tap/tytus
+```
+
+Both paths sidestep Gatekeeper because locally-compiled / brew-managed
+binaries don't carry the `com.apple.quarantine` xattr. `pkg/SIGNING.md`
++ `pkg/build-pkg.sh` stay warm — flipping to signed `.pkg` is a ~30-min
+finish step once the cert lands.
+
+### install.sh updates (this release)
+
+- `tytus-tray` is now installed alongside `tytus` and `tytus-mcp` on
+  macOS so the menubar T appears without a second manual step.
+- New `install_tray_macos` step in `install.sh` auto-runs
+  `tytus tray install` after the cargo install step, which drops
+  `Tytus.app` in `/Applications` + a LaunchAgent for auto-start.
+- Skip the auto-tray step with `TYTUS_SKIP_TRAY=1`.
+
+### Phases shipped (rc.1 → rc.13 cumulative)
+
+- **Phase 0** (rc.1) — `AUDIT.md` cataloged 27 CLI commands + 79 tray
+  items + 11 Tower sections; lope-locked vocab verdict (HYBRID/C:
+  rename only on default success path; technical terms stay in
+  `--help`, Advanced/diagnostics, logs, internal code).
+- **Phase A** (rc.1) — WARN suppression + adaptive `tytus` no-args
+  output. Cold `tytus` invocation prints zero stderr lines. Plus
+  rc.12: `--help` grouping (5-bucket curated TLDR ahead of clap's
+  alphabetical list).
+- **Phase B** (rc.4 + rc.5 + rc.13) — Tower 5-tab top-nav rewrite
+  (Chat / Files / Channels / Settings / Help). Hash-routed SPA via
+  `body[data-tab="X"]` + CSS visibility rules. rc.13 lifted Channels
+  + Files in-tab pickers. `chooser-as-modal` documented as
+  considered-not-shipped (cosmetic-only value vs. relocation bug
+  surface).
+- **Phase C** (rc.2 + rc.11) — Tray top-level collapsed to ≤8 items
+  (Chat now / Files / Channels / Open Tytus Tower / Quick actions /
+  Settings / Help / Quit). rc.11 closed C.2 (per-pod submenu reorder
+  with `Manage ▸` wrapper) + C.3 (`Developer options ▸` inside Help).
+- **Phase D** (rc.3 + rc.4) — Vocab verdict applied to user-facing
+  strings; technical terms preserved in `--help`, logs, internal code.
+- **Phase E** (rc.5 + rc.10) — `tytus help <topic>` plain-English
+  topic command (12 topics). Tower `?` icons + popover (5 keyed
+  entries; trivially extensible).
+- **Phase F** (rc.5 JS + rc.10 Rust) — Centralized `friendlify(raw)`
+  layer maps 20 known error patterns to `{title, body, action}`
+  triples. Mirror in `tray/src/error_ui.rs` (Rust) + `tower.js`
+  (JS); lockstep test guards both pattern counts.
+- **Phase G** (rc.6) — First-run wizard inside Tower (4-step flow:
+  welcome → install → connect → first chat). State machine + dot
+  indicator + Esc/click-outside dismissal.
+- **Phase H** (rc.7) — `.pkg` installer scaffolding. `pkg/build-pkg.sh`
+  produces unsigned `target/Tytus-<version>-unsigned.pkg`;
+  `pkg/SIGNING.md` documents the signed path (deferred per the
+  audit decision above).
+- **rc.8** — Hidden 4 internal commands from `tytus --help`
+  (`Lope`, `Bridge`, `LlmDocs`, `BootstrapPrompt`) via clap
+  `#[command(hide = true)]` + `disable_help_subcommand = true`.
+- **rc.9** — Critical TDZ fix: `let budgetState = null;` declaration
+  was at line 1042; first `__applyTabFromHash()` call at script load
+  referenced it earlier, causing a strict-mode TDZ ReferenceError
+  that silently aborted the IIFE. Caught by `/browse` typeof check;
+  declaration moved to top of IIFE.
+
+### Tests
+
+- 90+ workspace tests green across `cargo test --workspace`.
+- 33 tray unit tests including `pod_action_argv_whitelist` lockstep
+  coverage for all 6 actions (`restart`, `revoke`, `uninstall`,
+  `stop-forwarder`, `channels-list`, `ls-inbox`).
+- 16 `error_ui::friendlify` tests including
+  `pattern_count_matches_js` lockstep guard against tower.js
+  `__FRIENDLIFY_PATTERNS`.
+
 ## [0.6.0-rc.13] — 2026-04-26
 
 Closes the two remaining Phase B soft gaps from the PHASE-B-RESULTS

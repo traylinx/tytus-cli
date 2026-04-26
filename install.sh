@@ -258,7 +258,19 @@ install_from_source() {
     # out with "multiple packages with binaries found". Crate names are
     # passed positionally to `cargo install` (not via -p flags — that's
     # `cargo build` syntax).
-    CARGO_ARGS="--git ${REPO_URL} --branch main atomek-cli tytus-mcp --force"
+    #
+    # tytus-tray is included on macOS so `tytus tray install` (run at
+    # the end of this script) finds the binary. Locally-compiled
+    # binaries don't carry the `com.apple.quarantine` xattr so
+    # Gatekeeper doesn't intercept them — this is the curl-pipe path
+    # that intentionally sidesteps Apple Developer ID signing for
+    # the v0.6.x beta. See `pkg/SIGNING.md` for the eventual signed
+    # `.pkg` path (deferred until paid Developer Program enrollment).
+    if [ "$(uname -s)" = "Darwin" ]; then
+        CARGO_ARGS="--git ${REPO_URL} --branch main atomek-cli tytus-mcp tytus-tray --force"
+    else
+        CARGO_ARGS="--git ${REPO_URL} --branch main atomek-cli tytus-mcp --force"
+    fi
     if [ -n "${TYTUS_INSTALL_DIR:-}" ]; then
         msg "Installing to ${TYTUS_INSTALL_DIR}"
         # shellcheck disable=SC2086
@@ -328,6 +340,32 @@ verify_install() {
     fi
 }
 
+# ── macOS tray bundle install ──────────────────────────────
+#
+# On macOS, run `tytus tray install` so the user gets the menubar
+# T + Tytus.app + LaunchAgent (auto-start at login) without a
+# second manual step. Locally-compiled tray binary doesn't carry
+# the `com.apple.quarantine` xattr so Gatekeeper doesn't intercept
+# — this is the curl-pipe path that intentionally sidesteps Apple
+# Developer ID signing for the v0.6.x beta. See `pkg/SIGNING.md`
+# for the eventual signed `.pkg` path.
+
+install_tray_macos() {
+    [ "$(uname -s)" = "Darwin" ] || return 0
+    [ "${TYTUS_SKIP_TRAY:-}" = "1" ] && { ok "Skipping tray install (TYTUS_SKIP_TRAY=1)"; return 0; }
+    if ! command -v tytus-tray >/dev/null 2>&1; then
+        warn "tytus-tray binary not on PATH — skipping menubar install."
+        warn "Re-run after fixing PATH: tytus tray install"
+        return 0
+    fi
+    msg "Installing menubar app (Tytus.app)..."
+    if "${CLI_NAME}" tray install >/dev/null 2>&1; then
+        ok "Tytus.app installed in /Applications + auto-start at login"
+    else
+        warn "Menubar install failed — run manually: tytus tray install"
+    fi
+}
+
 # ── Next steps ─────────────────────────────────────────────
 
 print_next_steps() {
@@ -374,6 +412,7 @@ main() {
 
     verify_install
     setup_sudoers
+    install_tray_macos
     print_next_steps
 }
 
