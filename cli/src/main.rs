@@ -15,9 +15,60 @@ use atomek_cli::tunnel_reap;
 use clap::{Parser, Subcommand, ValueEnum};
 use state::{CliState, PodEntry};
 
+/// A.5 (SPRINT.md Phase A acceptance bar): group the 27-command
+/// `--help` surface into intent-based buckets so the first thing a
+/// new user sees isn't an alphabetical wall of jargon. clap derive
+/// doesn't natively group subcommand variants under headings, so we
+/// prepend a curated TLDR via `before_help`. Power users still get
+/// clap's full alphabetical Commands: list below it.
+const HELP_GROUPS: &str = "\
+Most-used:
+  setup        First-time setup — login, allocate pod, test
+  chat         Interactive chat with your private AI pod
+  help         Plain-English help by topic (e.g. `tytus help chat`)
+  status       Show plan, pods, tunnels
+  test         Quick health test
+  doctor       Run diagnostics
+
+Files (move data into / out of your pod):
+  push         Push a local file or folder into the pod
+  pull         Pull from the pod back to your Mac
+  ls           List contents of a remote path
+  rm           Delete a remote path (--recursive for folders)
+  transfers    Show the push/pull/rm audit log
+
+Pod & connection:
+  connect      Activate the WireGuard tunnel
+  disconnect   Tear down a tunnel daemon
+  env          Print connection info (`tytus env --export`)
+  capabilities Discover the pod's AI gateway catalog
+  restart      Restart the agent container
+  exec         Run a command inside the agent container
+  ui           Open the OpenClaw control UI in your browser
+  agent        Install / uninstall agents into a pod
+  revoke       Revoke a specific pod (frees units)
+
+Identity & integrations:
+  login        Login to Traylinx (browser device-auth)
+  logout       Logout and revoke all pods
+  link         Wire Tytus into a project (drops CLAUDE.md / .mcp.json)
+  mcp          Print MCP server config for your AI CLI
+  channels     Add bot tokens / API secrets for chat channels
+  configure    Configure your agent (OpenClaw / Hermes)
+
+Settings:
+  autostart    Auto-start the tunnel at login
+  tray         Install / uninstall the Tytus.app menubar tray
+  daemon       Manage the background daemon
+
+Advanced commands are hidden by default. See the alphabetical list
+below for every flag.
+";
+
 #[derive(Parser)]
 #[command(name = "tytus", about = "Tytus private AI pod — connect from any terminal", version,
-          disable_help_subcommand = true)]
+          disable_help_subcommand = true,
+          before_help = HELP_GROUPS)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

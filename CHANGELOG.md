@@ -7,6 +7,41 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.12] — 2026-04-26
+
+Closes the last open Phase A soft gap: AUDIT.md called out the
+`tytus --help` surface as *"30 top-level commands in flat
+`--help` output (44 lines, no grouping)"*. rc.12 prepends a
+curated grouping above clap's auto-generated alphabetical list so
+new users see intent-based buckets first.
+
+### Phase A.5 — `tytus --help` grouping
+
+clap derive doesn't natively support per-subcommand-variant help
+headings, so a `before_help` block inside `Cli` injects a curated
+TLDR. The output now reads:
+
+```
+Most-used:        setup, chat, help, status, test, doctor
+Files:            push, pull, ls, rm, transfers
+Pod & connection: connect, disconnect, env, capabilities, restart,
+                  exec, ui, agent, revoke
+Identity:         login, logout, link, mcp, channels, configure
+Settings:         autostart, tray, daemon
+```
+
+Power users still get the full alphabetical `Commands:` list below
+the grouping with every flag clap generated. Hidden commands
+(`#[command(hide = true)]` set in rc.8 — `lope`, `bridge`,
+`llm-docs`, `bootstrap-prompt`, `tunnel-up`, `tunnel-down`)
+remain hidden in both surfaces.
+
+### Tests
+
+- 90+ workspace tests green (`cargo test --workspace`).
+- Manual smoke: `tytus --help` shows curated grouping ahead of
+  alphabetical list; `tytus help` (the topic command) unchanged.
+
 ## [0.6.0-rc.11] — 2026-04-26
 
 Closes two soft Phase C gaps the rc.5 acceptance bar passed but the
