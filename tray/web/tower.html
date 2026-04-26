@@ -444,6 +444,23 @@
       </div>
     </details>
 
+    <!-- ── Files tab — per-pod inbox + downloads (rc.13) ─────── -->
+    <!-- Browser sandbox can't surface a real OS file path, so push
+         stays a tray-menu action (T → Pod → 📁 Files → Push file…).
+         The Files tab covers the "show me what's in the pod's inbox"
+         + "open my local downloads folder for this pod" cases that
+         were stubs through rc.12. Each pod gets its own card with a
+         streamed `tytus ls` output region. -->
+    <section class="tab-pane" data-tab="files" id="tab-files-pods">
+      <div class="tab-intro">
+        <h2>Per-pod files</h2>
+        <p>Browse what's in your pod's inbox or open the local download folder. To upload from your Mac, click the menubar <strong>🅣</strong> → your pod → <strong>📁 Files → Push file…</strong></p>
+      </div>
+      <div id="files-pod-list" class="chat-pod-list">
+        <div class="settings-hint">No AI assistants yet. Install one from <a href="#settings">Settings</a> first.</div>
+      </div>
+    </section>
+
     <!-- ── Channels tab ────────────────────────────────────────── -->
     <!-- Lists every pod and links into its per-pod Channels subpage
          (#/pod/NN/channels). Uses the existing per-pod channels UI

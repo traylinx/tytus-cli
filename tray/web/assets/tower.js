@@ -684,6 +684,7 @@
   function __onTabActivated(tab) {
     if (tab === 'chat')     __renderChatTab();
     if (tab === 'channels') __renderChannelsTab();
+    if (tab === 'files')    __renderFilesTab();
   }
   window.addEventListener('hashchange', __applyTabFromHash);
   window.addEventListener('state-ready', __applyTabFromHash);
@@ -760,10 +761,13 @@
   }
 
   // ── Channels tab content ───────────────────────────────────────
-  // One row per agent, each links into the per-pod Channels subpage
-  // (`#/pod/NN/channels`) where the existing add-channel flow lives.
-  // Phase B rc.4 uses this stub; later rcs can lift the per-pod
-  // channels picker UI directly into this tab without a hop.
+  // rc.13 lifts the per-pod channels picker (renderPodChannels) directly
+  // into the tab so the user doesn't hop to `#/pod/NN/channels` to add
+  // a Telegram bot or Discord token. One inline section per agent —
+  // each section auto-loads its configured channels + add-channel
+  // dropdown via the same path the per-pod subpage uses, so the surface
+  // is identical and any future channel feature lights up in both
+  // places without duplicate code.
   function __renderChannelsTab() {
     const host = document.getElementById('channels-pod-list');
     if (!host) return;
@@ -774,15 +778,99 @@
     }
     host.innerHTML = '';
     for (const a of agents) {
-      const row = document.createElement('div');
-      row.className = 'chat-pod-row';
+      const card = document.createElement('section');
+      card.className = 'channels-tab-card';
       const name = (DISPLAY[a.agent_type] && DISPLAY[a.agent_type].display_name) || a.agent_type || 'AI assistant';
-      row.innerHTML = `
-        <div class="chat-pod-row-name">Pod ${a.pod_id}</div>
-        <div class="chat-pod-row-agent">${name}</div>
-        <a href="#/pod/${encodeURIComponent(a.pod_id)}/channels" class="btn-primary chat-pod-row-cta">Manage channels</a>
+      const header = document.createElement('header');
+      header.className = 'channels-tab-card-head';
+      header.innerHTML = `
+        <div class="channels-tab-card-id">Pod ${a.pod_id}</div>
+        <div class="channels-tab-card-agent">${name}</div>
       `;
-      host.appendChild(row);
+      card.appendChild(header);
+      const inner = document.createElement('div');
+      inner.className = 'channels-tab-card-body';
+      card.appendChild(inner);
+      host.appendChild(card);
+      // renderPodChannels does its own loading state, fetch, and
+      // re-render (12-20s polling on add/remove). It's idempotent —
+      // safe to re-call whenever budgetState changes.
+      renderPodChannels(inner, a.pod_id);
+    }
+  }
+
+  // ── Files tab content (rc.13) ─────────────────────────────────
+  // Per-pod cards with two actions:
+  //   • Browse inbox    → spawns `tytus ls --pod NN` via the pod
+  //                       run-streamed pipe. Output renders inline.
+  //   • Open downloads  → opens `~/Downloads/tytus/pod-NN/` in Finder.
+  // Push (file/folder upload) stays in the tray menu because the
+  // browser sandbox can't surface a real OS file path.
+  function __renderFilesTab() {
+    const host = document.getElementById('files-pod-list');
+    if (!host) return;
+    const agents = (budgetState && budgetState.agents) || [];
+    if (agents.length === 0) {
+      host.innerHTML = `<div class="settings-hint">No AI assistants yet. Install one from <a href="#settings">Settings</a> first.</div>`;
+      return;
+    }
+    host.innerHTML = '';
+    for (const a of agents) {
+      const card = document.createElement('section');
+      card.className = 'files-tab-card';
+      const name = (DISPLAY[a.agent_type] && DISPLAY[a.agent_type].display_name) || a.agent_type || 'AI assistant';
+      card.innerHTML = `
+        <header class="files-tab-card-head">
+          <div class="files-tab-card-id">Pod ${a.pod_id}</div>
+          <div class="files-tab-card-agent">${name}</div>
+        </header>
+        <div class="files-tab-card-actions">
+          <button class="btn-secondary files-tab-inbox" type="button">Browse inbox</button>
+          <button class="btn-secondary files-tab-downloads" type="button">Open downloads folder</button>
+        </div>
+        <pre class="log files-tab-output hidden" aria-live="polite"></pre>
+      `;
+      const out = card.querySelector('.files-tab-output');
+      card.querySelector('.files-tab-inbox').addEventListener('click', async () => {
+        out.classList.remove('hidden');
+        out.textContent = 'Listing inbox…';
+        try {
+          const res = await fetch(`/api/pod/${encodeURIComponent(a.pod_id)}/run-streamed`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'ls-inbox'}),
+          });
+          const j = await res.json();
+          if (!res.ok || !j.job_id) {
+            out.textContent = 'Couldn\'t start listing: ' + (j.error || `HTTP ${res.status}`);
+            return;
+          }
+          out.textContent = '';
+          // Reuse the SSE stream wrapper that the per-pod subpage
+          // uses — it appends raw output line-by-line and stops at
+          // the `exit` event.
+          const ev = new EventSource(`/api/jobs/${encodeURIComponent(j.job_id)}/stream`);
+          ev.addEventListener('stdout', (e) => { out.textContent += e.data + '\n'; });
+          ev.addEventListener('stderr', (e) => { out.textContent += e.data + '\n'; });
+          ev.addEventListener('exit', () => { ev.close(); });
+        } catch (err) {
+          out.textContent = 'Couldn\'t list inbox: ' + (err.message || err);
+        }
+      });
+      card.querySelector('.files-tab-downloads').addEventListener('click', async () => {
+        try {
+          const res = await fetch(`/api/files/open-downloads?pod=${encodeURIComponent(a.pod_id)}`, { method: 'POST' });
+          const j = await res.json();
+          if (!res.ok || !j.ok) {
+            showToast('Couldn\'t open downloads: ' + (j.error || `HTTP ${res.status}`), 'err');
+          } else {
+            showToast(`Opened ${j.path}`);
+          }
+        } catch (err) {
+          showToast('Couldn\'t open downloads: ' + (err.message || err), 'err');
+        }
+      });
+      host.appendChild(card);
     }
   }
 

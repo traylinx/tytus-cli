@@ -2279,6 +2279,52 @@ body.pod-mode .tabs { display: none; }
   background: transparent;
 }
 
+/* ── rc.13: Files tab + Channels tab in-tab cards ────────── */
+
+.files-tab-card,
+.channels-tab-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.files-tab-card-head,
+.channels-tab-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.files-tab-card-id,
+.channels-tab-card-id {
+  font-weight: 600;
+  color: var(--fg);
+}
+.files-tab-card-agent,
+.channels-tab-card-agent {
+  color: var(--muted);
+  font-size: 0.95em;
+}
+.files-tab-card-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.files-tab-output {
+  margin: 6px 0 0 0;
+  max-height: 280px;
+  overflow: auto;
+  font-size: 0.85rem;
+}
+.channels-tab-card-body {
+  /* renderPodChannels paints its own header + rows, so keep this
+     surface bare and let its own classes (.pod-channels-head,
+     .pod-channel-row, .pod-channel-add) carry the styling. */
+}
+
 /* ── Channels tab pane ─────────────────────────────────────── */
 
 .tab-intro {

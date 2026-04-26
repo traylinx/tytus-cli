@@ -7,6 +7,80 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.13] — 2026-04-26
+
+Closes the two remaining Phase B soft gaps from the PHASE-B-RESULTS
+"What did NOT ship" list — Channels-tab + Files-tab in-tab pickers
+no longer redirect users to the per-pod subpage.
+
+### Phase B — Channels tab in-tab picker
+
+Was: each agent rendered a "Manage channels" link to
+`#/pod/NN/channels`. Required a hop into the per-pod subpage just to
+add a Telegram bot token.
+
+Now: `__renderChannelsTab` in `tower.js` calls `renderPodChannels`
+(the existing per-pod picker — configured chips + add-channel
+dropdown + remove flows) directly into the Channels tab, one card
+per agent. Same `/api/channels` endpoints, same token-modal flow,
+same redeploy-and-poll behavior. Zero new backend code.
+
+The per-pod subpage at `#/pod/NN/channels` keeps working for
+deep-links from the tray menu — both surfaces share the same
+`renderPodChannels` function so any future channel feature lights
+up everywhere without duplicate code.
+
+### Phase B — Files tab in-tab picker
+
+Was: Files tab showed only the Shared Folders details (good) but
+nothing per-pod. The "Files tab in-tab picker" was a SPRINT.md soft
+gap.
+
+Now: per-pod cards under a new "Per-pod files" section, each with:
+- **Browse inbox** — spawns `tytus ls --pod NN` via the existing
+  pod run-streamed pipe. Output streams in-place to a `<pre>` log
+  region. New whitelist entry `"ls-inbox"` added to `pod_action_argv`.
+- **Open downloads folder** — POSTs to new
+  `/api/files/open-downloads?pod=NN` endpoint, which `mkdir -p`s
+  `~/Downloads/tytus/pod-NN/` then `open`s it in Finder. Mirrors
+  the tray menu entry under per-pod Files ▸.
+
+Push (file/folder upload from Mac) stays in the tray menu because
+the browser sandbox can't surface a real OS file path. The Files
+tab intro tells users where to find Push (`🅣 → Pod → 📁 Files →
+Push file…`).
+
+### Backend (Rust)
+
+- New `pod_action_argv` arm: `"ls-inbox"` → `["ls", "--pod", NN]`.
+- New endpoint `POST /api/files/open-downloads?pod=NN` →
+  `handle_files_open_downloads` (parallels existing
+  `/api/shared-folders/open-cache`).
+- Whitelist test extended to lockstep-cover `ls-inbox`.
+
+### Not shipped: chooser-as-modal
+
+The original SPRINT.md soft-gap list also flagged "chooser-as-modal"
+(wrap the install chooser in a `<dialog>` so it can be invoked from
+any tab without a Settings hop). Considered for rc.13 but rejected:
+
+- Existing Settings-tab hop is one click; the chooser is the
+  Settings tab's primary content when no install is in progress.
+- A real modal would require relocating four sibling sections
+  (`#chooser` / `#installing` / `#success` / `#failure`) out of
+  their `data-tab="settings"` parent into a `<dialog>` host, OR
+  adding a CSS overlay that overrides every tab-visibility rule.
+  Both add bug surface for cosmetic-only value.
+- Phase B acceptance bar was already met without it.
+
+Documented in PHASE-B-RESULTS.md as design considered, not shipped.
+
+### Tests
+
+- 33 tray unit tests green (whitelist test now covers `ls-inbox`).
+- 90+ workspace tests green.
+- Manual smoke deferred (requires live tray + browser walk).
+
 ## [0.6.0-rc.12] — 2026-04-26
 
 Closes the last open Phase A soft gap: AUDIT.md called out the

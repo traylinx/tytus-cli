@@ -424,6 +424,13 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/shared-folders/bind") => {
             handle_shared_folders_bind(request, &registry);
         }
+        // ── rc.13: Files tab in-tab actions ──────────────────────────
+        // Open the per-pod local downloads dir in Finder. Path is the
+        // same `~/Downloads/tytus/pod-NN/` the tray writes to. Created
+        // on demand so the open call doesn't fail on a fresh pod.
+        (Method::Post, "/api/files/open-downloads") => {
+            handle_files_open_downloads(request, &query);
+        }
         _ => {
             let resp = Response::from_string("not found")
                 .with_status_code(StatusCode(404));
@@ -1384,6 +1391,11 @@ fn pod_action_argv(action: &str, pod_id: &str) -> Option<Vec<String>> {
         "uninstall"       => v(&["agent", "uninstall", pod_id]),
         "stop-forwarder"  => v(&["ui", "--stop", "--pod", pod_id]),
         "channels-list"   => v(&["channels", "list", "--pod", pod_id]),
+        // rc.13: Files tab "Browse inbox" — read-only listing of the
+        // pod's `/app/workspace/inbox/` (CLI's default path for `ls`
+        // when none is supplied). Streamed via the same job channel
+        // the other pod actions use; output renders in-tab.
+        "ls-inbox"        => v(&["ls", "--pod", pod_id]),
         _ => None,
     }
 }
@@ -1701,6 +1713,31 @@ fn handle_shared_folders_open(mut request: Request) {
         .stderr(Stdio::null())
         .spawn();
     respond_json(request, 200, &serde_json::json!({"ok": true}));
+}
+
+/// POST /api/files/open-downloads?pod=NN — opens
+/// `~/Downloads/tytus/pod-NN/` in Finder so the user can grab files
+/// they pulled from the pod. Mirrors the tray menu entry under
+/// per-pod Files ▸. Created on demand if missing so the open call
+/// doesn't fail on a freshly-installed pod that has yet to pull
+/// anything.
+fn handle_files_open_downloads(request: Request, query: &str) {
+    let pod = match parse_pod_id(query) {
+        Some(p) if valid_pod_id(&p) => p,
+        _ => {
+            respond_json(request, 400, &serde_json::json!({"error":"missing or invalid pod"}));
+            return;
+        }
+    };
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let path = format!("{}/Downloads/tytus/pod-{}", home, pod);
+    let _ = std::fs::create_dir_all(&path);
+    let _ = Command::new("open")
+        .arg(&path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    respond_json(request, 200, &serde_json::json!({"ok": true, "path": path}));
 }
 
 /// POST /api/shared-folders/open-cache — opens
@@ -2624,6 +2661,13 @@ mod tests {
         assert_eq!(
             pod_action_argv("channels-list", "02").unwrap(),
             vec!["channels", "list", "--pod", "02"],
+        );
+        // rc.13: Files tab "Browse inbox" button — read-only listing
+        // of the pod's `/app/workspace/inbox/` (CLI's default `ls`
+        // path when no PATH arg is given).
+        assert_eq!(
+            pod_action_argv("ls-inbox", "02").unwrap(),
+            vec!["ls", "--pod", "02"],
         );
 
         // Global commands are intentionally not pod-scoped — they
