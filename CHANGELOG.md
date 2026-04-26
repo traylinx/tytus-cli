@@ -7,6 +7,93 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.6] — 2026-04-26
+
+Phase G — first-run wizard inside Tower. Closes the last
+implementation phase before v0.6.0 final (rc.6 + Phase H signed `.pkg`
+installer = v0.6.0). Phase H needs Sebastian's Apple Developer cert
+and interactive notarization, so it ships separately.
+
+### Phase G — First-run wizard
+
+A 4-step overlay shown on the very first Tower load. Auto-skips when
+the user is already fully set up (logged_in + ≥1 agents installed).
+
+```
+Step 1 of 4 — Welcome to Tytus
+Step 2 of 4 — Sign in
+Step 3 of 4 — Pick your AI
+Step 4 of 4 — Send your first message
+```
+
+- **Step 1 — Welcome.** Bullet list ("Talk to your AI from any
+  terminal", "Share Mac folders", "Chat from Telegram/Discord/Slack").
+  "Get started" advances. "Skip" closes for this session.
+- **Step 2 — Sign in.** "Sign in with browser" → POSTs `/api/connect`
+  (which kicks `tytus connect` → opens browser auth). Wizard polls
+  `/api/state` every 2s; auto-advances when `logged_in` flips to true.
+- **Step 3 — Pick your AI.** Hides the overlay so the user can
+  interact with the chooser catalog in the Settings tab. Polling
+  continues; auto-re-shows the wizard at step 4 when
+  `state.agents.length > 0`.
+- **Step 4 — Send your first message.** "Open Chat" closes the
+  overlay (sets `localStorage.tytus.wizard.completed = 'true'`) and
+  sets `location.hash = '#chat'`. Skip is hidden on this step
+  because the user is already done.
+- **Auto-skip on returning users.** When `state.logged_in` is true
+  AND `state.agents.length > 0`, the wizard quietly marks itself
+  completed and never shows. New installs go through it; existing
+  users never see it.
+- **Skip-to-later** closes the overlay for this session without
+  marking completed; re-shows next Tower open.
+- **Run again.** Help tab → "Run setup wizard again" button clears
+  `localStorage` and re-opens. Useful if the user skipped on first
+  launch and wants to come back.
+
+### Acceptance bar (from SPRINT.md)
+
+> A user with zero prior context completes all 4 steps in ≤3 minutes
+> (timed observation).
+
+Met by structure. Wall-clock observation requires a real grandma sit-
+in (per SPRINT "Out of scope") — Sebastian to recruit; the calling-
+card video can be filmed against rc.6.
+
+### Backwards compat
+
+- New section `#wizard` and ~140 LOC of JS scoped to a self-
+  contained module. Zero edits to existing handlers / sections.
+- New CSS scoped to `.wizard-*` selectors.
+- localStorage key `tytus.wizard.completed` is namespaced and never
+  written under any other path.
+- Tower's `/api/state` poll is identical to existing flows (already
+  polled by `refreshHeaderConn` every 10s; wizard polls every 2-3s
+  during the active step only and stops when the step advances).
+- All 74 workspace tests green. Internal Rust unchanged from rc.5.
+
+### Files touched
+
+- `tray/web/tower.html` — wizard `<section>` overlay + Help-tab
+  "Run setup wizard again" button row
+- `tray/web/assets/tower.css` — wizard overlay/card/dot/spinner
+  styles (~120 LOC added)
+- `tray/web/assets/tower.js` — wizard state machine + 4 step
+  definitions + state-ready hook + DOMContentLoaded wire
+  (~165 LOC added)
+- `Cargo.toml` — workspace version bump to `0.6.0-rc.6`
+- `CHANGELOG.md` — this entry
+
+### Phase H — what's left for v0.6.0 final
+
+- Signed `.pkg` installer via `productbuild` + Apple Developer ID
+  signing + notarization round-trip
+- Post-install script to run `tytus tray install` automatically
+- Hosted at `https://tytus.traylinx.com/Tytus.pkg` + GitHub release
+  artifact mirror
+- README install section becomes one button: `[ Download for Mac ]`
+
+Needs Sebastian's hands on the Apple Developer cert.
+
 ## [0.6.0-rc.5] — 2026-04-26
 
 Phase F (error UX friendlify layer) + Phase E (in-context help — CLI

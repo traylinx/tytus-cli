@@ -36,6 +36,34 @@
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
+    <!-- ── Phase G: first-run wizard ─────────────────────────────── -->
+    <!-- Full-screen overlay. Visible on first ever Tower load (no
+         localStorage `tytus.wizard.completed` AND user isn't already
+         set up). Hidden once user finishes step 4 OR clicks "Skip — I'll
+         do this later". Reachable again from Help → "Run setup wizard
+         again" which clears localStorage and reloads. -->
+    <section id="wizard" class="wizard-overlay hidden" aria-modal="true" role="dialog" aria-labelledby="wizard-step-title">
+      <div class="wizard-card">
+        <div class="wizard-progress">
+          <span class="wizard-dot" data-step="1"></span>
+          <span class="wizard-dot" data-step="2"></span>
+          <span class="wizard-dot" data-step="3"></span>
+          <span class="wizard-dot" data-step="4"></span>
+          <span id="wizard-step-counter" class="wizard-counter">Step 1 of 4</span>
+        </div>
+
+        <h2 id="wizard-step-title" class="wizard-title">Welcome to Tytus</h2>
+        <div id="wizard-step-body" class="wizard-body">
+          <!-- Filled by tower.js per step -->
+        </div>
+
+        <div class="wizard-actions">
+          <button id="wizard-primary" class="btn-primary" type="button">Get started</button>
+          <button id="wizard-skip" class="wizard-skip-link" type="button">Skip — I'll do this later</button>
+        </div>
+      </div>
+    </section>
+
     <section id="health-panel" class="health-panel hidden">
       <div class="health-panel-head">
         <h2 id="health-panel-title">Running health test…</h2>
@@ -380,6 +408,14 @@
             <button id="tr-daemon-restart" class="btn-secondary" type="button">Restart</button>
           </div>
           <div class="settings-hint">Refreshes your sign-in in the background. Stop/restart if you can't connect.</div>
+        </div>
+
+        <div class="trouble-row">
+          <div class="trouble-label">Setup wizard</div>
+          <div class="trouble-actions">
+            <button id="tr-wizard-again" class="btn-secondary" type="button">Run setup wizard again</button>
+          </div>
+          <div class="settings-hint">Re-runs the 4-step welcome flow. Useful if you skipped it on first launch.</div>
         </div>
 
         <div class="trouble-row">

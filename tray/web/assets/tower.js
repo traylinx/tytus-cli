@@ -308,6 +308,211 @@
     else __pendingHash = location.hash;
   });
 
+  // ── Phase G: first-run wizard ──────────────────────────────────
+  //
+  // 4-step overlay shown on first ever Tower load when:
+  //   - localStorage `tytus.wizard.completed` is not 'true', AND
+  //   - the user isn't already fully set up (logged_in + has agent).
+  //
+  // Steps:
+  //   1. Welcome — bullet list of what you can do; "Get started" → 2.
+  //   2. Sign in — button kicks `/api/connect`, polls state until
+  //      logged_in becomes true, then auto-advances to 3.
+  //   3. Pick AI — links to Settings tab where the chooser catalog
+  //      lives; polls state until agents.length > 0, then advances.
+  //   4. First message — closes the overlay, lands user on Chat tab,
+  //      where the iframe-launcher (or "Talk to this AI" row) takes
+  //      over. Marks `tytus.wizard.completed = 'true'` in localStorage.
+  //
+  // Skip-to-later closes the overlay for this session without
+  // marking completed; wizard re-shows next Tower open.
+  // Help → "Run setup wizard again" clears localStorage and reloads.
+  const __WIZARD_KEY = 'tytus.wizard.completed';
+  let __wizardStep = 1;
+  let __wizardPollTimer = null;
+
+  function __wizardStop() {
+    if (__wizardPollTimer) {
+      clearInterval(__wizardPollTimer);
+      __wizardPollTimer = null;
+    }
+  }
+  function __wizardClose(markCompleted) {
+    __wizardStop();
+    const w = $('wizard');
+    if (w) w.classList.add('hidden');
+    if (markCompleted) {
+      try { localStorage.setItem(__WIZARD_KEY, 'true'); } catch {}
+    }
+  }
+  function __wizardOpen() {
+    const w = $('wizard');
+    if (!w) return;
+    w.classList.remove('hidden');
+    __wizardShow(1);
+  }
+  function __wizardShow(step) {
+    __wizardStop();
+    __wizardStep = step;
+    const w = $('wizard');
+    if (w) {
+      w.classList.remove('hidden'); // re-show if step 3 hid it for the chooser hop
+      w.dataset.step = String(step);
+    }
+    const counter = $('wizard-step-counter');
+    const title   = $('wizard-step-title');
+    const body    = $('wizard-step-body');
+    const primary = $('wizard-primary');
+    const skip    = $('wizard-skip');
+    if (counter) counter.textContent = `Step ${step} of 4`;
+
+    const s = __WIZARD_STEPS[step - 1];
+    if (!s) return;
+    if (title)   title.textContent = s.title;
+    if (body)    body.innerHTML    = s.body;
+    if (primary) {
+      primary.disabled = false;
+      primary.textContent = s.primary;
+      primary.onclick = () => s.onPrimary();
+    }
+    if (skip) {
+      skip.style.display = s.canSkip === false ? 'none' : '';
+      skip.onclick = () => __wizardClose(false);
+    }
+    if (typeof s.onShow === 'function') s.onShow();
+  }
+  const __WIZARD_STEPS = [
+    {
+      title: 'Welcome to Tytus',
+      body: `
+        <p>Tytus runs your own AI in private. The next 3 steps take about 60 seconds.</p>
+        <ul>
+          <li>Talk to your AI from Tower or any terminal</li>
+          <li>Share Mac folders with your AI — it reads & writes them</li>
+          <li>Chat from Telegram, Discord, or Slack</li>
+        </ul>
+      `,
+      primary: 'Get started',
+      onPrimary: () => __wizardShow(2),
+    },
+    {
+      title: 'Sign in',
+      body: `
+        <p>Click the button. A browser tab opens to approve the device — once you click <strong>Allow</strong>, this wizard advances on its own.</p>
+        <p class="settings-hint">Already signed in? This step auto-skips.</p>
+      `,
+      primary: 'Sign in with browser',
+      onShow: () => {
+        // Auto-skip if already logged in.
+        if (budgetState && budgetState.logged_in) {
+          __wizardShow(3);
+          return;
+        }
+        // Poll state every 2s; advance when logged_in flips.
+        __wizardPollTimer = setInterval(async () => {
+          try {
+            const s = await (await fetch('/api/state')).json();
+            if (s && s.logged_in) {
+              budgetState = s;
+              __wizardShow(3);
+            }
+          } catch {}
+        }, 2000);
+      },
+      onPrimary: async () => {
+        const btn = $('wizard-primary');
+        if (btn) {
+          btn.disabled = true;
+          btn.innerHTML = '<span class="wizard-spinner"></span> Opening browser…';
+        }
+        try { await fetch('/api/connect', { method: 'POST' }); } catch {}
+      },
+    },
+    {
+      title: 'Pick your AI',
+      body: `
+        <p>Tytus comes with two AI assistants. Pick one to install — costs 1–2 plan units per assistant.</p>
+        <p class="settings-hint">The catalog opens in the Settings tab. Once your AI is installed, this wizard advances on its own.</p>
+      `,
+      primary: 'Open the AI catalog',
+      onShow: () => {
+        // Auto-skip if already has an agent.
+        const agents = (budgetState && budgetState.agents) || [];
+        if (agents.length > 0) {
+          __wizardShow(4);
+          return;
+        }
+        __wizardPollTimer = setInterval(async () => {
+          try {
+            const s = await (await fetch('/api/state')).json();
+            if (s && Array.isArray(s.agents) && s.agents.length > 0) {
+              budgetState = s;
+              __wizardShow(4);
+            }
+          } catch {}
+        }, 3000);
+      },
+      onPrimary: () => {
+        // Hide overlay so user can interact with the chooser, but keep
+        // the poll timer running. As soon as they install an agent,
+        // step 4 auto-shows.
+        const w = $('wizard');
+        if (w) w.classList.add('hidden');
+        location.hash = '#settings';
+      },
+    },
+    {
+      title: 'Send your first message',
+      body: `
+        <p>Your AI is ready. Click the button to land on the Chat tab — pick "Talk to this AI" and you're chatting.</p>
+        <p class="settings-hint">You can run this wizard again any time from <a href="#help">Help</a> → Run setup wizard.</p>
+      `,
+      primary: 'Open Chat',
+      canSkip: false,
+      onPrimary: () => {
+        __wizardClose(true);
+        location.hash = '#chat';
+      },
+    },
+  ];
+
+  function __wizardMaybeShow() {
+    let alreadyDone = false;
+    try { alreadyDone = localStorage.getItem(__WIZARD_KEY) === 'true'; } catch {}
+    if (alreadyDone) return;
+    const s = budgetState;
+    const fullySetUp = s && s.logged_in && Array.isArray(s.agents) && s.agents.length > 0;
+    if (fullySetUp) {
+      // Returning user with everything wired — quietly mark completed
+      // so we never bug them.
+      try { localStorage.setItem(__WIZARD_KEY, 'true'); } catch {}
+      return;
+    }
+    __wizardOpen();
+  }
+  // Show wizard once state is ready (so step 2/3 logic can read
+  // logged_in / agents correctly on first paint).
+  window.addEventListener('state-ready', __wizardMaybeShow);
+  // Expose for "Run setup wizard again" trigger.
+  window.__wizardOpen = () => {
+    try { localStorage.removeItem(__WIZARD_KEY); } catch {}
+    __wizardOpen();
+  };
+  // Help tab → "Run setup wizard again" button.
+  window.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('tr-wizard-again')?.addEventListener('click', () => {
+      window.__wizardOpen();
+    });
+  });
+  // DOMContentLoaded may have already fired by the time this script
+  // runs (defer/async aside, our script is at end of <body>). Catch
+  // that case.
+  if (document.readyState !== 'loading') {
+    document.getElementById('tr-wizard-again')?.addEventListener('click', () => {
+      window.__wizardOpen();
+    });
+  }
+
   // ── Phase B: 5-tab top-nav router ──────────────────────────────
   //
   // Tower's primary surfaces are now five tabs: Chat / Files / Channels
