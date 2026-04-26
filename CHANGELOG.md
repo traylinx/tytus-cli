@@ -7,6 +7,85 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.2] — 2026-04-26
+
+Phase C — tray menu simplification. Top-level tray collapses from 14
+visible widgets to 8, with three primary verbs (Chat / Files / Channels)
+promoted to top-level alongside the full Tower deep-link. Every existing
+menu ID + action handler is preserved — backwards-compatible refactor.
+
+### Phase C — Tray simplification
+
+Top-level tray (logged-in, pod connected) is now:
+
+```
+🅣 Tytus
+├─ ● Connected (sebastian@…)
+├─ Plan: explorer · 0 / 1 units · up 4h
+├─ ──────────
+├─ 💬  Chat now…             ← open_tower_chat → tower#chat
+├─ 📁  Files…                  ← open_tower_files → tower#files
+├─ 📨  Channels…               ← open_tower_channels → tower#channels
+├─ 🌐  Open Tytus Tower        ← unchanged
+├─ ──────────
+├─ Quick actions ▸             ← Disconnect/Connect, Open in ▸,
+│                                Run Health Test, AIL Connection Info ▸,
+│                                Show all pods ▸, Shared Folders ▸
+├─ ──────────
+├─ Settings ▸                  ← unchanged contents
+├─ Help… ▸                     ← was "Troubleshoot ▸"; +Documentation +About
+├─ ──────────
+└─ Quit Tytus
+```
+
+8 actionable top-level items. Previous v0.5.5 layout had 14: status +
+meta + Open Tower + Connect/Disconnect + Open in + Health Test +
+AIL Connection Info + Pods & Agents + Shared Folders + Settings +
+Troubleshoot + Documentation + About + Quit. Phase C goal: ≤8 ✓.
+
+- **3 new menu IDs**: `open_tower_chat`, `open_tower_files`,
+  `open_tower_channels` — each routes to `web_server::open_tower_at("#chat"|
+  "#files"|"#channels")`. Phase B's tab routing in tower.html consumes the
+  hash; until Phase B lands, Tower's hashchange handler ignores unknown
+  anchors and the page loads at root — no broken behavior, no surprise.
+- **Disconnect / Connect, Open in ▸, Run Health Test** moved into
+  Quick actions ▸. All three were former top-level items; the verbs
+  remain reachable in ≤2 clicks (T → Quick actions → action).
+- **Pods & Agents ▸** renamed **"Show all pods"** and nested under
+  Quick actions ▸. Per-pod actions (Open in Browser, Channels, Files,
+  Restart, Refresh creds, Uninstall, Revoke) all reachable in ≤3 clicks
+  (T → Quick actions → Show all pods → click pod). Previously 1 fewer
+  click but at the cost of 30+ items dumped onto a top-level submenu.
+- **Shared Folders ▸** nested under Quick actions ▸. Per-binding
+  click → open in Finder still ≤3 clicks deep.
+- **AIL Connection Info ▸** nested under Quick actions ▸. The export
+  blocks for Claude Code / Cursor / OpenCode / OpenAI / Anthropic stay
+  reachable for power users; grandma never sees them.
+- **Documentation + About Tytus** fold into Help ▸ (formerly
+  Troubleshoot ▸). Two top-level text-link items go away.
+- **Troubleshoot ▸ → Help…** rename. Under Phase D the inner labels get
+  vocab cleanup; rc.2 keeps every internal label byte-identical to v0.5.5.
+
+### Backwards compat
+
+- **Every existing menu ID is preserved.** Action handlers in
+  `handle_menu_event` are byte-identical for the moved items
+  (`disconnect`, `connect`, `test`, `launch_*`, `copy_ail_*`,
+  `open_mcp_guide`, `pod_*`, `install_agent`, `install_agent_*`,
+  `shared_folders_*`, `units_line`, `pod_header_*`, `no_pods`,
+  `docs`, `about`). They live under different parent submenus
+  but respond to clicks identically.
+- **3 new IDs added** (`open_tower_chat`, `open_tower_files`,
+  `open_tower_channels`). Old IDs kept; new IDs additive.
+- **Internal types, file names, log lines, CLI surfaces** unchanged
+  vs rc.1.
+
+### Files touched
+
+- `tray/src/main.rs` — `build_menu` restructure, new event handlers
+- `Cargo.toml` — workspace version bump to `0.6.0-rc.2`
+- `CHANGELOG.md` — this entry
+
 ## [0.6.0-rc.1] — 2026-04-26
 
 First release candidate of the v0.6 grandma-easy line. Phases 0 + A

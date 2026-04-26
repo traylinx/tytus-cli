@@ -872,17 +872,29 @@ fn build_menu(state: &TrayState) -> Menu {
     // double-click doesn't fire a second `tytus connect` in parallel.
     // The busy status line above already tells the user what's
     // happening; the grayed-out item reinforces it.
+    // Phase C — top-level menu collapses to ≤8 items via a Quick actions
+    // submenu. This builder is populated incrementally throughout the
+    // logged-in branches below (Connect/Disconnect, Open-in, Health test,
+    // Pods & Agents, Shared Folders, AIL connection info) and finally
+    // appended to the top-level menu in one place, after Tower deep-links
+    // and before Settings/Help. Empty when not logged in (we skip the
+    // append).
+    let quick_actions_sub = Submenu::new("Quick actions", true);
+
     let is_busy = busy_current().is_some();
     if !state.logged_in {
         let _ = menu.append(&MenuItem::with_id("login", "Sign In…", !is_busy, None));
         let _ = menu.append(&PredefinedMenuItem::separator());
     } else {
-        // Tower — the full-surface control page. Everything the tray
-        // exposes (and more — catalog, running-pod panels, live logs)
-        // lives there. Listed first inside the logged-in block so the
-        // user's top-of-menu glance answers "where do I go to do
-        // anything non-trivial" with one click.
-        let _ = menu.append(&MenuItem::with_id("open_tower", "Open Tytus Tower", true, None));
+        // Phase C top-level: three primary verbs (Chat / Files / Channels)
+        // followed by the full Tower deep-link. Tower's hash routing
+        // arrives in Phase B; rc.2 lands at the page root because
+        // tower.html ignores unknown anchors, which still gets the user
+        // there — Phase B-D collapse the gap.
+        let _ = menu.append(&MenuItem::with_id("open_tower_chat",     "💬  Chat now…",   true, None));
+        let _ = menu.append(&MenuItem::with_id("open_tower_files",    "📁  Files…",       true, None));
+        let _ = menu.append(&MenuItem::with_id("open_tower_channels", "📨  Channels…",    true, None));
+        let _ = menu.append(&MenuItem::with_id("open_tower",          "🌐  Open Tytus Tower", true, None));
         let _ = menu.append(&PredefinedMenuItem::separator());
 
         // Phase 4: the public-edge URL works without the WG tunnel, so
@@ -894,10 +906,11 @@ fn build_menu(state: &TrayState) -> Menu {
         // tear it down), Connect is the primary when it isn't (to bring
         // it up for users who want the encrypted path). Users with the
         // public URL already wired don't need to touch either.
+        // All three of these now nest under Quick actions ▸ per Phase C.
         if state.tunnel_active {
-            let _ = menu.append(&MenuItem::with_id("disconnect", "Disconnect", !is_busy, None));
+            let _ = quick_actions_sub.append(&MenuItem::with_id("disconnect", "Disconnect", !is_busy, None));
         } else {
-            let _ = menu.append(&MenuItem::with_id("connect", "Connect (tunnel)", !is_busy, None));
+            let _ = quick_actions_sub.append(&MenuItem::with_id("connect", "Connect (tunnel)", !is_busy, None));
         }
 
         let clis = launcher::detect_installed_clis();
@@ -910,11 +923,10 @@ fn build_menu(state: &TrayState) -> Menu {
             let _ = open_sub.append(&PredefinedMenuItem::separator());
         }
         let _ = open_sub.append(&MenuItem::with_id("launch_terminal", "Terminal", true, None));
-        let _ = menu.append(&open_sub);
+        let _ = quick_actions_sub.append(&open_sub);
 
-        let _ = menu.append(&MenuItem::with_id("test", "Run Health Test", true, None));
-
-        let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = quick_actions_sub.append(&MenuItem::with_id("test", "Run Health Test", true, None));
+        let _ = quick_actions_sub.append(&PredefinedMenuItem::separator());
     }
 
     // ── AIL Connection Info ▸ ─────────────────────────────────
@@ -985,15 +997,19 @@ fn build_menu(state: &TrayState) -> Menu {
         let _ = info_sub.append(&PredefinedMenuItem::separator());
         let _ = info_sub.append(&MenuItem::with_id("open_mcp_guide", "Paste into Claude Code / Cursor / OpenCode…", true, None));
 
-        let _ = menu.append(&info_sub);
-        let _ = menu.append(&PredefinedMenuItem::separator());
+        // Phase C: AIL Connection Info nests under Quick actions ▸ — it's
+        // a power-user surface (export blocks for Claude/Cursor/OpenCode)
+        // that grandma never reaches but power users still want one menu
+        // expand away.
+        let _ = quick_actions_sub.append(&info_sub);
+        let _ = quick_actions_sub.append(&PredefinedMenuItem::separator());
     }
 
     // ── Pods & Agents ▸ ───────────────────────────────────
     // Only visible once the user has credentials — the actions all hit
     // Provider, which needs an active Sentinel session.
     if state.logged_in {
-        let pods_sub = Submenu::new("Pods & Agents", true);
+        let pods_sub = Submenu::new("Show all pods", true);
         if state.pods.is_empty() {
             let _ = pods_sub.append(&MenuItem::with_id("no_pods", "No pods allocated", false, None));
             let _ = pods_sub.append(&PredefinedMenuItem::separator());
@@ -1267,8 +1283,9 @@ fn build_menu(state: &TrayState) -> Menu {
             ));
         }
 
-        let _ = menu.append(&pods_sub);
-        let _ = menu.append(&PredefinedMenuItem::separator());
+        // Phase C: Pods & Agents — renamed "Show all pods" — nests under
+        // Quick actions ▸ instead of being a top-level submenu.
+        let _ = quick_actions_sub.append(&pods_sub);
 
         // ── Shared Folders ▸ (garagetytus v0.5.3 integration) ──
         // Top-level submenu for global shared-folder ops. Per-pod
@@ -1329,7 +1346,17 @@ fn build_menu(state: &TrayState) -> Menu {
         let _ = shared_sub.append(&MenuItem::with_id(
             shared_folders::ID_REFRESH_ALL, "Run cred refresh now (every pod)", true, None,
         ));
-        let _ = menu.append(&shared_sub);
+        // Phase C: Shared Folders nests under Quick actions ▸. Direct
+        // per-binding "open in Finder" entries are still ≤3 clicks deep
+        // (T → Quick actions → Shared Folders → click row).
+        let _ = quick_actions_sub.append(&shared_sub);
+    }
+
+    // Phase C: Append the populated Quick actions ▸ submenu once, after
+    // every contributor has had its turn. No-op when not logged in (the
+    // submenu is empty and never appended).
+    if state.logged_in {
+        let _ = menu.append(&quick_actions_sub);
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
 
@@ -1361,8 +1388,11 @@ fn build_menu(state: &TrayState) -> Menu {
     }
     let _ = menu.append(&settings_sub);
 
-    // ── Troubleshoot ▸ ────────────────────────────────────
-    let trouble_sub = Submenu::new("Troubleshoot", true);
+    // ── Help ▸ ────────────────────────────────────────────
+    // Phase C: renamed from "Troubleshoot" to "Help" so non-technical
+    // users find it on the first read. Documentation + About now nest
+    // here too, dropping two top-level items.
+    let trouble_sub = Submenu::new("Help…", true);
     // Surface the daemon's most recent diagnostic so the user doesn't
     // have to `tail /tmp/tytus/daemon.log` to know what's wrong. Two
     // disabled info rows render as context above the actionable items.
@@ -1402,13 +1432,12 @@ fn build_menu(state: &TrayState) -> Menu {
     } else {
         let _ = trouble_sub.append(&MenuItem::with_id("daemon_start", "Start Daemon", true, None));
     }
+    // Phase C: Documentation + About fold into Help ▸ so the top-level
+    // tray no longer carries two text-link items grandma never clicks.
+    let _ = trouble_sub.append(&PredefinedMenuItem::separator());
+    let _ = trouble_sub.append(&MenuItem::with_id("docs", "Documentation", true, None));
+    let _ = trouble_sub.append(&MenuItem::with_id("about", "About Tytus", true, None));
     let _ = menu.append(&trouble_sub);
-
-    let _ = menu.append(&PredefinedMenuItem::separator());
-
-    // ── About / Docs ──────────────────────────────────────
-    let _ = menu.append(&MenuItem::with_id("docs", "Documentation", true, None));
-    let _ = menu.append(&MenuItem::with_id("about", "About Tytus", true, None));
 
     let _ = menu.append(&PredefinedMenuItem::separator());
     // Label hints at how to come back: if the bundle + launch-at-login are
@@ -1835,6 +1864,20 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // localhost server isn't bound (rare).
         "install_agent" | "open_tower" => {
             web_server::open_tower();
+        }
+        // Phase C tray simplification — top-level Chat/Files/Channels
+        // shortcuts deep-link into Tower's primary tabs. Phase B's tab
+        // routing in tower.html consumes the hash; until then Tower's
+        // hashchange handler ignores unknown anchors and the page just
+        // loads at the current section. No-op fallback by design.
+        "open_tower_chat" => {
+            web_server::open_tower_at("#chat");
+        }
+        "open_tower_files" => {
+            web_server::open_tower_at("#files");
+        }
+        "open_tower_channels" => {
+            web_server::open_tower_at("#channels");
         }
         // Install a specific agent via the terminal-picker fallback.
         "install_agent_nemoclaw" => {
