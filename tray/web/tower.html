@@ -6,20 +6,31 @@
   <title>Tytus Tower</title>
   <link rel="stylesheet" href="/assets/tower.css">
 </head>
-<body data-view="chooser">
+<body data-view="chooser" data-tab="chat">
   <main class="shell">
     <header class="header">
       <div class="brand">
         <div class="dot"></div>
-        <h1>Tytus Tower</h1>
+        <h1>Tytus</h1>
       </div>
-      <p class="subtitle" id="subtitle">Your private AI pods, agents, and connections.</p>
+      <p class="subtitle" id="subtitle">Chat, share files, and manage your AI assistant.</p>
       <div class="status-line" id="status-line"></div>
       <div class="header-actions">
-        <button id="hdr-health" class="btn-hdr" type="button">Run Health Test</button>
+        <button id="hdr-health" class="btn-hdr" type="button">Run health test</button>
         <button id="hdr-conn" class="btn-hdr" type="button" data-state="unknown">…</button>
       </div>
     </header>
+
+    <!-- Phase B: 5-tab top nav. Hash-routed via tower.js — clicking a tab
+         updates location.hash, the router toggles `body[data-tab="<id>"]`,
+         and CSS rules in tower.css show only the active tab's panes. -->
+    <nav class="tabs" role="tablist" id="tower-tabs">
+      <a class="tab" role="tab" href="#chat"     data-tab="chat"><span class="tab-emoji">💬</span> Chat</a>
+      <a class="tab" role="tab" href="#files"    data-tab="files"><span class="tab-emoji">📁</span> Files</a>
+      <a class="tab" role="tab" href="#channels" data-tab="channels"><span class="tab-emoji">📨</span> Channels</a>
+      <a class="tab" role="tab" href="#settings" data-tab="settings"><span class="tab-emoji">⚙️</span> Settings</a>
+      <a class="tab" role="tab" href="#help"     data-tab="help"><span class="tab-emoji">❓</span> Help</a>
+    </nav>
 
     <div id="banner" class="banner hidden" role="alert"></div>
 
@@ -33,7 +44,29 @@
       <pre id="health-panel-log" class="log"></pre>
     </section>
 
-    <section id="chooser" class="chooser">
+    <!-- ── Chat tab ── (default landing) ─────────────────────────── -->
+    <!-- Per SPRINT.md: Tower's chat tab embeds an iframe to the
+         OpenClaw control UI when one is available, OR shows an empty
+         state with a setup CTA. SSE-streamed token output is a future
+         rc — for v0.6.0 the iframe path is enough to land the SPRINT
+         acceptance bar ("send first chat ≤60s"). -->
+    <section class="tab-pane" data-tab="chat" id="tab-chat">
+      <div id="chat-empty" class="chat-empty hidden">
+        <div class="chat-empty-emoji">💬</div>
+        <h2>No AI assistant yet.</h2>
+        <p>Install one from <a href="#settings" class="chat-empty-link">Settings</a> to start chatting.</p>
+      </div>
+      <div id="chat-list" class="chat-pod-list hidden">
+        <!-- Populated by tower.js when state.agents.length > 0. One row
+             per pod with a "Talk to this AI" button that opens the pod's
+             OpenClaw UI (same path as the tray's "Open in Browser"). -->
+      </div>
+      <div id="chat-frame-wrap" class="chat-frame-wrap hidden">
+        <iframe id="chat-frame" class="chat-frame" title="Tytus chat" src="about:blank"></iframe>
+      </div>
+    </section>
+
+    <section id="chooser" class="chooser tab-pane" data-tab="settings">
       <div id="budget" class="budget hidden">
         <div class="budget-main">
           <div class="budget-label">Your plan</div>
@@ -70,7 +103,7 @@
       <div id="catalog" class="catalog hidden"></div>
     </section>
 
-    <section id="installing" class="installing hidden">
+    <section id="installing" class="installing tab-pane hidden" data-tab="settings">
       <div class="card installing-card">
         <div class="installing-head">
           <div class="spinner"></div>
@@ -84,7 +117,7 @@
       </div>
     </section>
 
-    <section id="success" class="success hidden">
+    <section id="success" class="success tab-pane hidden" data-tab="settings">
       <div class="success-header">
         <div class="check">✓</div>
         <div>
@@ -143,12 +176,12 @@
       </details>
 
       <div class="row">
-        <button id="install-another" class="btn-secondary">Install another agent</button>
+        <button id="install-another" class="btn-secondary">Install another AI</button>
         <button id="done" class="btn-secondary">Close</button>
       </div>
     </section>
 
-    <section id="failure" class="failure hidden">
+    <section id="failure" class="failure tab-pane hidden" data-tab="settings">
       <div class="card error">
         <h2>Install failed</h2>
         <p id="failure-msg"></p>
@@ -163,14 +196,14 @@
       </div>
     </section>
 
-    <section id="settings" class="settings">
+    <section id="settings" class="settings tab-pane" data-tab="settings">
       <h2 class="settings-title">Settings</h2>
       <div class="settings-row">
         <label class="settings-toggle" for="st-autostart-tunnel">
           <input type="checkbox" id="st-autostart-tunnel">
           <span>Start tunnel at login</span>
         </label>
-        <div class="settings-hint">Bring the WireGuard tunnel up automatically every time you log into this machine.</div>
+        <div class="settings-hint">Connect to your AI automatically every time you log into this machine.</div>
       </div>
       <div class="settings-row">
         <label class="settings-toggle" for="st-autostart-tray">
@@ -180,7 +213,7 @@
         <div class="settings-hint">Open the Tytus menu-bar app when your session starts.</div>
       </div>
       <div class="settings-row">
-        <button id="st-configure" class="btn-secondary" type="button">Configure Agent…</button>
+        <button id="st-configure" class="btn-secondary" type="button">Configure your AI…</button>
         <div class="settings-hint">Interactive overlay editor (model defaults, context window, timeouts). Opens in Terminal.</div>
       </div>
       <div class="settings-row">
@@ -193,16 +226,16 @@
     <!-- Read-only list of bindings + streamed status / conflicts /
          refresh-all actions. Bind stays tray-only because the browser
          sandbox can't surface a real OS folder path. -->
-    <details id="shared-folders" class="troubleshoot">
+    <details id="shared-folders" class="troubleshoot tab-pane" data-tab="files" open>
       <summary class="troubleshoot-summary">Shared Folders</summary>
       <div class="troubleshoot-body">
 
         <!-- ── v0.5.5 grandma flow: Bind a folder ──────────────── -->
         <div class="trouble-row">
-          <div class="trouble-label">Bind a Mac folder</div>
+          <div class="trouble-label">Share a Mac folder</div>
           <div class="trouble-actions">
             <button id="sf-bind-toggle" class="btn-primary" type="button">
-              + Bind a folder…
+              + Share a folder…
             </button>
           </div>
           <div class="settings-hint">
@@ -222,7 +255,7 @@
             </div>
 
             <div class="sf-form-row">
-              <label class="sf-form-label" for="sf-bind-bucket">2. Bucket name on the cloud</label>
+              <label class="sf-form-label" for="sf-bind-bucket">2. Folder name on the cloud</label>
               <input id="sf-bind-bucket" type="text" class="sf-form-input"
                      placeholder="auto-suggested from folder name"
                      pattern="[a-z0-9]([a-z0-9.-]{1,61}[a-z0-9])?"
@@ -253,7 +286,7 @@
 
             <div class="sf-form-actions">
               <button id="sf-bind-submit" class="btn-primary" type="submit" disabled>
-                Bind folder
+                Share folder
               </button>
               <button id="sf-bind-cancel" class="btn-secondary" type="button">
                 Cancel
@@ -305,7 +338,7 @@
         <div class="trouble-row">
           <div class="trouble-label">Cache</div>
           <div class="trouble-actions">
-            <button id="sf-open-cache" class="btn-secondary" type="button">Open ~/.cache/garagetytus</button>
+            <button id="sf-open-cache" class="btn-secondary" type="button">Open sync folder</button>
           </div>
           <div class="settings-hint">Bisync workdir + sidecar binding metadata live here.</div>
         </div>
@@ -313,7 +346,7 @@
       </div>
     </details>
 
-    <details id="troubleshoot" class="troubleshoot">
+    <details id="troubleshoot" class="troubleshoot tab-pane" data-tab="help" open>
       <summary class="troubleshoot-summary">Troubleshoot</summary>
       <div class="troubleshoot-body">
 
@@ -339,14 +372,14 @@
         </section>
 
         <div class="trouble-row">
-          <div class="trouble-label">Daemon</div>
+          <div class="trouble-label">Background service</div>
           <div class="trouble-actions">
             <span id="daemon-status-pill" class="pill">checking…</span>
             <button id="tr-daemon-start" class="btn-secondary" type="button">Start</button>
             <button id="tr-daemon-stop" class="btn-secondary" type="button">Stop</button>
             <button id="tr-daemon-restart" class="btn-secondary" type="button">Restart</button>
           </div>
-          <div class="settings-hint">Background token-refresh process. Stop/restart if auth is stuck.</div>
+          <div class="settings-hint">Refreshes your sign-in in the background. Stop/restart if you can't connect.</div>
         </div>
 
         <div class="trouble-row">
@@ -368,6 +401,24 @@
 
       </div>
     </details>
+
+    <!-- ── Channels tab ────────────────────────────────────────── -->
+    <!-- Lists every pod and links into its per-pod Channels subpage
+         (#/pod/NN/channels). Uses the existing per-pod channels UI
+         that already lives under view-pod. Phase B rc.4 stops here;
+         later rcs can promote add-channel directly into this tab. -->
+    <section class="tab-pane" data-tab="channels" id="tab-channels">
+      <div class="tab-intro">
+        <h2>Your messengers</h2>
+        <p>Connect Telegram, Discord, Slack, iMessage, and more — your AI replies on whichever channel you message it from.</p>
+      </div>
+      <div id="channels-pod-list" class="chat-pod-list">
+        <!-- Populated by tower.js: one row per pod with current
+             channel chips + an "Add channel…" button that opens the
+             per-pod channels picker. -->
+        <div class="settings-hint">No AI assistants yet. Install one from <a href="#settings">Settings</a> first.</div>
+      </div>
+    </section>
 
     <!-- ── Phase B: per-pod subpage ───────────────────────────── -->
     <!-- Shown when location.hash matches #/pod/<NN>/<tab>. Visibility
@@ -395,8 +446,8 @@
                  cmd_test) so they live in the Tower header / Troubleshoot
                  section, not on a per-pod page. -->
             <button id="pod-run-restart"    class="btn-secondary" type="button">Restart</button>
-            <button id="pod-run-stop-fwd"   class="btn-secondary" type="button">Stop forwarder</button>
-            <button id="pod-run-refresh-creds" class="btn-secondary" type="button" title="Rotate this pod's garagetytus shared-folder credentials in place (no pod restart needed)">Refresh creds</button>
+            <button id="pod-run-stop-fwd"   class="btn-secondary" type="button">Stop browser shortcut</button>
+            <button id="pod-run-refresh-creds" class="btn-secondary" type="button" title="Refresh this workspace's shared-folder sign-in (no restart needed)">Refresh sign-in</button>
             <button id="pod-run-uninstall"  class="btn-danger"    type="button">Uninstall</button>
             <button id="pod-run-revoke"     class="btn-danger"    type="button">Revoke</button>
             <span class="pod-output-spacer"></span>
@@ -418,7 +469,7 @@
       <div id="footer-about-panel" class="tower-footer-about hidden">
         <div class="tower-footer-about-row"><span>Tower</span> <code>/tower</code></div>
         <div class="tower-footer-about-row"><span>Bundle</span> <code id="about-bundle">—</code></div>
-        <div class="tower-footer-about-row"><span>Daemon</span> <code id="about-daemon">—</code></div>
+        <div class="tower-footer-about-row"><span>Background service</span> <code id="about-daemon">—</code></div>
         <div class="tower-footer-about-row"><span>Signed in</span> <code id="about-email">—</code></div>
       </div>
     </footer>

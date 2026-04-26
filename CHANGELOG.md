@@ -7,6 +7,109 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.4] — 2026-04-26
+
+Phase B + Phase D Tower-side. Tower converts from a single scrollable
+page with `<details>` collapsibles into a 5-tab SPA with hash-routed
+navigation. The tray's rc.2 deep-links (`open_tower_chat` → `#chat`
+etc.) now land on the right tab.
+
+### Phase B — 5-tab top-nav
+
+- **5 tabs at the top of Tower**: 💬 Chat / 📁 Files / 📨 Channels /
+  ⚙️ Settings / ❓ Help. Each `<a class="tab">` is an `href="#chat"`
+  etc.; hashchange triggers the router which sets
+  `body[data-tab="<id>"]`. CSS rules show only the active tab's
+  `.tab-pane` elements and hide the rest.
+- **Default landing is `#chat`** on every cold open. Empty hash + no
+  prior tab ⇒ Chat. The router defaults gracefully when the hash is
+  unknown (e.g. `#/run/doctor` deep-link) — pod-mode and run-action
+  hashes still take priority because the tab router yields when
+  `body.pod-mode` is set.
+- **Chat tab content (rc.4 minimum)** —
+  - **No agents installed**: empty state with a `Settings →` CTA.
+  - **≥1 agents**: pod list with "Talk to this AI" buttons that load
+    the pod's OpenClaw UI URL (`a.ui_url || a.public_url`) into an
+    embedded iframe. Same URL the tray's "Open in Browser" uses, no
+    new backend. Per SPRINT.md Phase B anti-goal: iframe embed is
+    the SPRINT-blessed path; SSE token streaming is a future rc.
+- **Files tab content**: existing Shared Folders details section,
+  re-parented into the Files tab. Push/pull (per-pod transfers) defer
+  to a later rc.
+- **Channels tab content**: stub linking each agent into its existing
+  per-pod Channels subpage (`#/pod/NN/channels`). Lift-the-picker-up
+  defer.
+- **Settings tab content**: existing Settings (autostart toggles,
+  Configure your AI, Sign Out) + chooser/installing/success/failure
+  install flow (all `data-tab="settings"`). The chooser remains
+  inline in this rc — the chooser-as-modal pattern from SPRINT.md is
+  defer.
+- **Help tab content**: existing Troubleshoot details — Doctor,
+  Background service controls, log viewer.
+- **Tab nav hides during pod-mode** — `body.pod-mode` is set when
+  the user is on a `#/pod/NN/...` deep-link. The pod subpage has its
+  own per-pod tabs; the global tab nav disappears via CSS.
+
+### Phase D — Tower-side renames (per locked verdict)
+
+Now that Tower's primary surfaces are stable, applied the locked
+HYBRID/C verdict from `verdicts/Q1-VOCAB-LOCKED.md`:
+
+- **Header brand** "Tytus Tower" → "Tytus" (with subtitle change).
+- **Subtitle** "Your private AI pods, agents, and connections." →
+  "Chat, share files, and manage your AI assistant."
+- **Header button** "Run Health Test" → "Run health test"
+  (sentence case).
+- **Settings tab**:
+  - "Configure Agent…" → "Configure your AI…"
+  - autostart-tunnel hint "Bring the WireGuard tunnel up
+    automatically…" → "Connect to your AI automatically…"
+- **Files tab (Shared Folders form)**:
+  - "+ Bind a folder…" button → "+ Share a folder…"
+  - "Bind a Mac folder" label → "Share a Mac folder"
+  - "Bucket name on the cloud" → "Folder name on the cloud"
+  - "Bind folder" submit → "Share folder"
+  - "Open ~/.cache/garagetytus" button → "Open sync folder"
+- **Per-pod Output toolbar**:
+  - "Stop forwarder" → "Stop browser shortcut"
+  - "Refresh creds" → "Refresh sign-in"
+- **Help tab (Troubleshoot)**:
+  - "Daemon" label → "Background service"
+  - hint "Background token-refresh process. Stop/restart if auth
+    is stuck." → "Refreshes your sign-in in the background.
+    Stop/restart if you can't connect."
+- **Footer About panel**:
+  - "Daemon" row label → "Background service"
+- **Success-screen**:
+  - "Install another agent" button → "Install another AI"
+
+### Backwards compat
+
+- **Every existing element ID is preserved.** `#chooser`, `#installing`,
+  `#success`, `#failure`, `#settings`, `#shared-folders`,
+  `#troubleshoot`, `#view-pod`, all per-pod IDs. Only `class` and
+  `data-tab` attributes added; element identities unchanged.
+- **Existing JS handlers** (loadCatalog, view.show, viewPod, etc.) all
+  continue to work — they bind to IDs, not classes.
+- **CSS additions** are scoped to new selectors (`.tabs`, `.tab`,
+  `.tab-pane`, `.chat-*`, `.tab-intro`, `body[data-tab=...]`); zero
+  edits to existing rules.
+- **Internal Rust** unchanged from rc.3 (web_server.rs untouched —
+  Tower assets are baked via `include_bytes!`, just the bytes
+  changed).
+- 74/74 workspace tests green.
+
+### Files touched
+
+- `tray/web/tower.html` — 5-tab nav + tab-pane wrappers + Chat tab
+  + Channels tab stub + Phase D Tower-side renames
+- `tray/web/assets/tower.css` — tab nav styles + body[data-tab=]
+  visibility rules + Chat/Channels tab pane styles (~150 LOC added)
+- `tray/web/assets/tower.js` — tab router IIFE + Chat/Channels
+  render functions (~120 LOC added)
+- `Cargo.toml` — workspace version bump to `0.6.0-rc.4`
+- `CHANGELOG.md` — this entry
+
 ## [0.6.0-rc.3] — 2026-04-26
 
 Phase D — vocabulary normalization, partial. Applies the locked

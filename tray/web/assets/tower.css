@@ -2133,3 +2133,164 @@ body.pod-mode #troubleshoot {
   justify-content: flex-end;
   padding-top: 4px;
 }
+
+/* ============================================================
+ * Phase B — 5-tab top nav
+ * ============================================================
+ * Hash-routed tabs (Chat / Files / Channels / Settings / Help).
+ * Tower's hashchange listener toggles `body[data-tab="<id>"]`;
+ * CSS rules below show only the matching `.tab-pane` and hide
+ * the rest. Per-pod subpages (`body.pod-mode`) keep their own
+ * visibility flow — the tab system just yields when pod-mode is
+ * active. Documentation/about footer + #view-pod stay visible
+ * regardless of tab state.
+ * ============================================================ */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 18px 0;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.tabs .tab {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: center;
+  text-decoration: none;
+  color: var(--muted);
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+  user-select: none;
+}
+
+.tabs .tab:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+
+body[data-tab="chat"]     .tabs .tab[data-tab="chat"],
+body[data-tab="files"]    .tabs .tab[data-tab="files"],
+body[data-tab="channels"] .tabs .tab[data-tab="channels"],
+body[data-tab="settings"] .tabs .tab[data-tab="settings"],
+body[data-tab="help"]     .tabs .tab[data-tab="help"] {
+  background: var(--accent-soft);
+  color: var(--fg);
+  border: 1px solid rgba(136, 0, 255, 0.4);
+  padding: 8px 13px; /* adjust for the +1px border */
+}
+
+.tab-emoji {
+  display: inline-block;
+  margin-right: 4px;
+  font-size: 1.05em;
+}
+
+/* Hide every tab-pane except the active one. Per-pod mode
+ * (#view-pod) is body.pod-mode-driven and not gated here. */
+body[data-tab="chat"]     .tab-pane:not([data-tab="chat"])     { display: none !important; }
+body[data-tab="files"]    .tab-pane:not([data-tab="files"])    { display: none !important; }
+body[data-tab="channels"] .tab-pane:not([data-tab="channels"]) { display: none !important; }
+body[data-tab="settings"] .tab-pane:not([data-tab="settings"]) { display: none !important; }
+body[data-tab="help"]     .tab-pane:not([data-tab="help"])     { display: none !important; }
+
+/* Hide the tab nav itself when pod-mode (per-pod subpage) is active —
+ * pod-mode has its own pod-tabs nav. */
+body.pod-mode .tabs { display: none; }
+
+/* ── Chat tab pane ─────────────────────────────────────────── */
+
+.chat-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--muted);
+}
+.chat-empty-emoji {
+  font-size: 56px;
+  margin-bottom: 18px;
+  opacity: 0.7;
+}
+.chat-empty h2 {
+  color: var(--fg);
+  margin: 0 0 6px 0;
+  font-size: 1.4rem;
+}
+.chat-empty-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+.chat-empty-link:hover { text-decoration: underline; }
+
+.chat-pod-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0;
+}
+.chat-pod-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.chat-pod-row-name {
+  font-weight: 600;
+  color: var(--fg);
+  flex: 0 0 auto;
+}
+.chat-pod-row-agent {
+  color: var(--muted);
+  flex: 1 1 auto;
+  font-size: 0.95em;
+}
+.chat-pod-row-cta {
+  flex: 0 0 auto;
+}
+
+.chat-frame-wrap {
+  width: 100%;
+  height: calc(100vh - 220px);
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+.chat-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+}
+
+/* ── Channels tab pane ─────────────────────────────────────── */
+
+.tab-intro {
+  margin: 8px 0 18px 0;
+}
+.tab-intro h2 {
+  color: var(--fg);
+  margin: 0 0 4px 0;
+  font-size: 1.4rem;
+}
+.tab-intro p {
+  color: var(--muted);
+  margin: 0;
+  font-size: 0.95rem;
+}

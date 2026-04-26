@@ -308,6 +308,152 @@
     else __pendingHash = location.hash;
   });
 
+  // ── Phase B: 5-tab top-nav router ──────────────────────────────
+  //
+  // Tower's primary surfaces are now five tabs: Chat / Files / Channels
+  // / Settings / Help. Hash-routed: `#chat`, `#files`, `#channels`,
+  // `#settings`, `#help`. The tray's rc.2 deep-links (`open_tower_chat`
+  // → `#chat`, etc.) consume the same hashes. Default landing is
+  // `#chat` on cold open.
+  //
+  // Per-pod subpages (`#/pod/NN/...`) keep their own visibility flow
+  // via `body.pod-mode` (see __maybeMountPodView below). When pod-mode
+  // is active, the tab nav hides via CSS rule and tab routing yields.
+  //
+  // Install flow's `view.show()` (chooser/installing/success/failure)
+  // is independent of the tab router — those four sections all carry
+  // `data-tab="settings"` so they only render while the user is on the
+  // Settings tab.
+  const __TABS = new Set(['chat', 'files', 'channels', 'settings', 'help']);
+  function __currentTabFromHash(hash) {
+    if (!hash) return null;
+    const m = hash.match(/^#([a-z]+)/);
+    if (!m) return null;
+    return __TABS.has(m[1]) ? m[1] : null;
+  }
+  function __applyTabFromHash() {
+    // Skip while a per-pod subpage is showing — pod-mode owns the view.
+    if (document.body.classList.contains('pod-mode')) return;
+    const tab = __currentTabFromHash(location.hash);
+    if (tab) {
+      document.body.dataset.tab = tab;
+      __onTabActivated(tab);
+    } else {
+      // Empty / unknown hash → land on the default tab. Don't push to
+      // location.hash here — leaving it empty lets pod-mode hashes
+      // (which can arrive before this listener runs) win.
+      const def = document.body.dataset.tab && __TABS.has(document.body.dataset.tab)
+        ? document.body.dataset.tab
+        : 'chat';
+      document.body.dataset.tab = def;
+      __onTabActivated(def);
+    }
+  }
+  function __onTabActivated(tab) {
+    if (tab === 'chat')     __renderChatTab();
+    if (tab === 'channels') __renderChannelsTab();
+  }
+  window.addEventListener('hashchange', __applyTabFromHash);
+  window.addEventListener('state-ready', __applyTabFromHash);
+  // Apply once at load too — hashchange doesn't fire on initial parse.
+  __applyTabFromHash();
+
+  // ── Chat tab content ───────────────────────────────────────────
+  // Two states:
+  //   1. No installed agents → empty state with "Install one from
+  //      Settings" CTA.
+  //   2. ≥1 installed agents → list rows, each with a "Talk to this AI"
+  //      button. Clicking renders the pod's OpenClaw UI in the
+  //      embedded iframe (same URL the tray's "Open in Browser" uses).
+  //
+  // SSE-streamed token output is a future rc; for v0.6.0 the iframe
+  // path lands the SPRINT acceptance bar ("send first chat ≤60s") by
+  // surfacing the existing chat surface inside Tower's chat tab.
+  let __chatRendered = false;
+  let __chatActivePod = null;
+  function __renderChatTab() {
+    const empty = document.getElementById('chat-empty');
+    const list  = document.getElementById('chat-list');
+    const wrap  = document.getElementById('chat-frame-wrap');
+    const frame = document.getElementById('chat-frame');
+    if (!empty || !list || !wrap || !frame) return;
+    const agents = (budgetState && budgetState.agents) || [];
+    if (agents.length === 0) {
+      empty.classList.remove('hidden');
+      list.classList.add('hidden');
+      wrap.classList.add('hidden');
+      return;
+    }
+    empty.classList.add('hidden');
+    if (__chatActivePod) {
+      // Iframe is showing — keep it. List stays hidden until user
+      // explicitly closes the chat or comes back to Chat tab fresh.
+      list.classList.add('hidden');
+      wrap.classList.remove('hidden');
+      return;
+    }
+    // Render pod list. One row per agent.
+    list.classList.remove('hidden');
+    wrap.classList.add('hidden');
+    list.innerHTML = '';
+    for (const a of agents) {
+      const row = document.createElement('div');
+      row.className = 'chat-pod-row';
+      const name = (DISPLAY[a.agent_type] && DISPLAY[a.agent_type].display_name) || a.agent_type || 'AI assistant';
+      row.innerHTML = `
+        <div class="chat-pod-row-name">Pod ${a.pod_id}</div>
+        <div class="chat-pod-row-agent">${name}</div>
+        <button class="btn-primary chat-pod-row-cta" type="button">Talk to this AI</button>
+      `;
+      row.querySelector('.chat-pod-row-cta').addEventListener('click', () => {
+        __openChatForPod(a);
+      });
+      list.appendChild(row);
+    }
+    if (!__chatRendered) __chatRendered = true;
+  }
+  function __openChatForPod(a) {
+    const url = a.ui_url || a.public_url || null;
+    if (!url) {
+      showToast('No chat URL for this pod yet — try Refresh creds in Settings.', 'err');
+      return;
+    }
+    __chatActivePod = a.pod_id;
+    const list  = document.getElementById('chat-list');
+    const wrap  = document.getElementById('chat-frame-wrap');
+    const frame = document.getElementById('chat-frame');
+    if (list)  list.classList.add('hidden');
+    if (wrap)  wrap.classList.remove('hidden');
+    if (frame) frame.src = url;
+  }
+
+  // ── Channels tab content ───────────────────────────────────────
+  // One row per agent, each links into the per-pod Channels subpage
+  // (`#/pod/NN/channels`) where the existing add-channel flow lives.
+  // Phase B rc.4 uses this stub; later rcs can lift the per-pod
+  // channels picker UI directly into this tab without a hop.
+  function __renderChannelsTab() {
+    const host = document.getElementById('channels-pod-list');
+    if (!host) return;
+    const agents = (budgetState && budgetState.agents) || [];
+    if (agents.length === 0) {
+      host.innerHTML = `<div class="settings-hint">No AI assistants yet. Install one from <a href="#settings">Settings</a> first.</div>`;
+      return;
+    }
+    host.innerHTML = '';
+    for (const a of agents) {
+      const row = document.createElement('div');
+      row.className = 'chat-pod-row';
+      const name = (DISPLAY[a.agent_type] && DISPLAY[a.agent_type].display_name) || a.agent_type || 'AI assistant';
+      row.innerHTML = `
+        <div class="chat-pod-row-name">Pod ${a.pod_id}</div>
+        <div class="chat-pod-row-agent">${name}</div>
+        <a href="#/pod/${encodeURIComponent(a.pod_id)}/channels" class="btn-primary chat-pod-row-cta">Manage channels</a>
+      `;
+      host.appendChild(row);
+    }
+  }
+
   // ── Phase B: per-pod subpage (viewPod) ────────────────────────
   //
   // Hash routes:
