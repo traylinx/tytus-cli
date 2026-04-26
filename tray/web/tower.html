@@ -197,15 +197,78 @@
       <summary class="troubleshoot-summary">Shared Folders</summary>
       <div class="troubleshoot-body">
 
+        <!-- ── v0.5.5 grandma flow: Bind a folder ──────────────── -->
+        <div class="trouble-row">
+          <div class="trouble-label">Bind a Mac folder</div>
+          <div class="trouble-actions">
+            <button id="sf-bind-toggle" class="btn-primary" type="button">
+              + Bind a folder…
+            </button>
+          </div>
+          <div class="settings-hint">
+            Pick a Mac folder + give it a bucket name. Tytus does the rest.
+            The folder syncs to your pod automatically; agents read &amp; write it
+            with no setup.
+          </div>
+
+          <form id="sf-bind-form" class="sf-bind-form hidden" autocomplete="off">
+            <div class="sf-form-row">
+              <label class="sf-form-label" for="sf-bind-path">1. Pick a folder on your Mac</label>
+              <div class="sf-form-input-row">
+                <button id="sf-bind-pick" class="btn-secondary" type="button">Choose folder…</button>
+                <input id="sf-bind-path" type="text" class="sf-form-input sf-form-input-readonly"
+                       readonly placeholder="(no folder picked yet)">
+              </div>
+            </div>
+
+            <div class="sf-form-row">
+              <label class="sf-form-label" for="sf-bind-bucket">2. Bucket name on the cloud</label>
+              <input id="sf-bind-bucket" type="text" class="sf-form-input"
+                     placeholder="auto-suggested from folder name"
+                     pattern="[a-z0-9]([a-z0-9.-]{1,61}[a-z0-9])?"
+                     maxlength="63" minlength="3">
+              <div class="settings-hint">
+                Lowercase letters, numbers, dots, hyphens. 3–63 characters.
+                Must start &amp; end with a letter or number.
+              </div>
+            </div>
+
+            <div class="sf-form-row">
+              <label class="sf-form-label">3. Share with which pods?</label>
+              <div id="sf-bind-pods" class="sf-bind-pods">
+                <span class="settings-hint">No pods active yet — install one from the Pods view first.</span>
+              </div>
+              <div class="settings-hint">
+                Click each pod to share with it. Each gets its own credentials —
+                no shared keys.
+              </div>
+            </div>
+
+            <div class="sf-form-row">
+              <label class="sf-form-checkbox">
+                <input id="sf-bind-autosync" type="checkbox" checked>
+                Auto-sync every 60 seconds (recommended)
+              </label>
+            </div>
+
+            <div class="sf-form-actions">
+              <button id="sf-bind-submit" class="btn-primary" type="submit" disabled>
+                Bind folder
+              </button>
+              <button id="sf-bind-cancel" class="btn-secondary" type="button">
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+
         <div class="trouble-row">
           <div class="trouble-label">Active bindings</div>
           <div id="sf-bindings" class="trouble-actions sf-bindings">
             <span class="settings-hint">Loading…</span>
           </div>
           <div class="settings-hint">
-            Each row is one folder bound by <code>garagetytus folder bind</code>.
-            Click to open in Finder. Bindings are local; bind from the menu-bar tray
-            (or the CLI) since the browser sandbox can't pick a real folder path.
+            Each row is one bound folder. Click to open in Finder.
           </div>
         </div>
 

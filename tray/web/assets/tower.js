@@ -2605,6 +2605,201 @@
     }
   });
 
+  // ── Bind a folder (v0.5.5 grandma flow) ────────────────────────
+  // One-button → native macOS folder picker → auto-suggest bucket name
+  // → pod toggle chips → Bind. Bucket name validated client-side AND
+  // server-side; pod IDs whitelisted server-side; all argv passed via
+  // Command::arg (no shell, no injection). Successful bind streams
+  // into sf-panel and auto-refreshes the bindings list.
+  function suggestBucketName(localPath) {
+    if (!localPath) return '';
+    const base = localPath.split('/').filter(Boolean).pop() || '';
+    return base
+      .toLowerCase()
+      .replace(/[^a-z0-9.-]/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 63);
+  }
+
+  function refreshSfBindFormState() {
+    const path = $('sf-bind-path')?.value || '';
+    const bucket = $('sf-bind-bucket')?.value || '';
+    const bucketRe = /^[a-z0-9]([a-z0-9.-]{1,61}[a-z0-9])?$/;
+    const ok = path !== '' && bucketRe.test(bucket);
+    const submit = $('sf-bind-submit');
+    if (submit) submit.disabled = !ok;
+  }
+
+  async function refreshSfBindPods() {
+    const host = $('sf-bind-pods');
+    if (!host) return;
+    let pods = [];
+    try {
+      const s = await (await fetch('/api/state')).json();
+      pods = (s && s.agents) || [];
+    } catch {}
+    if (pods.length === 0) {
+      host.innerHTML = '<span class="settings-hint">No pods active yet — install one from the Pods view first.</span>';
+      return;
+    }
+    host.innerHTML = '';
+    pods.forEach((p) => {
+      const id = p.pod_id || '';
+      const label = p.agent_type ? `pod-${id} (${p.agent_type})` : `pod-${id}`;
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'sf-pod-chip';
+      chip.dataset.podId = id;
+      chip.textContent = label;
+      chip.addEventListener('click', () => {
+        chip.classList.toggle('checked');
+      });
+      host.appendChild(chip);
+    });
+  }
+
+  function resetSfBindForm() {
+    const path = $('sf-bind-path');     if (path) path.value = '';
+    const bucket = $('sf-bind-bucket'); if (bucket) bucket.value = '';
+    const sync = $('sf-bind-autosync'); if (sync) sync.checked = true;
+    document.querySelectorAll('.sf-pod-chip.checked')
+      .forEach((c) => c.classList.remove('checked'));
+    refreshSfBindFormState();
+  }
+
+  $('sf-bind-toggle')?.addEventListener('click', async () => {
+    const form = $('sf-bind-form');
+    if (!form) return;
+    const willOpen = form.classList.contains('hidden');
+    form.classList.toggle('hidden');
+    if (willOpen) {
+      resetSfBindForm();
+      await refreshSfBindPods();
+    }
+  });
+
+  $('sf-bind-cancel')?.addEventListener('click', () => {
+    $('sf-bind-form')?.classList.add('hidden');
+  });
+
+  $('sf-bind-pick')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const prev = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Choosing…';
+    try {
+      const res = await fetch('/api/shared-folders/pick-folder', { method: 'POST' });
+      const body = await res.json();
+      if (body.cancelled) return;  // user dismissed picker
+      if (!res.ok) {
+        showToast(body.error || `Picker failed (${res.status})`, 'err');
+        return;
+      }
+      const path = body.path || '';
+      const pathInput = $('sf-bind-path');
+      if (pathInput) pathInput.value = path;
+      // Auto-fill bucket name only if user hasn't typed one yet
+      const bucketInput = $('sf-bind-bucket');
+      if (bucketInput && !bucketInput.value) {
+        bucketInput.value = suggestBucketName(path);
+      }
+      refreshSfBindFormState();
+    } catch (err) {
+      showToast(`Picker: ${err}`, 'err');
+    } finally {
+      btn.disabled = false; btn.textContent = prev;
+    }
+  });
+
+  $('sf-bind-bucket')?.addEventListener('input', refreshSfBindFormState);
+  $('sf-bind-path')?.addEventListener('change', refreshSfBindFormState);
+
+  $('sf-bind-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const submit = $('sf-bind-submit');
+    const cancel = $('sf-bind-cancel');
+    const local_path = $('sf-bind-path')?.value || '';
+    const bucket    = $('sf-bind-bucket')?.value || '';
+    const auto_sync = !!$('sf-bind-autosync')?.checked;
+    const pods = Array.from(document.querySelectorAll('.sf-pod-chip.checked'))
+      .map((c) => c.dataset.podId)
+      .filter(Boolean);
+    if (!local_path || !bucket) {
+      showToast('Pick a folder + name a bucket first', 'err');
+      return;
+    }
+    if (submit) { submit.disabled = true; submit.textContent = 'Binding…'; }
+    if (cancel) cancel.disabled = true;
+
+    // Pop the streaming panel so user sees progress
+    const panel = $('sf-panel');
+    const title = $('sf-panel-title');
+    const log = $('sf-panel-log');
+    if (panel && title && log) {
+      panel.classList.remove('hidden', 'ok', 'err');
+      title.textContent = `Binding ${local_path.split('/').filter(Boolean).pop()} ↔ ${bucket}…`;
+      log.textContent = '';
+    }
+
+    let res, body;
+    try {
+      res = await fetch('/api/shared-folders/bind', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ local_path, bucket, pods, auto_sync }),
+      });
+      body = await res.json();
+    } catch (err) {
+      if (panel && title && log) {
+        panel.classList.add('err');
+        title.textContent = 'Bind request failed';
+        log.textContent = String(err);
+      }
+      if (submit) { submit.disabled = false; submit.textContent = 'Bind folder'; }
+      if (cancel) cancel.disabled = false;
+      return;
+    }
+    if (!res.ok || !body.job_id) {
+      if (panel && title && log) {
+        panel.classList.add('err');
+        title.textContent = `Bind rejected (HTTP ${res.status})`;
+        log.textContent = (body && body.error) || JSON.stringify(body);
+      }
+      if (submit) { submit.disabled = false; submit.textContent = 'Bind folder'; }
+      if (cancel) cancel.disabled = false;
+      return;
+    }
+    const es = new EventSource(`/api/jobs/${encodeURIComponent(body.job_id)}/stream`);
+    es.addEventListener('log', (ev) => {
+      const line = (ev.data || '').replace(/\\n/g, '\n');
+      if (log) { log.textContent += line + '\n'; log.scrollTop = log.scrollHeight; }
+    });
+    es.addEventListener('exit', (ev) => {
+      let code = -1;
+      try { code = (JSON.parse(ev.data || '{}').code) ?? -1; } catch {}
+      if (panel) panel.classList.add(code === 0 ? 'ok' : 'err');
+      if (title) title.textContent = code === 0
+        ? `Bound ${bucket} ↔ ${local_path} ✓`
+        : `Bind failed (exit ${code})`;
+      es.close();
+      if (submit) { submit.disabled = false; submit.textContent = 'Bind folder'; }
+      if (cancel) cancel.disabled = false;
+      if (code === 0) {
+        // Hide the form, refresh the list, and gently flash the new row
+        $('sf-bind-form')?.classList.add('hidden');
+        resetSfBindForm();
+        refreshSharedFoldersList();
+      }
+    });
+    es.addEventListener('fail', (ev) => {
+      if (panel) panel.classList.add('err');
+      if (title) title.textContent = 'Bind failed';
+      if (log) log.textContent += `\n[error] ${ev.data || 'job failed'}`;
+      es.close();
+      if (submit) { submit.disabled = false; submit.textContent = 'Bind folder'; }
+      if (cancel) cancel.disabled = false;
+    });
+  });
+
   // Refresh the bindings list whenever the Shared Folders details opens
   // and at a slow background cadence while it stays open.
   let sfTimer = null;

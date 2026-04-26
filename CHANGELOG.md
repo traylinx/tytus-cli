@@ -7,6 +7,45 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-04-26
+
+The grandma flow. Tower can now bind a Mac folder end-to-end —
+without the user typing a single path. Native macOS folder picker,
+auto-suggested bucket name, pod toggle chips, server-side validation
+of every input, all argv via `Command::arg` (no shell, no injection).
+
+- **"+ Bind a folder…" button** at the top of the Shared Folders
+  section expands a 4-step form:
+    1. Choose folder…   → triggers a native macOS folder picker
+       via the new `POST /api/shared-folders/pick-folder` endpoint
+       (osascript bridge to `choose folder with prompt …`). User
+       can't fat-finger a path because none is typed.
+    2. Bucket name      → auto-suggested from the folder basename
+       (lowercased + sanitized + truncated to 63 chars). Live
+       client-side regex validation (Garage rules: 3-63 chars,
+       lowercase alnum + dot + hyphen, alnum endpoints) gates
+       the Submit button.
+    3. Pod toggle chips → enumerated from `/api/state.agents`.
+       Click each pod to share with it (each gets its own per-pod
+       Garage credentials — no shared keys).
+    4. Auto-sync checkbox (default ON) → adds `--auto-sync` to the
+       spawn so the launchd polling pipeline starts immediately.
+- **Submit streams into the existing `sf-panel`** so the user sees
+  every phase (bucket create, key mint, rclone setup, initial
+  bisync, pod provision per `--to`). On exit code 0: form hides,
+  bindings list auto-refreshes, new row appears.
+- **Server-side hardening** (defence-in-depth alongside client
+  regex):
+  - `local_path` rejected unless absolute + exists + is a directory.
+  - Bucket name rejected unless it matches the Garage regex.
+  - Pod IDs rejected unless `^\d{1,3}$`.
+  - Returns 400 with a specific `error` field; UI surfaces the
+    message as a toast.
+- New `POST /api/shared-folders/bind` (body
+  `{local_path, bucket, pods, auto_sync}`) returns `{job_id}` and
+  spawns `garagetytus-folder-bind <local> <bucket> [--to N]…
+  [--auto-sync]` via the v0.5.4 `spawn_external_command` helper.
+
 ## [0.5.4] — 2026-04-26
 
 Tower learns about garagetytus shared folders. Read-only parity

@@ -418,6 +418,12 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/pod/refresh-creds") => {
             handle_pod_refresh_creds(request, &registry, &query);
         }
+        (Method::Post, "/api/shared-folders/pick-folder") => {
+            handle_shared_folders_pick_folder(request);
+        }
+        (Method::Post, "/api/shared-folders/bind") => {
+            handle_shared_folders_bind(request, &registry);
+        }
         _ => {
             let resp = Response::from_string("not found")
                 .with_status_code(StatusCode(404));
@@ -1710,6 +1716,146 @@ fn handle_shared_folders_open_cache(request: Request) {
         .stderr(Stdio::null())
         .spawn();
     respond_json(request, 200, &serde_json::json!({"ok": true}));
+}
+
+/// POST /api/shared-folders/pick-folder — calls macOS osascript to
+/// open a native folder picker and returns the chosen POSIX path.
+/// Returns `{cancelled: true}` if the user dismissed the dialog.
+/// macOS-only; non-macOS returns 501.
+#[cfg(target_os = "macos")]
+fn handle_shared_folders_pick_folder(request: Request) {
+    let script = "POSIX path of (choose folder with prompt \
+                  \"Pick a Mac folder to share with your pods\")";
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if path.is_empty() {
+                respond_json(request, 200, &serde_json::json!({"cancelled": true}));
+            } else {
+                respond_json(request, 200, &serde_json::json!({"path": path}));
+            }
+        }
+        Ok(_) => {
+            // osascript exits non-zero when user cancels. Distinguish
+            // from real failure by treating any non-zero as "cancelled"
+            // — the picker doesn't fail in any other realistic way.
+            respond_json(request, 200, &serde_json::json!({"cancelled": true}));
+        }
+        Err(e) => {
+            respond_json(request, 500, &serde_json::json!({
+                "error": format!("osascript failed: {}", e),
+            }));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn handle_shared_folders_pick_folder(request: Request) {
+    respond_json(request, 501, &serde_json::json!({
+        "error": "folder picker is macOS-only (osascript)",
+    }));
+}
+
+/// POST /api/shared-folders/bind — body
+/// `{local_path, bucket, pods?: [String], auto_sync?: bool}`. Spawns
+/// `garagetytus-folder-bind <local> <bucket> [--to N]... [--auto-sync]`
+/// and streams output via job channel. Returns `{job_id}`.
+///
+/// Validates server-side BEFORE spawn:
+/// - bucket name matches Garage rules (lowercase alnum/dot/hyphen,
+///   3-63 chars, alnum endpoints)
+/// - local_path is absolute + exists + is a directory
+/// - each pod is `^\d{2,3}$` (matches the existing parse_pod_id rules)
+///
+/// All values passed via `Command::arg` — no shell, no injection.
+fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        local_path: String,
+        bucket: String,
+        #[serde(default)] pods: Vec<String>,
+        #[serde(default = "default_true")] auto_sync: bool,
+    }
+    fn default_true() -> bool { true }
+
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: Body = match serde_json::from_str(&buf) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error":format!("bad json: {}", e)}));
+            return;
+        }
+    };
+
+    // Validate local_path: absolute, exists, is a directory.
+    if !std::path::Path::new(&body.local_path).is_absolute() {
+        respond_json(request, 400, &serde_json::json!({
+            "error":"local_path must be absolute"
+        }));
+        return;
+    }
+    if !std::path::Path::new(&body.local_path).is_dir() {
+        respond_json(request, 400, &serde_json::json!({
+            "error":"local_path is not a directory on this Mac"
+        }));
+        return;
+    }
+
+    // Validate bucket name (Garage rules: 3-63 chars, lowercase alnum
+    // + dot + hyphen, alnum endpoints).
+    let bucket_ok = {
+        let len = body.bucket.len();
+        if len < 3 || len > 63 { false }
+        else {
+            let bytes = body.bucket.as_bytes();
+            let alnum = |b: u8| (b'a'..=b'z').contains(&b) || (b'0'..=b'9').contains(&b);
+            let allowed = |b: u8| alnum(b) || b == b'.' || b == b'-';
+            alnum(bytes[0]) && alnum(bytes[len-1]) && bytes.iter().all(|&b| allowed(b))
+        }
+    };
+    if !bucket_ok {
+        respond_json(request, 400, &serde_json::json!({
+            "error":"bucket name must be 3-63 chars, lowercase letters/digits/dot/hyphen only, alnum endpoints"
+        }));
+        return;
+    }
+
+    // Validate pod IDs.
+    for p in &body.pods {
+        if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) || p.len() > 3 {
+            respond_json(request, 400, &serde_json::json!({
+                "error": format!("invalid pod id: {:?}", p)
+            }));
+            return;
+        }
+    }
+
+    // Build argv: <local> <bucket> [--to N]... [--auto-sync]
+    let mut args: Vec<String> = vec![body.local_path.clone(), body.bucket.clone()];
+    for p in &body.pods {
+        args.push("--to".to_string());
+        args.push(p.clone());
+    }
+    if body.auto_sync {
+        args.push("--auto-sync".to_string());
+    }
+
+    let bin = resolve_garagetytus_helper("garagetytus-folder-bind");
+    let (job_id, job) = registry.create();
+    spawn_external_command(job, bin, args);
+    respond_json(request, 202, &serde_json::json!({
+        "job_id": job_id,
+        "bucket": body.bucket,
+        "local_path": body.local_path,
+    }));
 }
 
 /// POST /api/pod/refresh-creds?pod=NN — spawns

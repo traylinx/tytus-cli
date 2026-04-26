@@ -2035,3 +2035,101 @@ body.pod-mode #troubleshoot {
   padding: 0;
   margin: 0;
 }
+
+/* ── v0.5.4: Shared Folders bindings list ──────────────────── */
+.sf-bindings {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sf-binding-row {
+  text-align: left;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sf-binding-row strong { font-weight: 600; }
+.sf-arrow { opacity: 0.6; padding: 0 4px; }
+.sf-path { opacity: 0.85; font-family: var(--mono, monospace); font-size: 0.95em; }
+.sf-pods { opacity: 0.6; font-size: 0.85em; padding-left: 8px; }
+
+/* ── v0.5.5: Bind-a-folder grandma form ───────────────────── */
+.sf-bind-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.06);
+}
+.sf-bind-form.hidden { display: none; }
+.sf-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sf-form-label {
+  font-weight: 600;
+  font-size: 0.95em;
+}
+.sf-form-input {
+  padding: 8px 10px;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.95em;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+}
+.sf-form-input:invalid {
+  border-color: #c46;
+}
+.sf-form-input-readonly {
+  background: rgba(127, 127, 127, 0.08);
+  color: inherit;
+  flex: 1;
+}
+.sf-form-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.sf-bind-pods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sf-pod-chip {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.9em;
+  transition: background 0.15s, border-color 0.15s;
+}
+.sf-pod-chip:hover {
+  border-color: rgba(127, 127, 127, 0.7);
+}
+.sf-pod-chip.checked {
+  background: rgba(80, 160, 240, 0.18);
+  border-color: rgba(80, 160, 240, 0.7);
+}
+.sf-form-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.sf-form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
