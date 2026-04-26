@@ -1,0 +1,73 @@
+#!/bin/sh
+# ============================================================
+# Tytus.pkg postinstall — drops Tytus.app + LaunchAgent for the user.
+# ============================================================
+# This runs as root via macOS Installer. The .app bundle + LaunchAgent
+# need to land in the *user's* home, not /var/root. Identify the user
+# via the console owner, then invoke `tytus tray install` as them.
+#
+# `tytus tray install` (cli/src/main.rs::cmd_tray) looks up
+# /usr/local/bin/tytus-tray, copies it into /Applications/Tytus.app,
+# writes ~/Library/LaunchAgents/com.traylinx.tytus.tray.plist, and
+# starts the tray. Idempotent across reruns.
+# ============================================================
+
+set -e
+
+LOG=/tmp/tytus-postinstall.log
+echo "[tytus-postinstall] started $(date)" >>"$LOG"
+
+# Resolve the target user. /dev/console is owned by the user who is
+# logged in to the GUI session — this is the macOS-conventional way
+# to find "the user who triggered the install" from a root-running
+# postinstall script.
+TARGET_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
+if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
+    # Fallback: look at the user who owns the install target dir.
+    if [ -n "${USER:-}" ] && [ "$USER" != "root" ]; then
+        TARGET_USER="$USER"
+    else
+        echo "[tytus-postinstall] could not determine target user — leaving .app uninstalled" >>"$LOG"
+        echo "Tytus binaries installed. Run: tytus tray install" >&2
+        exit 0
+    fi
+fi
+
+TARGET_HOME=$(dscl . -read "/Users/$TARGET_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+if [ -z "$TARGET_HOME" ]; then
+    TARGET_HOME="/Users/$TARGET_USER"
+fi
+
+echo "[tytus-postinstall] target user=$TARGET_USER home=$TARGET_HOME" >>"$LOG"
+
+# Run the tray installer as the target user. /usr/local/bin/tytus
+# was just dropped by the .pkg payload step.
+if [ -x /usr/local/bin/tytus ]; then
+    sudo -u "$TARGET_USER" -H \
+        /usr/local/bin/tytus tray install \
+        >>"$LOG" 2>&1 || true
+    echo "[tytus-postinstall] tray install exit=$?" >>"$LOG"
+else
+    echo "[tytus-postinstall] /usr/local/bin/tytus not found after payload — package may be malformed" >>"$LOG"
+fi
+
+# sudoers entry for `tytus connect` is set up by the install.sh path.
+# For .pkg installs we ship the same file directly so the user never
+# has to type their password to bring the tunnel up. The /etc/sudoers.d
+# file is owned by root:wheel mode 0440 per macOS rules.
+SUDOERS_FILE=/etc/sudoers.d/tytus
+if [ ! -f "$SUDOERS_FILE" ]; then
+    cat > "$SUDOERS_FILE" <<EOF
+# Installed by Tytus.pkg postinstall — tightly scoped sudoers entry so
+# \`tytus connect\` can bring the WireGuard tunnel up without a password
+# prompt. Same surface install.sh creates. Remove with:
+#   sudo rm /etc/sudoers.d/tytus
+$TARGET_USER ALL=(root) NOPASSWD: /sbin/route, /sbin/ifconfig, /usr/sbin/sysctl, /usr/local/bin/wg-quick, /opt/homebrew/bin/wg-quick, /usr/local/sbin/wireguard-go, /opt/homebrew/sbin/wireguard-go
+EOF
+    chmod 0440 "$SUDOERS_FILE"
+    chown root:wheel "$SUDOERS_FILE"
+    echo "[tytus-postinstall] wrote $SUDOERS_FILE" >>"$LOG"
+fi
+
+echo "[tytus-postinstall] complete $(date)" >>"$LOG"
+exit 0

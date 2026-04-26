@@ -7,6 +7,117 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.7] — 2026-04-26
+
+Phase H scaffolding — the `.pkg` installer pipeline ships unsigned
+in this rc; signing + notarization is a 3-command run for any
+maintainer holding the Developer ID Installer cert. Once signed and
+uploaded, the only remaining bump is `Cargo.toml` from rc.7 → 0.6.0
++ a CHANGELOG entry promoting the rc to final.
+
+### Phase H — `.pkg` builder + signing scaffolding
+
+New `pkg/` directory:
+
+- **`pkg/build-pkg.sh`** — builds an unsigned
+  `target/Tytus-<version>-unsigned.pkg` from `target/release/`
+  binaries using `pkgbuild` + `productbuild` (Xcode CLT, included on
+  every Mac). Produces a 10 MB universal-binary `.pkg` containing:
+  - `/usr/local/bin/tytus`
+  - `/usr/local/bin/tytus-tray`
+  - `/usr/local/bin/tytus-mcp`
+  - Postinstall script (see below)
+  - Welcome + conclusion HTML screens for Installer.app
+  - Distribution xml with `hostArchitectures="x86_64,arm64"`
+  - Strips extended attributes via `xattr -c` so the payload doesn't
+    ship AppleDouble resource-fork shadow files.
+- **`pkg/scripts/postinstall`** — runs as root on every install:
+  1. Identifies the GUI-logged-in user via
+     `stat -f "%Su" /dev/console`.
+  2. Calls `sudo -u <user> -H tytus tray install` so the `.app`
+     bundle and `~/Library/LaunchAgents/com.traylinx.tytus.tray.plist`
+     land in the user's home (not `/var/root/`).
+  3. Drops `/etc/sudoers.d/tytus` with the same tightly-scoped
+     `wg-quick` / `route` / `ifconfig` exemptions `install.sh`
+     creates, so the user never types their password to bring the
+     tunnel up.
+  4. Logs every step to `/tmp/tytus-postinstall.log`.
+- **`pkg/SIGNING.md`** — full reference for the maintainer:
+  - Prereqs (Xcode CLT, Developer ID Installer cert, app-specific
+    password, team ID).
+  - One-time `xcrun notarytool store-credentials` setup so future
+    notarizations are a single flag.
+  - The full pipeline:
+    `cargo build --release` → `./pkg/build-pkg.sh` → `productsign`
+    → `xcrun notarytool submit --wait` → `xcrun stapler staple`
+    → `spctl -a -t install -vv` → `gh release upload`
+    → mirror to `tytus.traylinx.com/Tytus.pkg`.
+  - Troubleshooting table (signing identity missing, notarization
+    rejected, Gatekeeper still blocks, etc.).
+  - Optional Mach-O binary code-signing recipe for futureproofing
+    against tighter notarization rules.
+
+### What ships unsigned in this rc
+
+`target/Tytus-0.6.0-rc.7-unsigned.pkg` builds locally on demand
+(`./pkg/build-pkg.sh`). It's gitignored (`target/` is already in
+`.gitignore`) so the artifact never lands in the repo. Maintainers
+build, sign, and upload as part of the release process.
+
+The README install command (`curl -fsSL https://get.traylinx.com/install.sh
+| bash`) remains the canonical path until the signed `.pkg` is
+hosted at `https://tytus.traylinx.com/Tytus.pkg`. Once that lives,
+README updates to a "Download for Mac" button.
+
+### Verified locally
+
+```bash
+$ ./pkg/build-pkg.sh
+✓ Built  target/Tytus-0.6.0-rc.7-unsigned.pkg  (10M, unsigned)
+
+$ pkgutil --expand-full target/Tytus-0.6.0-rc.7-unsigned.pkg /tmp/x
+$ ls /tmp/x/Tytus-component.pkg/Payload/usr/local/bin
+tytus  tytus-mcp  tytus-tray
+
+$ ls /tmp/x/Tytus-component.pkg/Scripts
+postinstall
+```
+
+### What still needs Sebastian's hands
+
+`./pkg/build-pkg.sh` produces the unsigned artifact. Three commands
+turn it into a notarized, Gatekeeper-accepted installer:
+
+```bash
+productsign --sign "Developer ID Installer: <name> (<team>)" \
+    target/Tytus-0.6.0-rc.7-unsigned.pkg target/Tytus-0.6.0.pkg
+
+xcrun notarytool submit target/Tytus-0.6.0.pkg \
+    --keychain-profile "tytus-notary" --wait
+
+xcrun stapler staple target/Tytus-0.6.0.pkg
+```
+
+Total wall-clock: ~5–10 minutes (notarization round-trip dominates).
+After that: `gh release upload v0.6.0 target/Tytus-0.6.0.pkg`,
+update README "Install" lead to a `[ Download for Mac ]` button,
+and re-tag rc.7 contents as `v0.6.0`.
+
+### Backwards compat
+
+- Existing `cargo install --git` source build path unchanged.
+- Existing `https://get.traylinx.com/install.sh` one-liner unchanged.
+- New `pkg/` directory is build-time only; binaries don't import it.
+- Internal Rust unchanged from rc.6.
+
+### Files added
+
+- `pkg/build-pkg.sh`
+- `pkg/scripts/postinstall`
+- `pkg/SIGNING.md`
+- `Cargo.toml` — workspace version bump to `0.6.0-rc.7`
+- `CHANGELOG.md` — this entry
+
 ## [0.6.0-rc.6] — 2026-04-26
 
 Phase G — first-run wizard inside Tower. Closes the last
