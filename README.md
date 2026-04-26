@@ -1,22 +1,40 @@
 # tytus-cli
 
-> CLI for **Tytus** by Traylinx — your private AI pod, driven from any terminal.
+> Your private AI, on a private connection. From any terminal.
 
-`tytus` is a Rust CLI that opens a userspace WireGuard tunnel from your laptop
-to your private Tytus pod and exposes its OpenAI-compatible LLM gateway through
-a stable URL + stable API key. The pair you paste into Cursor / Claude Desktop /
-OpenCode / any OpenAI-compatible tool **never changes** — even if your pod gets
-rotated, your droplet migrates, or you switch agent runtimes.
+## Install
 
 ```bash
 curl -fsSL https://get.traylinx.com/install.sh | bash
-tytus login && tytus connect
+tytus setup
 ```
 
-That's it. `tytus login` provisions a **default pod** (agent-less, zero
-plan units) automatically, and `tytus connect` brings the WG tunnel up to
-it. AIL gateway access at `http://10.42.42.1:18080` works immediately —
-no agent install required, no plan units spent.
+That's it. `tytus setup` runs an interactive wizard — sign in, pick your AI,
+and send your first chat. About 60 seconds end to end.
+
+## What you get
+
+- **Your own AI** running on a Traylinx pod, reachable at a stable URL +
+  stable API key that never change. Paste them into Cursor / Claude Desktop /
+  OpenCode / any OpenAI-compatible tool — the pair survives pod rotation,
+  droplet migration, and agent swaps.
+- **A private connection.** Prompts and responses go straight from your
+  laptop to your pod over WireGuard. Traylinx Cloud never sees the contents
+  of your conversations.
+- **A menu-bar app** (macOS) and **a local dashboard** (Tytus Tower) for
+  managing your AI without ever opening a terminal — `tytus tray install`
+  enables them after `tytus setup`.
+
+```bash
+eval "$(tytus env --export)"
+echo $OPENAI_BASE_URL    # http://10.42.42.1:18080/v1   (constant forever)
+echo $OPENAI_API_KEY     # sk-tytus-user-<32hex>          (per user, persistent)
+```
+
+`tytus setup` provisions a **default pod** (agent-less, zero plan units)
+automatically, and brings the tunnel up. AIL gateway access at
+`http://10.42.42.1:18080` works immediately — no agent install required,
+no plan units spent.
 
 ```bash
 eval "$(tytus env --export)"

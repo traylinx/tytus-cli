@@ -7,6 +7,69 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.1] — 2026-04-26
+
+First release candidate of the v0.6 grandma-easy line. Phases 0 + A
+landed: cold-start audit, vocabulary policy locked via lope, and the
+"first thing the user sees" cleaned up. Internal types, log lines,
+CLI subcommand names, and `--help` output stay 100% backwards-compatible.
+
+### Phase 0 — Audit + locked vocabulary policy
+
+- **`development/sprints/queued/TYTUS-V0.6-GRANDMA-EASY/AUDIT.md`** —
+  full string-by-string cold-start audit across CLI, tray, and Tower.
+  Surfaces the 79-item tray menu density, the 11-section Tower scroll,
+  and the 30-command flat `--help` density that motivated v0.6.
+- **Q1 — vocabulary policy** locked via `lope ask --validators
+  pi,codex --parallel`. Both validators converged on **C — HYBRID**:
+  rename a small, well-defined set of user-facing strings (welcome
+  banner, primary tray actions, Tower primary tabs + Shared-Folders
+  bind form, recoverable error messages); keep technical terms
+  everywhere else (logs, Advanced submenus, CLI `--help`, internal
+  Rust/JS code, llm-docs, sidecar JSON, API field names). Verdict and
+  Phase D replacement table at
+  `development/sprints/queued/TYTUS-V0.6-GRANDMA-EASY/verdicts/Q1-VOCAB-LOCKED.md`.
+
+### Phase A — Entry point polish
+
+- **Keychain WARN no longer leaks to stderr.** Previous heuristic in
+  `cli/src/main.rs::init_tracing` keyed off
+  `console::Term::stderr().is_term()`, which fails any time stderr is
+  captured (`tytus 2>&1 | head`, shell redirects, agent harnesses, CI).
+  Those are all "user-facing" runs from the user's perspective —
+  they didn't ask for log noise. v0.6 drops the TTY detection: stderr
+  emit is opt-in only via `RUST_LOG=` or `--json`; everything else
+  routes WARN+ to a log file.
+- **Log path moves to macOS-conventional location.**
+  `~/.tytus/logs/tytus.log` → `~/Library/Logs/tytus/cli.log`
+  (cross-platform: keeps `~/.tytus/logs/cli.log` on non-Mac). Tray
+  spawn-action logs at `~/.tytus/logs/<action>.log` are unchanged.
+- **`tytus setup` end screen** now leads with
+  **"Open Tytus.app for the visual interface, or run `tytus chat` to
+  start chatting."** before the existing hint list.
+- **README leads with the install command.** First content under the
+  H1 is now `curl -fsSL https://get.traylinx.com/install.sh | bash` +
+  `tytus setup` — followed by a plain-English "What you get" section,
+  with the technical paragraph on WireGuard + AIL gateway moved below.
+
+### Backwards compat
+
+- **Zero internal-API changes.** Rust types, struct fields, log lines,
+  CLI subcommand names, `--help` clap output, env var names — all
+  byte-identical to v0.5.5 except for the workspace `version` field.
+- **Vocabulary still says "pod", "tunnel", "agent"** in every surface
+  — Phase D applies the locked rename verdict in a later rc.
+
+### Files touched
+
+- `cli/src/main.rs` — `init_tracing` rewrite, setup end-screen hint
+- `Cargo.toml` — workspace version bump to `0.6.0-rc.1`
+- `CHANGELOG.md` — this entry
+- `README.md` — install-first lead
+- `development/sprints/queued/TYTUS-V0.6-GRANDMA-EASY/AUDIT.md` (new)
+- `development/sprints/queued/TYTUS-V0.6-GRANDMA-EASY/verdicts/Q1-LOPE-RAW.md` (new, in MAKAKOO)
+- `development/sprints/queued/TYTUS-V0.6-GRANDMA-EASY/verdicts/Q1-VOCAB-LOCKED.md` (new, in MAKAKOO)
+
 ## [0.5.5] — 2026-04-26
 
 The grandma flow. Tower can now bind a Mac folder end-to-end —

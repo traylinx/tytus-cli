@@ -451,33 +451,31 @@ enum TrayAction {
 }
 
 /// Initialize tracing so structured log noise doesn't pollute
-/// interactive CLI output. Three modes:
+/// interactive CLI output. Two modes:
 ///
-/// - `RUST_LOG` is set explicitly → honor it verbatim, emit to stderr
-///   (developer/debug path).
-/// - `--json` or non-interactive (stdout+stderr piped) → emit WARN+ to
-///   stderr. Machine consumers want structured logs inline; they can
-///   filter as needed.
-/// - Default (humans running `tytus` in a terminal) → route WARN+ to
-///   `~/.tytus/logs/tytus.log` (rotating, mode 0600). Stderr stays
-///   clean so "Paste your credentials" prompts, "✓ Telegram
-///   configured" confirmations, etc. aren't buried under transient
-///   keychain-timeout warnings.
+/// - **Opt-in stderr** — `RUST_LOG=` is set explicitly, OR `--json` is
+///   passed. Honor `RUST_LOG` (or default to `warn,tytus=info`), emit
+///   to stderr. Machine consumers (`--json`) and developers (`RUST_LOG`)
+///   know what they asked for.
+/// - **Default (everyone else)** — route WARN+ to
+///   `~/Library/Logs/tytus/cli.log` (macOS-conventional path; mode
+///   0600). Stderr stays clean. If the log file can't be opened, fall
+///   back to ERROR-only stderr — never surface a transient WARN to the
+///   user just because we couldn't write to disk.
 ///
-/// The big win: users on a broken-keychain machine (ACL pending
-/// approval) no longer see the `WARN keychain get_refresh_token
-/// timed out after 3s` line bleeding into the tytus output they're
-/// actively reading. Warnings still hit the log file for post-hoc
-/// debugging via `View Daemon Log` in the tray.
+/// The previous heuristic keyed off `console::Term::stderr().is_term()`,
+/// which fails any time stderr is captured (`tytus 2>&1 | head`,
+/// shell pipe redirection, agent harnesses, CI runs). Those are all
+/// "user-facing" runs from the user's perspective — they didn't ask for
+/// log noise. v0.6 drops the TTY detection: stderr emit is opt-in only.
 fn init_tracing() {
     let explicit = std::env::var("RUST_LOG").is_ok();
     let json_mode = std::env::args().any(|a| a == "--json");
-    let interactive_stderr = console::Term::stderr().is_term();
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "warn,tytus=info".into());
 
-    if explicit || json_mode || !interactive_stderr {
+    if explicit || json_mode {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_target(false)
@@ -485,12 +483,16 @@ fn init_tracing() {
         return;
     }
 
-    // Interactive human CLI run. Try to open the log file; fall back
-    // to silent stderr (nothing worse than warnings printing AFTER we
-    // committed to hiding them).
-    let log_path = std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::PathBuf::from(h).join(".tytus/logs/tytus.log"));
+    // Default: route to log file. Cross-platform path (Mac convention
+    // first, fall back to `~/.tytus/logs/` on non-Mac).
+    let log_path = std::env::var("HOME").ok().map(|h| {
+        let home = std::path::PathBuf::from(h);
+        if cfg!(target_os = "macos") {
+            home.join("Library/Logs/tytus/cli.log")
+        } else {
+            home.join(".tytus/logs/cli.log")
+        }
+    });
     let mut writer: Option<std::fs::File> = None;
     if let Some(path) = log_path.as_ref() {
         if let Some(dir) = path.parent() {
@@ -3914,6 +3916,8 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
 
     println!();
     wizard::print_header("What's next?");
+    wizard::print_info("Open Tytus.app for the visual interface, or run `tytus chat` to start chatting.");
+    println!();
     wizard::print_hint("tytus chat           — Try chatting with your AI");
     wizard::print_hint("tytus test           — Run a quick health check");
     wizard::print_hint("tytus link .         — Link Tytus into this project (AI CLI integration)");
