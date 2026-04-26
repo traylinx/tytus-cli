@@ -1072,68 +1072,97 @@ fn build_menu(state: &TrayState) -> Menu {
                 let forwarder_live = existing_ui_forwarder(&p.pod_id).is_some();
                 let tunnel_live = tunnel_reaches_pod(&p.pod_id);
 
+                // Phase C.2 reorder: surface Chat (Open in Browser) at the
+                // top of the per-pod block, then Files, then Channels —
+                // matching the top-level menu's three primary verbs. Heavier
+                // ops (Restart / Uninstall / Revoke / Copy URL / Stop
+                // Forwarder) move into Manage ▸ at the bottom so the routine
+                // entry points stay one click away.
                 {
                     // Public-edge open is always available when public_ui is
                     // populated — no tunnel needed. Only the forwarder path
                     // depends on tunnel state.
                     let open_label = match (p_public_ui.is_some(), forwarder_live, tunnel_live) {
-                        (true,  _,    _)     => "  Open in Browser  (fast)",
-                        (false, true, _)     => "  Open in Browser  ✓",
-                        (false, false, true) => "  Open in Browser",
-                        (false, false, false) => "  Connect & Open in Browser",
+                        (true,  _,    _)     => "  💬 Chat now…  (fast)",
+                        (false, true, _)     => "  💬 Chat now…  ✓",
+                        (false, false, true) => "  💬 Chat now…",
+                        (false, false, false) => "  💬 Connect & chat…",
                     };
                     let _ = pods_sub.append(&MenuItem::with_id(
                         format!("pod_{}_open", p.pod_id),
                         open_label, true, None,
                     ));
                 }
-                if forwarder_live {
-                    let _ = pods_sub.append(&MenuItem::with_id(
-                        format!("pod_{}_stop_forwarder", p.pod_id),
-                        "  Stop Forwarder", true, None,
-                    ));
-                }
-                // Public API URL — for API clients (Cursor, Claude Desktop,
-                // OpenAI SDK, curl). Disabled when no edge URL yet
-                // (provider hasn't refreshed user-key, or EDGE_PATH_ENABLED=0).
                 let public_pod_url = p.public_pod_url();
-                if public_pod_url.is_some() {
-                    let _ = pods_sub.append(&MenuItem::with_id(
-                        format!("pod_{}_copy_url", p.pod_id),
-                        "  Copy Public API URL", true, None,
-                    ));
-                }
-                let _ = pods_sub.append(&MenuItem::with_id(
-                    format!("pod_{}_restart", p.pod_id),
-                    "  Restart Agent", true, None,
-                ));
-                // Uninstall Agent: keeps the pod slot allocated (AIL still
-                // works through it), drops the container. SPRINT §4.3.
-                //
-                // There is intentionally NO "Replace with X" action here.
-                // The mental model is add + delete only — if a user wants
-                // to change the agent on a pod, they revoke the pod and
-                // install a fresh one with the new type. Prevents the
-                // subtle trap of slot-preserving "replace" looking like a
-                // safe in-place swap while still destroying container
-                // workspace state. (Decision: 2026-04-18, post-sprint UX.)
-                let _ = pods_sub.append(&MenuItem::with_id(
-                    format!("pod_{}_uninstall", p.pod_id),
-                    "  Uninstall Agent  (keeps pod)", true, None,
-                ));
 
-                // Channels submenu — the chat channels this pod's agent
-                // uses to talk to the owner (Telegram, Discord, Slack,
-                // …). Each click opens a Terminal window running the
-                // `tytus channels …` CLI subcommand, so the UX never
-                // requires the user to drop into a terminal themselves.
+                // ── Files submenu (2nd primary verb) ──────
+                // Menu-based file sharing (Phase 2 of shared-folders
+                // sprint). Drag-and-drop onto the menu bar icon proper
+                // needs NSStatusItem subclassing + NSDraggingDestination
+                // which is non-trivial via objc2 — deferred to a follow-
+                // up. The file/folder picker covers the same intent
+                // ("I have this file, put it on my pod") with one extra
+                // click and zero native-code risk.
+                let files_sub = Submenu::new("  📁 Files", true);
+                let _ = files_sub.append(&MenuItem::with_id(
+                    files::menu_id_push_file(&p.pod_id),
+                    "Push file…", true, None,
+                ));
+                let _ = files_sub.append(&MenuItem::with_id(
+                    files::menu_id_push_folder(&p.pod_id),
+                    "Push folder…", true, None,
+                ));
+                let _ = files_sub.append(&PredefinedMenuItem::separator());
+                let _ = files_sub.append(&MenuItem::with_id(
+                    files::menu_id_list_inbox(&p.pod_id),
+                    "List inbox in Terminal", true, None,
+                ));
+                let _ = files_sub.append(&MenuItem::with_id(
+                    files::menu_id_open_downloads(&p.pod_id),
+                    "Open local download folder", true, None,
+                ));
+                // ── garagetytus shared-folder integration (v0.5.3) ──
+                // Two per-pod entries that wrap the bash helpers shipped
+                // in github.com/traylinx/garagetytus/bin/. Disabled when
+                // the helper isn't on disk yet so tray users without
+                // garagetytus installed see grayed-out items instead of
+                // silent failure on click.
+                let bind_helper_present =
+                    std::path::Path::new("/usr/local/bin/garagetytus-folder-bind").exists()
+                    || std::path::Path::new("/opt/homebrew/bin/garagetytus-folder-bind").exists()
+                    || std::env::var("HOME").ok().map(|h|
+                        std::path::Path::new(&format!("{}/garagetytus/bin/garagetytus-folder-bind", h)).exists()
+                    ).unwrap_or(false);
+                let _ = files_sub.append(&PredefinedMenuItem::separator());
+                let _ = files_sub.append(&MenuItem::with_id(
+                    shared_folders::menu_id_bind_folder(&p.pod_id),
+                    if bind_helper_present {
+                        "Bind a Mac folder to this pod…"
+                    } else {
+                        "Bind Mac folder…  (install garagetytus first)"
+                    },
+                    bind_helper_present, None,
+                ));
+                let _ = files_sub.append(&MenuItem::with_id(
+                    shared_folders::menu_id_refresh_creds(&p.pod_id),
+                    "Refresh shared-folder credentials",
+                    bind_helper_present, None,
+                ));
+                let _ = pods_sub.append(&files_sub);
+
+                // ── Channels submenu (3rd primary verb) ───
+                // The chat channels this pod's agent uses to talk to the
+                // owner (Telegram, Discord, Slack, …). Each click opens a
+                // Terminal window running the `tytus channels …` CLI
+                // subcommand, so the UX never requires the user to drop
+                // into a terminal themselves.
                 //
                 // Source of truth for "what's configured" is the local
                 // manifest at `~/.tytus/channels.json` (the CLI writes
                 // it whenever `tytus channels add/remove` succeeds).
                 // The tray reads it cheaply on each menu rebuild — no
                 // network, no daemon call, always fresh.
-                let channel_sub = Submenu::new("  Channels", true);
+                let channel_sub = Submenu::new("  📨 Channels", true);
                 let configured = read_channels_for_pod(&p.pod_id);
                 if configured.is_empty() {
                     let _ = channel_sub.append(&MenuItem::with_id(
@@ -1188,65 +1217,51 @@ fn build_menu(state: &TrayState) -> Menu {
                 }
                 let _ = pods_sub.append(&channel_sub);
 
-                // ── Files submenu ─────────────────────────
-                // Menu-based file sharing (Phase 2 of shared-folders
-                // sprint). Drag-and-drop onto the menu bar icon proper
-                // needs NSStatusItem subclassing + NSDraggingDestination
-                // which is non-trivial via objc2 — deferred to a follow-
-                // up. The file/folder picker covers the same intent
-                // ("I have this file, put it on my pod") with one extra
-                // click and zero native-code risk.
-                let files_sub = Submenu::new("  Files", true);
-                let _ = files_sub.append(&MenuItem::with_id(
-                    files::menu_id_push_file(&p.pod_id),
-                    "Push file…", true, None,
+                // ── Manage ▸ (Phase C.2 — heavy ops one click deeper) ──
+                // Routine actions (chat / files / channels) are surfaced
+                // above; Manage holds the destructive or admin-y verbs
+                // (Restart / Uninstall / Revoke) plus power-user
+                // utilities (Copy URL, Stop Forwarder) so the per-pod row
+                // doesn't read as a 9-item wall of buttons. Everything
+                // remains one extra click away — nothing is removed.
+                let manage_sub = Submenu::new("  ⚙ Manage", true);
+                if public_pod_url.is_some() {
+                    let _ = manage_sub.append(&MenuItem::with_id(
+                        format!("pod_{}_copy_url", p.pod_id),
+                        "Copy Public API URL", true, None,
+                    ));
+                }
+                if forwarder_live {
+                    let _ = manage_sub.append(&MenuItem::with_id(
+                        format!("pod_{}_stop_forwarder", p.pod_id),
+                        "Stop Forwarder", true, None,
+                    ));
+                }
+                let _ = manage_sub.append(&MenuItem::with_id(
+                    format!("pod_{}_restart", p.pod_id),
+                    "Restart Agent", true, None,
                 ));
-                let _ = files_sub.append(&MenuItem::with_id(
-                    files::menu_id_push_folder(&p.pod_id),
-                    "Push folder…", true, None,
+                // Uninstall Agent: keeps the pod slot allocated (AIL still
+                // works through it), drops the container. SPRINT §4.3.
+                //
+                // There is intentionally NO "Replace with X" action here.
+                // The mental model is add + delete only — if a user wants
+                // to change the agent on a pod, they revoke the pod and
+                // install a fresh one with the new type. Prevents the
+                // subtle trap of slot-preserving "replace" looking like a
+                // safe in-place swap while still destroying container
+                // workspace state. (Decision: 2026-04-18, post-sprint UX.)
+                let _ = manage_sub.append(&MenuItem::with_id(
+                    format!("pod_{}_uninstall", p.pod_id),
+                    "Uninstall Agent  (keeps pod)", true, None,
                 ));
-                let _ = files_sub.append(&PredefinedMenuItem::separator());
-                let _ = files_sub.append(&MenuItem::with_id(
-                    files::menu_id_list_inbox(&p.pod_id),
-                    "List inbox in Terminal", true, None,
-                ));
-                let _ = files_sub.append(&MenuItem::with_id(
-                    files::menu_id_open_downloads(&p.pod_id),
-                    "Open local download folder", true, None,
-                ));
-                // ── garagetytus shared-folder integration (v0.5.3) ──
-                // Two per-pod entries that wrap the bash helpers shipped
-                // in github.com/traylinx/garagetytus/bin/. Disabled when
-                // the helper isn't on disk yet so tray users without
-                // garagetytus installed see grayed-out items instead of
-                // silent failure on click.
-                let bind_helper_present =
-                    std::path::Path::new("/usr/local/bin/garagetytus-folder-bind").exists()
-                    || std::path::Path::new("/opt/homebrew/bin/garagetytus-folder-bind").exists()
-                    || std::env::var("HOME").ok().map(|h|
-                        std::path::Path::new(&format!("{}/garagetytus/bin/garagetytus-folder-bind", h)).exists()
-                    ).unwrap_or(false);
-                let _ = files_sub.append(&PredefinedMenuItem::separator());
-                let _ = files_sub.append(&MenuItem::with_id(
-                    shared_folders::menu_id_bind_folder(&p.pod_id),
-                    if bind_helper_present {
-                        "Bind a Mac folder to this pod…"
-                    } else {
-                        "Bind Mac folder…  (install garagetytus first)"
-                    },
-                    bind_helper_present, None,
-                ));
-                let _ = files_sub.append(&MenuItem::with_id(
-                    shared_folders::menu_id_refresh_creds(&p.pod_id),
-                    "Refresh shared-folder credentials",
-                    bind_helper_present, None,
-                ));
-                let _ = pods_sub.append(&files_sub);
-
-                let _ = pods_sub.append(&MenuItem::with_id(
+                let _ = manage_sub.append(&PredefinedMenuItem::separator());
+                let _ = manage_sub.append(&MenuItem::with_id(
                     format!("pod_{}_revoke", p.pod_id),
-                    "  Revoke Pod", true, None,
+                    "Revoke Pod", true, None,
                 ));
+                let _ = pods_sub.append(&manage_sub);
+
                 let _ = pods_sub.append(&PredefinedMenuItem::separator());
             }
         }
@@ -1423,22 +1438,29 @@ fn build_menu(state: &TrayState) -> Menu {
     // when anything looks wrong and gets either a one-click retry
     // or a paste-to-support blob.
     let _ = trouble_sub.append(&MenuItem::with_id("help_dialog", "Help…  (something's not working)", true, None));
-    let _ = trouble_sub.append(&PredefinedMenuItem::separator());
-    let _ = trouble_sub.append(&MenuItem::with_id("doctor", "Run diagnostics (advanced)", true, None));
-    let _ = trouble_sub.append(&MenuItem::with_id("view_daemon_log", "View Daemon Log", true, None));
-    let _ = trouble_sub.append(&MenuItem::with_id("view_startup_log", "View Startup Log", true, None));
-    let _ = trouble_sub.append(&PredefinedMenuItem::separator());
-    if state.daemon_running {
-        let _ = trouble_sub.append(&MenuItem::with_id("daemon_restart", "Restart Daemon", true, None));
-        let _ = trouble_sub.append(&MenuItem::with_id("daemon_stop", "Stop Daemon", true, None));
-    } else {
-        let _ = trouble_sub.append(&MenuItem::with_id("daemon_start", "Start Daemon", true, None));
-    }
     // Phase C: Documentation + About fold into Help ▸ so the top-level
     // tray no longer carries two text-link items grandma never clicks.
     let _ = trouble_sub.append(&PredefinedMenuItem::separator());
     let _ = trouble_sub.append(&MenuItem::with_id("docs", "Documentation", true, None));
     let _ = trouble_sub.append(&MenuItem::with_id("about", "About Tytus", true, None));
+
+    // Phase C.3 — Developer options ▸. Wraps the diagnostics, raw log
+    // tails, and daemon controls in a single submenu so non-technical
+    // users see only Help/Docs/About at the Help tier. Power users still
+    // get every existing action one click deeper. No actions removed.
+    let _ = trouble_sub.append(&PredefinedMenuItem::separator());
+    let dev_sub = Submenu::new("Developer options", true);
+    let _ = dev_sub.append(&MenuItem::with_id("doctor", "Run diagnostics (advanced)", true, None));
+    let _ = dev_sub.append(&MenuItem::with_id("view_daemon_log", "View Daemon Log", true, None));
+    let _ = dev_sub.append(&MenuItem::with_id("view_startup_log", "View Startup Log", true, None));
+    let _ = dev_sub.append(&PredefinedMenuItem::separator());
+    if state.daemon_running {
+        let _ = dev_sub.append(&MenuItem::with_id("daemon_restart", "Restart Daemon", true, None));
+        let _ = dev_sub.append(&MenuItem::with_id("daemon_stop", "Stop Daemon", true, None));
+    } else {
+        let _ = dev_sub.append(&MenuItem::with_id("daemon_start", "Start Daemon", true, None));
+    }
+    let _ = trouble_sub.append(&dev_sub);
     let _ = menu.append(&trouble_sub);
 
     let _ = menu.append(&PredefinedMenuItem::separator());

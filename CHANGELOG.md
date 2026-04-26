@@ -7,6 +7,64 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.11] — 2026-04-26
+
+Closes two soft Phase C gaps the rc.5 acceptance bar passed but the
+SPRINT.md target diagram still showed unfinished:
+SPRINT.md C.2 (per-pod submenu reorder around primary verbs) and
+SPRINT.md C.3 (daemon controls under a Developer-options toggle).
+No actions removed; everything reachable in ≤3 clicks remains so.
+
+### Phase C.2 — per-pod submenu reorder (Chat / Files / Channels first)
+
+Per SPRINT.md §Phase C target diagram, the per-pod expand previously
+opened to a 9-item wall (header, Open in Browser, Stop Forwarder,
+Copy URL, Restart, Uninstall, Channels▸, Files▸, Revoke). The first
+three primary verbs (Chat / Files / Channels) were buried behind
+admin verbs.
+
+- `tray::main::build_menu` per-pod block reordered:
+  1. Pod header (informational, disabled)
+  2. **`💬 Chat now…`** (renamed from "Open in Browser" — vocab
+     verdict: same action, plain-language label)
+  3. **`📁 Files ▸`** (was 7th; now 2nd primary verb)
+  4. **`📨 Channels ▸`** (was 6th; now 3rd primary verb)
+  5. **`⚙ Manage ▸`** (NEW — wraps heavy/admin ops)
+- `Manage ▸` holds: Copy Public API URL (when public edge is
+  populated), Stop Forwarder (when live), Restart Agent, Uninstall
+  Agent, separator, Revoke Pod. Destructive Revoke sits under a
+  separator so it isn't adjacent to non-destructive items.
+- Submenu titles now carry the same emoji as the top-level Chat /
+  Files / Channels deep-links so the visual association across
+  surfaces is obvious.
+- Behavior unchanged: every existing menu ID still fires the same
+  handler. The reorder is presentation-only.
+
+### Phase C.3 — Developer options ▸ inside Help
+
+Per SPRINT.md §Phase C target diagram, daemon controls and raw log
+tails were always visible at the Help tier, ahead of grandma-facing
+items (Documentation, About). Phase C.3 wraps them so the Help
+expand reads as: Help… / Documentation / About / Developer options ▸.
+
+- New `Developer options ▸` submenu inside Help, holding:
+  - Run diagnostics (advanced)
+  - View Daemon Log
+  - View Startup Log
+  - Start / Stop / Restart Daemon (one of, depending on state)
+- Help… stays at the top (single grandma-facing recovery action).
+- Documentation + About stay one click deep at the Help tier so
+  the Help submenu remains scannable for non-developers.
+- All four developer actions remain one click deeper than before.
+  Same handlers, same IDs.
+
+### Tests
+
+- 33 tray unit tests green (no behavior changes, unit tests cover
+  ID parsing + error friendlify lockstep — both untouched).
+- Manual smoke: cold-start menu walk shows Chat/Files/Channels at
+  per-pod top; Help reads Help/Docs/About/Dev-options.
+
 ## [0.6.0-rc.10] — 2026-04-26
 
 Closes the two strict gaps from earlier rcs that the user audit
