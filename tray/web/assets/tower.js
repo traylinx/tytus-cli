@@ -3,6 +3,12 @@
 
   const $ = (id) => document.getElementById(id);
 
+  // Cross-section state — declared up here so Phase B / Phase G / Phase F
+  // additions (which run early in the IIFE) can reference it without
+  // hitting the let-TDZ ReferenceError. Initialized to `null`; populated
+  // by `loadBudget()` later in the IIFE.
+  let budgetState = null;
+
   // ── Client-side display overrides ─────────────────────────────
   // The public catalog (Provider) is conservative — it keeps copy
   // short and API-like for non-UI consumers (`tytus agent catalog`,
@@ -1039,7 +1045,7 @@
   // remaining unit headroom. We fetch it on page load in parallel
   // with the catalog; install success triggers a re-fetch so the
   // bar updates without a page reload.
-  let budgetState = null;
+  // (declaration moved to the top of the IIFE — see comment near `const $ = ...`)
   // Pod-ids (as strings) that currently have a live localhost UI
   // forwarder. Drives the per-pod "Stop forwarder" button visibility.
   // Refreshed on every /api/state fetch via loadBudget().

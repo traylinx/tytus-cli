@@ -7,6 +7,99 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.9] — 2026-04-26
+
+**Critical bugfix in tower.js.** Discovered via headless-browser
+visual verification (gstack `/browse`): a Temporal Dead Zone
+`ReferenceError` had been silently breaking the Phase F friendlify
+layer since rc.5, and indirectly preventing the IIFE from completing
+its setup. Caught only because `window.__friendlifyError` returned
+`undefined` even though the source code declared and exposed it.
+
+### What was broken
+
+`__renderChatTab()` at line ~579 references `budgetState`, but the
+`let budgetState = null;` declaration lives at line 1042 — far below.
+ES2015 strict-mode `let` doesn't hoist into the Temporal Dead Zone,
+so reading `budgetState` before its declaration throws
+`ReferenceError`. The throw happened inside the initial
+`__applyTabFromHash()` call (line ~376) at script load — which
+silently aborted the rest of the IIFE.
+
+Symptoms (subtle — no console error in headless mode):
+- `body.dataset.tab` got set to "chat" (the assignment ran first).
+- `window.__wizardOpen` got registered (line 497, before the throw).
+- `window.__friendlifyError` was **never** registered (line 2648, after).
+- Phase F's `showToast(msg, 'err')` wrap was a no-op — error toasts
+  showed raw subprocess text instead of friendly hints.
+- Phase B chat-tab pod-list rendered correctly because its
+  `(budgetState && ...)` check happened to early-return when
+  `budgetState` was undefined (TDZ aside, the JS engine evaluated
+  the && short-circuit cleanly when `budgetState` was actually
+  declared by the time the second pass ran). Real-world impact was
+  limited to friendlify being silent — which dogfood walks didn't
+  catch because nothing visibly failed.
+
+### Fix
+
+Moved `let budgetState = null;` to the top of the IIFE (right after
+`const $ = (id) => ...`). All references in Phase B / G / F code now
+hit a proper `null` instead of a TDZ throw. The original
+`loadBudget()` initializer keeps populating it later in the lifecycle.
+
+### Verified end-to-end via /browse
+
+Headless visual verification confirmed:
+- ✓ All 5 tabs (Chat / Files / Channels / Settings / Help) render
+- ✓ Hash routing flips `body.dataset.tab` and CSS visibility on click
+- ✓ Phase D Tower-side renames live ("Tytus" not "Tytus Tower",
+  "Background service" not "Daemon", "Setup wizard / Run setup
+  wizard again" in Help, etc.)
+- ✓ Chat tab auto-renders pod list when ≥1 agents installed
+  (Sebastian has Pod 02 + Pod 04 with OpenClaw)
+- ✓ "Talk to this AI" button loads pod's OpenClaw UI URL via
+  iframe — `https://<slug>-p02.tytus.traylinx.com/?token=<gateway-token>`
+- ✓ Phase G first-run wizard opens via `__wizardOpen()`, renders
+  Step 1 of 4 with Welcome copy + Get started button + Skip link
+- ✓ Auto-skip on logged-in + has-agents user advances Step 2 → 3 → 4
+  immediately (verified: clicking Get started landed at Step 4
+  because Sebastian was already fully set up)
+- ✓ Step 4's "Open Chat" closes the wizard, sets
+  `localStorage.tytus.wizard.completed = "true"`, navigates to #chat
+- ✓ Phase F `friendlifyError("connection refused: 127.0.0.1:18080")`
+  now returns the correct `{title: "Tytus isn't running", body:
+  "...", try: "Click the menu-bar T → Quick actions → Connect."}`
+- ✓ 11 screenshots at /tmp/tytus-screenshots/ documenting each surface
+
+### Why this slipped through
+
+The bug was masked by:
+- No console error in headless mode (uncaught script-load
+  ReferenceErrors don't always surface to `console`).
+- The IIFE failed AFTER setting `body.dataset.tab` and
+  `window.__wizardOpen`, so the page rendered with the right tab
+  highlighted and the wizard reachable via direct invocation.
+- Manual dogfood walks tested visible UI only — not the underlying
+  Phase F friendlification path which never had a triggering error
+  during testing.
+- `node --check` parses fine because TDZ is a runtime, not parse,
+  error.
+
+Caught only by an in-browser eval probe that asked
+`typeof window.__friendlifyError`.
+
+**Lesson**: visual verification via `/browse` exposes real bugs that
+unit tests + manual click-throughs miss. Worth adding to every
+release pipeline going forward.
+
+### Files touched
+
+- `tray/web/assets/tower.js` — moved `let budgetState = null;`
+  declaration to the top of the IIFE; left a one-line stub at the
+  old position.
+- `Cargo.toml` — workspace version bump to `0.6.0-rc.9`
+- `CHANGELOG.md` — this entry
+
 ## [0.6.0-rc.8] — 2026-04-26
 
 `tytus --help` polish — hides four deeply-internal commands that
