@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 mod files;
 mod icon;
 mod launcher;
+mod shared_folders;
 mod socket;
 mod single_instance;
 mod gateway_probe;
@@ -1195,6 +1196,33 @@ fn build_menu(state: &TrayState) -> Menu {
                     files::menu_id_open_downloads(&p.pod_id),
                     "Open local download folder", true, None,
                 ));
+                // ── garagetytus shared-folder integration (v0.5.3) ──
+                // Two per-pod entries that wrap the bash helpers shipped
+                // in github.com/traylinx/garagetytus/bin/. Disabled when
+                // the helper isn't on disk yet so tray users without
+                // garagetytus installed see grayed-out items instead of
+                // silent failure on click.
+                let bind_helper_present =
+                    std::path::Path::new("/usr/local/bin/garagetytus-folder-bind").exists()
+                    || std::path::Path::new("/opt/homebrew/bin/garagetytus-folder-bind").exists()
+                    || std::env::var("HOME").ok().map(|h|
+                        std::path::Path::new(&format!("{}/garagetytus/bin/garagetytus-folder-bind", h)).exists()
+                    ).unwrap_or(false);
+                let _ = files_sub.append(&PredefinedMenuItem::separator());
+                let _ = files_sub.append(&MenuItem::with_id(
+                    shared_folders::menu_id_bind_folder(&p.pod_id),
+                    if bind_helper_present {
+                        "Bind a Mac folder to this pod…"
+                    } else {
+                        "Bind Mac folder…  (install garagetytus first)"
+                    },
+                    bind_helper_present, None,
+                ));
+                let _ = files_sub.append(&MenuItem::with_id(
+                    shared_folders::menu_id_refresh_creds(&p.pod_id),
+                    "Refresh shared-folder credentials",
+                    bind_helper_present, None,
+                ));
                 let _ = pods_sub.append(&files_sub);
 
                 let _ = pods_sub.append(&MenuItem::with_id(
@@ -1240,6 +1268,42 @@ fn build_menu(state: &TrayState) -> Menu {
         }
 
         let _ = menu.append(&pods_sub);
+        let _ = menu.append(&PredefinedMenuItem::separator());
+
+        // ── Shared Folders ▸ (garagetytus v0.5.3 integration) ──
+        // Top-level submenu for global shared-folder ops. Per-pod
+        // entries live in the Files submenu under each pod above.
+        // Menu items shell out to bash helpers in
+        // github.com/traylinx/garagetytus/bin/. Disabled wholesale
+        // when no helper is found on disk.
+        let folder_helper_present =
+            std::path::Path::new("/usr/local/bin/garagetytus-folder-list").exists()
+            || std::path::Path::new("/opt/homebrew/bin/garagetytus-folder-list").exists()
+            || std::env::var("HOME").ok().map(|h|
+                std::path::Path::new(&format!("{}/garagetytus/bin/garagetytus-folder-list", h)).exists()
+            ).unwrap_or(false);
+        let shared_sub = Submenu::new(
+            if folder_helper_present { "Shared Folders" } else { "Shared Folders  (install garagetytus)" },
+            folder_helper_present,
+        );
+        let _ = shared_sub.append(&MenuItem::with_id(
+            shared_folders::ID_LIST_BINDINGS, "List bindings…", true, None,
+        ));
+        let _ = shared_sub.append(&MenuItem::with_id(
+            shared_folders::ID_STATUS, "Status (with pod check)…", true, None,
+        ));
+        let _ = shared_sub.append(&MenuItem::with_id(
+            shared_folders::ID_CONFLICTS, "Find conflicts…", true, None,
+        ));
+        let _ = shared_sub.append(&PredefinedMenuItem::separator());
+        let _ = shared_sub.append(&MenuItem::with_id(
+            shared_folders::ID_OPEN_CACHE, "Open ~/.cache/garagetytus", true, None,
+        ));
+        let _ = shared_sub.append(&PredefinedMenuItem::separator());
+        let _ = shared_sub.append(&MenuItem::with_id(
+            shared_folders::ID_REFRESH_ALL, "Run cred refresh now (every pod)", true, None,
+        ));
+        let _ = menu.append(&shared_sub);
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
 
@@ -1763,6 +1827,54 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             if let Some(cli) = clis.iter().find(|c| c.binary == binary) {
                 if let Some(conn) = get_pod_connection(state) {
                     launcher::launch_in_terminal(cli, &conn);
+                }
+            }
+        }
+        // garagetytus shared-folder global ops (top-level submenu)
+        shared_folders::ID_LIST_BINDINGS => {
+            open_in_terminal_simple(
+                "garagetytus-folder-list; echo; echo 'Press Enter to close…'; read _",
+            );
+        }
+        shared_folders::ID_STATUS => {
+            open_in_terminal_simple(
+                "garagetytus-folder-status --check-pods; echo; echo 'Press Enter to close…'; read _",
+            );
+        }
+        shared_folders::ID_CONFLICTS => {
+            open_in_terminal_simple(
+                "garagetytus-folder-conflicts; echo; echo 'Press Enter to close…'; read _",
+            );
+        }
+        shared_folders::ID_OPEN_CACHE => {
+            shared_folders::open_cache_dir();
+        }
+        shared_folders::ID_REFRESH_ALL => {
+            notify("Tytus", "Running garagetytus-refresh-watchdog across every pod…");
+            shared_folders::spawn_refresh_all();
+        }
+        // garagetytus per-pod actions (parsed BEFORE files:: because
+        // both prefix with `pod_<id>_files_…` — the more-specific
+        // suffix wins, and `_bind_folder` / `_refresh_creds` are
+        // unique to shared_folders).
+        other if shared_folders::parse_pod_action(other).is_some() => {
+            let (pod_id, action) = shared_folders::parse_pod_action(other).unwrap();
+            match action {
+                shared_folders::SharedFoldersPodAction::BindFolder => {
+                    if let Some(path) = files::pick_path(files::PickerKind::Folder) {
+                        if let Some(bucket) = shared_folders::prompt_bucket_name(None) {
+                            notify(
+                                "Tytus",
+                                &format!("Binding {} ↔ {} on pod-{}…",
+                                    short_basename(&path), bucket, pod_id),
+                            );
+                            shared_folders::spawn_bind_folder(&pod_id, &path, &bucket);
+                        }
+                    }
+                }
+                shared_folders::SharedFoldersPodAction::RefreshCreds => {
+                    notify("Tytus", &format!("Refreshing pod-{} credentials…", pod_id));
+                    shared_folders::spawn_refresh_creds(&pod_id);
                 }
             }
         }

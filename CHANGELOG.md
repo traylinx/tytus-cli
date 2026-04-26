@@ -7,6 +7,40 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-04-26
+
+The tray learns about garagetytus shared folders. Two integration
+surfaces — a per-pod entry under each pod's Files submenu, and a
+new top-level "Shared Folders" submenu for global ops — wrap the
+v0.5.3 garagetytus bash helpers (`garagetytus-folder-bind`,
+`-list`, `-status`, `-conflicts`, `garagetytus-pod-refresh`,
+`garagetytus-refresh-watchdog`).
+
+- **Per-pod Files submenu** gains 2 entries at the bottom:
+  - "Bind a Mac folder to this pod…" — folder picker → osascript
+    bucket-name dialog → spawn `garagetytus-folder-bind <path>
+    <bucket> --to <pod-id> --auto-sync` in a detached thread →
+    macOS notification on completion (Reveal in Finder on success).
+  - "Refresh shared-folder credentials" — spawn
+    `garagetytus-pod-refresh <pod-id>` and notify on completion.
+    Pod's wrapper re-reads creds on every call so no pod restart.
+- **New top-level "Shared Folders" submenu** between Pods and
+  Settings:
+  - List bindings…              `garagetytus-folder-list`
+  - Status (with pod check)…    `garagetytus-folder-status --check-pods`
+  - Find conflicts…             `garagetytus-folder-conflicts`
+  - Open ~/.cache/garagetytus   (Finder)
+  - Run cred refresh now (every pod)  `garagetytus-refresh-watchdog`
+- **Graceful absence.** Both surfaces probe for the
+  `garagetytus-folder-bind` helper at `/usr/local/bin`,
+  `/opt/homebrew/bin`, and `~/garagetytus/bin/`. When no helper is
+  found, the menu items still appear (so the integration is
+  discoverable) but disabled with the suffix
+  "(install garagetytus first)". No silent failure on click.
+- New `tray/src/shared_folders.rs` module mirrors the `files.rs`
+  pattern — menu_id helpers, per-pod action enum + parser,
+  `spawn_*` functions in detached threads, 4 unit tests.
+
 ## [0.5.1] — 2026-04-25
 
 Tower becomes the output surface for non-interactive tray actions.
