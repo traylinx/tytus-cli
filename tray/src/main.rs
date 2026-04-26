@@ -805,14 +805,15 @@ fn build_menu(state: &TrayState) -> Menu {
     } else if !state.logged_in {
         format!("{} Not logged in", dot.emoji())
     } else if state.pods.is_empty() {
-        format!("{} No pods allocated — click Connect", dot.emoji())
+        format!("{} No workspace yet — click Connect", dot.emoji())
     } else {
         // Post-Phase-2.5 the public HTTPS edge reaches the pod without the
         // WG tunnel, so "Pod unreachable" is misleading here — a failed
         // `10.42.42.1:18080` probe only proves the tunnel is down, not that
         // the pod itself is dead. Users regularly see this yellow at login
         // while their `curl` to `…tytus.traylinx.com/p/NN/...` works fine.
-        format!("{} Tunnel inactive — click Connect{}", dot.emoji(), who)
+        // Phase D vocab: "Tunnel inactive" → "Not connected" (jargon out).
+        format!("{} Not connected — click Connect{}", dot.emoji(), who)
     };
     let _ = menu.append(&MenuItem::with_id("status", &status_text, false, None));
 
@@ -910,7 +911,7 @@ fn build_menu(state: &TrayState) -> Menu {
         if state.tunnel_active {
             let _ = quick_actions_sub.append(&MenuItem::with_id("disconnect", "Disconnect", !is_busy, None));
         } else {
-            let _ = quick_actions_sub.append(&MenuItem::with_id("connect", "Connect (tunnel)", !is_busy, None));
+            let _ = quick_actions_sub.append(&MenuItem::with_id("connect", "Connect", !is_busy, None));
         }
 
         let clis = launcher::detect_installed_clis();
@@ -1011,7 +1012,7 @@ fn build_menu(state: &TrayState) -> Menu {
     if state.logged_in {
         let pods_sub = Submenu::new("Show all pods", true);
         if state.pods.is_empty() {
-            let _ = pods_sub.append(&MenuItem::with_id("no_pods", "No pods allocated", false, None));
+            let _ = pods_sub.append(&MenuItem::with_id("no_pods", "No workspace yet", false, None));
             let _ = pods_sub.append(&PredefinedMenuItem::separator());
         } else {
             // Surface the default pod (agent-less, 0 units) on its own row
@@ -1363,7 +1364,7 @@ fn build_menu(state: &TrayState) -> Menu {
     // ── Settings ▸ ────────────────────────────────────────
     let settings_sub = Submenu::new("Settings", true);
     if state.daemon_running && state.logged_in {
-        let _ = settings_sub.append(&MenuItem::with_id("settings_configure", "Configure Agent…", true, None));
+        let _ = settings_sub.append(&MenuItem::with_id("settings_configure", "Configure your AI…", true, None));
     }
     let autostart_label = if state.autostart_installed {
         "Start Tunnel at Login  ✓"
@@ -1422,7 +1423,7 @@ fn build_menu(state: &TrayState) -> Menu {
     // or a paste-to-support blob.
     let _ = trouble_sub.append(&MenuItem::with_id("help_dialog", "Help…  (something's not working)", true, None));
     let _ = trouble_sub.append(&PredefinedMenuItem::separator());
-    let _ = trouble_sub.append(&MenuItem::with_id("doctor", "Doctor (advanced)", true, None));
+    let _ = trouble_sub.append(&MenuItem::with_id("doctor", "Run diagnostics (advanced)", true, None));
     let _ = trouble_sub.append(&MenuItem::with_id("view_daemon_log", "View Daemon Log", true, None));
     let _ = trouble_sub.append(&MenuItem::with_id("view_startup_log", "View Startup Log", true, None));
     let _ = trouble_sub.append(&PredefinedMenuItem::separator());
@@ -1458,7 +1459,7 @@ fn tooltip_for(state: &TrayState) -> String {
         HealthDot::Connected => format!("Tytus — Connected ({})", state.email),
         HealthDot::Warning if !state.logged_in => "Tytus — Not logged in".into(),
         HealthDot::Warning => "Tytus — Needs attention".into(),
-        HealthDot::Down => "Tytus — Daemon not running".into(),
+        HealthDot::Down => "Tytus — Background service not running".into(),
     }
 }
 

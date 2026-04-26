@@ -29,7 +29,7 @@ pub const LOGO: &str = r#"
       ██║     ╚██╔╝     ██║   ██║   ██║╚════██║
       ██║      ██║      ██║   ╚██████╔╝███████║
       ╚═╝      ╚═╝      ╚═╝    ╚═════╝ ╚══════╝
-     Your private AI pod, tunneled to any terminal
+     Your own private AI — talk to it from any terminal
 "#;
 
 /// Short banner for less prominent contexts.

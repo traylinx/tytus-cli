@@ -2212,7 +2212,7 @@ async fn cmd_agent_list(http: &atomek_core::HttpClient, json: bool) {
     }
 
     if state.pods.is_empty() {
-        println!("No pods. Run: tytus connect (for AIL) or tytus agent install <name>");
+        println!("No workspace yet. Run: tytus connect (for direct AI) or tytus agent install <name> (to install an AI assistant)");
         return;
     }
     println!("{:<6} {:<12} {:<10} ENDPOINT", "POD", "AGENT", "TUNNEL");
@@ -2520,7 +2520,7 @@ async fn cmd_restart(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
 
     let target_pod_id = pod_id.unwrap_or_else(|| {
         state.pods.first().map(|p| p.pod_id.clone()).unwrap_or_else(|| {
-            wizard::print_fail("No pods. Run: tytus connect");
+            wizard::print_fail("No workspace yet. Run: tytus connect");
             std::process::exit(1);
         })
     });
@@ -2571,7 +2571,7 @@ async fn cmd_exec(http: &atomek_core::HttpClient, command: Vec<String>, pod_id: 
 
     let target_pod_id = pod_id.unwrap_or_else(|| {
         state.pods.first().map(|p| p.pod_id.clone()).unwrap_or_else(|| {
-            eprintln!("No pods. Run: tytus connect");
+            eprintln!("No workspace yet. Run: tytus connect");
             std::process::exit(1);
         })
     });
@@ -3698,7 +3698,7 @@ async fn cmd_default(http: &atomek_core::HttpClient, json: bool) {
         wizard::print_logo();
         wizard::type_out("   Welcome! Let's get you set up in 60 seconds.");
         println!();
-        wizard::print_info("Tytus gives you a private, encrypted AI pod — your own OpenAI-compatible gateway.");
+        wizard::print_info("Tytus runs your own AI in private. Your messages never leave the encrypted line between your computer and your AI.");
         println!();
 
         if wizard::is_interactive() {
@@ -3743,13 +3743,13 @@ async fn show_dashboard(http: &atomek_core::HttpClient, _state: &CliState, _json
     println!();
 
     if state.pods.is_empty() {
-        wizard::print_warn("No pods allocated yet.");
+        wizard::print_warn("No workspaces yet.");
         println!();
-        wizard::print_hint("Start your pod:  tytus connect");
+        wizard::print_hint("Set up your workspace:  tytus connect");
         return;
     }
 
-    wizard::print_header("Your Pods");
+    wizard::print_header("Your workspaces");
     for pod in &state.pods {
         let agent = pod.agent_type.as_deref().unwrap_or("?");
         let tunnel_active = pod.tunnel_iface.is_some();
@@ -3758,15 +3758,17 @@ async fn show_dashboard(http: &atomek_core::HttpClient, _state: &CliState, _json
         } else {
             console::style("○ disconnected").dim()
         };
+        // Pod-NN identifier kept as-is (verdict footnote — short form is
+        // load-bearing in narrow output; "Workspace 02" wraps too long).
         println!("  Pod {} [{}]  {}", console::style(&pod.pod_id).bold(), agent, status_label);
         if let Some(ref ep) = pod.ai_endpoint {
-            println!("    AI Gateway: {}", console::style(ep).cyan());
+            println!("    AI URL:    {}", console::style(ep).cyan());
         }
         if let Some(ref ep) = pod.agent_endpoint {
-            println!("    Agent API:  {}", console::style(ep).cyan());
+            println!("    AI API:    {}", console::style(ep).cyan());
         }
         if let Some(ref iface) = pod.tunnel_iface {
-            println!("    Tunnel:     {}", console::style(iface).dim());
+            println!("    Connection: {}", console::style(iface).dim());
         }
         println!();
     }
@@ -3776,12 +3778,12 @@ async fn show_dashboard(http: &atomek_core::HttpClient, _state: &CliState, _json
     if has_tunnel {
         wizard::print_hint("tytus chat       — Chat with your AI");
         wizard::print_hint("tytus test       — Run a quick health test");
-        wizard::print_hint("tytus disconnect — Stop the tunnel");
+        wizard::print_hint("tytus disconnect — Disconnect");
     } else {
-        wizard::print_hint("tytus connect    — Start your tunnel");
-        wizard::print_hint("tytus doctor     — Diagnose issues");
+        wizard::print_hint("tytus connect    — Connect to your AI");
+        wizard::print_hint("tytus doctor     — Run diagnostics");
     }
-    wizard::print_hint("tytus configure  — Configure your agent");
+    wizard::print_hint("tytus configure  — Configure your AI");
     wizard::print_hint("tytus --help     — See all commands");
     println!();
 }
@@ -3957,7 +3959,7 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
     let pb = wizard::spinner("Checking pod allocation");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     if state.pods.is_empty() {
-        wizard::finish_fail(&pb, "No pod allocated");
+        wizard::finish_fail(&pb, "No workspace yet");
         wizard::print_hint("Run: tytus connect");
         std::process::exit(1);
     }
@@ -4067,7 +4069,7 @@ async fn cmd_chat(http: &atomek_core::HttpClient, model: &str, json: bool) {
             std::process::exit(1);
         }
         None => {
-            wizard::print_fail("No pod allocated. Run: tytus setup");
+            wizard::print_fail("No workspace yet. Run: tytus setup");
             std::process::exit(1);
         }
     };
@@ -4178,7 +4180,7 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
     let pod = match state.pods.first() {
         Some(p) => p.clone(),
         None => {
-            wizard::print_fail("No pod allocated. Run: tytus setup");
+            wizard::print_fail("No workspace yet. Run: tytus setup");
             std::process::exit(1);
         }
     };
@@ -7457,7 +7459,7 @@ fn print_human_status(state: &CliState) {
     }
 
     if state.pods.is_empty() {
-        println!("No pods. Run: tytus connect");
+        println!("No workspace yet. Run: tytus connect");
     } else {
         for pod in &state.pods {
             let agent = pod.agent_type.as_deref().unwrap_or("?");

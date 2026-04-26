@@ -7,6 +7,99 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.0-rc.3] — 2026-04-26
+
+Phase D — vocabulary normalization, partial. Applies the locked
+HYBRID/C verdict from `verdicts/Q1-VOCAB-LOCKED.md` to the highest-
+traffic CLI + tray surfaces. Tower strings deferred to rc.4 because
+Phase B (Tower 5-tab rewrite) introduces fresh strings that get the
+rename at write-time.
+
+### Phase D — CLI surfaces (renamed)
+
+- **Welcome banner subtitle** in `cli/src/wizard.rs`:
+  `Your private AI pod, tunneled to any terminal`
+  → `Your own private AI — talk to it from any terminal`.
+- **Welcome info line** in `cli/src/main.rs::cmd_default`:
+  `Tytus gives you a private, encrypted AI pod — your own
+  OpenAI-compatible gateway.`
+  → `Tytus runs your own AI in private. Your messages never leave
+  the encrypted line between your computer and your AI.`
+- **Dashboard** (`show_dashboard`):
+  - `No pods allocated yet` → `No workspaces yet`
+  - `Start your pod: tytus connect` → `Set up your workspace: tytus connect`
+  - `Your Pods` header → `Your workspaces`
+  - `AI Gateway:` → `AI URL:`
+  - `Agent API:` → `AI API:`
+  - `Tunnel:` → `Connection:`
+  - `tytus disconnect — Stop the tunnel` → `tytus disconnect — Disconnect`
+  - `tytus connect — Start your tunnel` → `tytus connect — Connect to your AI`
+  - `tytus doctor — Diagnose issues` → `tytus doctor — Run diagnostics`
+  - `tytus configure — Configure your agent` → `tytus configure — Configure your AI`
+- **Recoverable error messages** (user-facing, primary path):
+  - `No pods. Run: tytus connect (for AIL) or tytus agent install <name>`
+    → `No workspace yet. Run: tytus connect (for direct AI) or
+    tytus agent install <name> (to install an AI assistant)`
+  - `No pods. Run: tytus connect` → `No workspace yet. Run: tytus connect`
+  - `No pod allocated. Run: tytus setup` → `No workspace yet. Run: tytus setup`
+  - `No pod allocated` (interactive surfaces) → `No workspace yet`
+
+### Phase D — Tray surfaces (renamed)
+
+- **Status line** in `build_menu`:
+  - `No pods allocated — click Connect` → `No workspace yet — click Connect`
+  - `Tunnel inactive — click Connect` → `Not connected — click Connect`
+- **Tooltip** (`tooltip_for`):
+  - `Tytus — Daemon not running` → `Tytus — Background service not running`
+- **Quick actions ▸** submenu:
+  - `Connect (tunnel)` → `Connect`
+- **Settings ▸** submenu:
+  - `Configure Agent…` → `Configure your AI…`
+- **Help ▸** submenu:
+  - `Doctor (advanced)` → `Run diagnostics (advanced)`
+- **Pods submenu** (Quick actions ▸ Show all pods ▸):
+  - `No pods allocated` → `No workspace yet`
+
+### Phase D — Stayed technical (per locked verdict)
+
+- **CLI subcommand names** — `tytus connect`, `tytus agent install`,
+  `tytus daemon`, `tytus exec`, `tytus pods` etc. — all byte-identical
+  to v0.5.5. Backwards-compat per locked sprint rule.
+- **CLI `--help` clap output** — clap descriptions stay technical;
+  Phase E will add `tytus help <topic>` as a parallel plain-English
+  entry point.
+- **Doctor / capabilities output** — diagnostic surfaces, Advanced.
+  Internal `Err()` strings, `tunnel-up` log lines, sidecar JSON
+  schemas, API field names — untouched.
+- **Daemon controls** in Help submenu (`Restart Daemon`, `Stop Daemon`,
+  `Start Daemon`, `View Daemon Log`, `View Startup Log`) — Advanced
+  power-user surface; verdict bright-line says technical stays.
+- **Per-pod headers + actions** in Show all pods ▸ submenu — power-
+  user verbs (Open in Browser, Stop Forwarder, Restart, Refresh
+  creds, Uninstall, Revoke); technical stays.
+- **AIL Connection Info ▸** items (Copy AIL_URL / AIL_API_KEY / OpenAI
+  exports / Anthropic exports / JSON) — intentional dev surface for
+  power users wiring Cursor / Claude Code / etc.; technical stays.
+- **Internal Rust types, struct fields, env vars, file names, log
+  lines** — zero changes from rc.2.
+
+### Phase D — Deferred to rc.4
+
+- **Tower strings** — bind form labels ("Bucket name" → "Folder name"),
+  "Open ~/.cache/garagetytus" → "Open sync folder", "Stop forwarder"
+  → "Stop browser shortcut", chooser success-screen copy. Phase B
+  rewrites Tower into a 5-tab SPA; renames batch with that work to
+  avoid double-touching the same lines.
+
+### Files touched
+
+- `cli/src/main.rs` — welcome info line, dashboard, recoverable errors
+- `cli/src/wizard.rs` — logo subtitle
+- `tray/src/main.rs` — status line, tooltip, Quick actions / Settings /
+  Help / pods-submenu labels
+- `Cargo.toml` — workspace version bump to `0.6.0-rc.3`
+- `CHANGELOG.md` — this entry
+
 ## [0.6.0-rc.2] — 2026-04-26
 
 Phase C — tray menu simplification. Top-level tray collapses from 14
