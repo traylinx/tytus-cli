@@ -24,9 +24,23 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Daemon boot timestamp (Unix epoch seconds). Set once on first
+/// `start()` call; UI consumers compare against the value last seen
+/// to detect a daemon restart and drop stale activeJob state.
+static DAEMON_STARTED_AT: OnceLock<u64> = OnceLock::new();
+
+fn daemon_started_at() -> u64 {
+    *DAEMON_STARTED_AT.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    })
+}
 
 use serde::Serialize;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -192,6 +206,11 @@ fn random_job_id() -> String {
 /// Returns `None` if bind failed (very rare — only when 127.0.0.1 itself
 /// isn't available). Caller stores the returned port for `open_tower()`.
 pub fn start() -> Option<u16> {
+    // Capture boot timestamp before we bind, so /api/version reflects
+    // when the *daemon* came up — not when it first served a version
+    // request. Idempotent (OnceLock).
+    daemon_started_at();
+
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
         Err(e) => {
@@ -339,6 +358,9 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Get, "/api/state") => {
             handle_state(request, &registry);
+        }
+        (Method::Get, "/api/version") => {
+            handle_version(request);
         }
         (Method::Post, "/api/open-external") => {
             handle_open_external(request, &query);
@@ -1020,6 +1042,18 @@ struct StateSnapshot {
     /// uses this to show a "Stop Forwarder" button on the matching
     /// running-pod panel.
     forwarders: Vec<String>,
+    /// Tray binary version (`CARGO_PKG_VERSION` of `tytus-tray`). Lets
+    /// TytusOS gate UI features that require a newer daemon surface
+    /// without firing a separate /api/version request — saves an HTTP
+    /// roundtrip per poll *and* avoids 404 noise on consumers running
+    /// against pre-version-endpoint daemons.
+    daemon_version: String,
+    /// Daemon boot time, Unix seconds. Stable across the daemon
+    /// process's lifetime via `OnceLock`. TytusOS diffs this between
+    /// polls to detect a daemon restart and drop in-flight job state
+    /// (the registry is in-memory; every active job_id is invalid past
+    /// a restart).
+    daemon_started_at: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -1138,6 +1172,27 @@ fn handle_job_cancel(request: Request, registry: &Registry, job_id: &str) {
     }));
 }
 
+/// GET /api/version — daemon identity for compat checks.
+///
+/// `daemon_started_at` is the Unix-seconds timestamp captured on
+/// first start() call. UI consumers persist this between polls and
+/// drop in-flight `activeJob` state when the value changes — a
+/// daemon restart invalidates every job_id since the registry is
+/// in-memory only.
+///
+/// `daemon_version` is the `tytus-tray` crate version (CARGO_PKG_VERSION).
+/// Future TytusOS releases compare it against a min-required value
+/// so a newer UI can surface "your tray is too old, run `tytus tray
+/// install`" instead of failing with a confused 404 on a missing
+/// route.
+fn handle_version(request: Request) {
+    respond_json(request, 200, &serde_json::json!({
+        "daemon_version": env!("CARGO_PKG_VERSION"),
+        "daemon_pid": std::process::id(),
+        "daemon_started_at": daemon_started_at(),
+    }));
+}
+
 fn handle_state(request: Request, registry: &Registry) {
     let snap = compute_state_snapshot();
     let active = registry.active_pods();
@@ -1155,7 +1210,56 @@ fn handle_state(request: Request, registry: &Registry) {
             serde_json::to_value(&active).unwrap_or(serde_json::Value::Null),
         );
     }
-    respond_json(request, 200, &value);
+
+    // ETag conditional GET. The client polls /api/state every few
+    // seconds and most polls return identical bodies — caching the
+    // hash and short-circuiting to 304 saves the JSON.parse +
+    // setState round on every no-change tick.
+    //
+    // Hash with std's DefaultHasher (SipHash). Not crypto, but the
+    // ETag only needs to be consistent within one daemon process —
+    // a hash collision would cause us to skip a state update, which
+    // self-corrects on the next non-collision poll.
+    let body = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
+    let etag = compute_state_etag(body.as_bytes());
+
+    if let Some(client_etag) = read_if_none_match(request.headers()) {
+        if client_etag == etag {
+            // 304 Not Modified — empty body, but echo the ETag so a
+            // proxy that drops the response can still validate.
+            let resp = Response::empty(StatusCode(304))
+                .with_header(header("ETag", &etag))
+                .with_header(header("Cache-Control", "no-cache"));
+            let _ = request.respond(resp);
+            return;
+        }
+    }
+
+    let resp = Response::from_string(body)
+        .with_status_code(StatusCode(200))
+        .with_header(header("Content-Type", "application/json"))
+        .with_header(header("ETag", &etag))
+        .with_header(header("Cache-Control", "no-cache"));
+    let _ = request.respond(resp);
+}
+
+/// Compute a stable per-process ETag for the serialized state body.
+/// Returns a quoted hex string per RFC 9110 §8.8.3 (`"abc123"`).
+fn compute_state_etag(body: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    body.hash(&mut h);
+    format!("\"{:016x}\"", h.finish())
+}
+
+fn read_if_none_match(headers: &[Header]) -> Option<String> {
+    for h in headers {
+        if h.field.as_str().as_str().eq_ignore_ascii_case("If-None-Match") {
+            return Some(h.value.as_str().to_string());
+        }
+    }
+    None
 }
 
 /// Build the rich state snapshot that the wizard's budget strip, the
@@ -1188,6 +1292,8 @@ fn compute_state_snapshot() -> StateSnapshot {
         daemon_pid: 0,
         app_bundle_installed: crate::check_app_bundle_installed(),
         forwarders: vec![],
+        daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+        daemon_started_at: daemon_started_at(),
     };
 
     let state_path = state_json_path();
@@ -1334,6 +1440,8 @@ fn compute_state_snapshot() -> StateSnapshot {
         daemon_pid: daemon_snap.daemon_pid,
         app_bundle_installed: crate::check_app_bundle_installed(),
         forwarders,
+        daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+        daemon_started_at: daemon_started_at(),
     }
 }
 
@@ -2901,6 +3009,174 @@ mod tests {
         assert_eq!(active.get("02"), Some(&1));
         assert_eq!(active.get("04"), Some(&1));
         assert_eq!(active.get("99"), None);
+    }
+
+    #[test]
+    fn daemon_started_at_is_stable_across_calls() {
+        // OnceLock invariant — UI consumers diff this value to detect
+        // restart, so it MUST NOT drift between polls within one
+        // process.
+        let a = daemon_started_at();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let b = daemon_started_at();
+        assert_eq!(a, b);
+        assert!(a > 0, "Unix epoch zero would mean SystemTime::now failed");
+    }
+
+    #[test]
+    fn compute_state_etag_is_deterministic_within_process() {
+        // Pin the contract: two identical bodies produce the same
+        // ETag, so the client's If-None-Match round-trip succeeds.
+        // Different bodies must NOT collide on this fixed input.
+        let a = compute_state_etag(b"{\"tier\":\"operator\"}");
+        let b = compute_state_etag(b"{\"tier\":\"operator\"}");
+        assert_eq!(a, b);
+        assert!(a.starts_with('"') && a.ends_with('"'), "RFC 9110 quoted-string");
+        let c = compute_state_etag(b"{\"tier\":\"explorer\"}");
+        assert_ne!(a, c);
+    }
+
+    fn if_none_match_hdr(value: &str) -> Header {
+        Header::from_bytes(b"If-None-Match", value.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn read_if_none_match_returns_value_when_present() {
+        let v = read_if_none_match(&[if_none_match_hdr("\"abc123\"")]);
+        assert_eq!(v, Some("\"abc123\"".to_string()));
+    }
+
+    #[test]
+    fn read_if_none_match_is_case_insensitive() {
+        // Header field names are case-insensitive per RFC 9110 §5.1.
+        // Some proxies lowercase, others preserve mixed case.
+        let h1 = Header::from_bytes(b"if-none-match", b"\"abc\"").unwrap();
+        let h2 = Header::from_bytes(b"IF-NONE-MATCH", b"\"abc\"").unwrap();
+        assert_eq!(read_if_none_match(&[h1]), Some("\"abc\"".to_string()));
+        assert_eq!(read_if_none_match(&[h2]), Some("\"abc\"".to_string()));
+    }
+
+    #[test]
+    fn read_if_none_match_returns_none_when_absent() {
+        assert_eq!(read_if_none_match(&[]), None);
+        let other = Header::from_bytes(b"X-Other", b"42").unwrap();
+        assert_eq!(read_if_none_match(&[other]), None);
+    }
+
+    /// Real-bytes wire test for the ETag round-trip.
+    ///
+    /// Helper-function tests (compute_state_etag / read_if_none_match)
+    /// can pass while the wire is broken if tiny_http, the dev proxy,
+    /// or a header-encoding quirk drops the ETag in transit. This
+    /// test bottoms out through a real `Server::http`, two raw HTTP/1.1
+    /// requests via `TcpStream`, and parses the response strings —
+    /// catching any layer that mangles `ETag` / `If-None-Match` /
+    /// 304 framing before it bites in production.
+    ///
+    /// Also covers the route dispatcher (`handle`), so a future
+    /// refactor that drops `/api/state` from the match arms surfaces
+    /// here rather than only through manual smoke testing.
+    #[test]
+    fn etag_roundtrip_via_real_http() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let port = server.server_addr().to_ip().expect("ip").port();
+        let registry = Registry::new();
+
+        let server_arc = Arc::new(server);
+        let server_for_thread = server_arc.clone();
+        let handler = thread::spawn(move || {
+            for (i, req) in server_for_thread.incoming_requests().enumerate() {
+                handle(req, registry.clone());
+                if i >= 1 {
+                    break;
+                }
+            }
+        });
+
+        // ── Request 1: no If-None-Match. Expect 200 + ETag. ─────────
+        let mut s1 = TcpStream::connect(("127.0.0.1", port)).expect("connect 1");
+        s1.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s1.write_all(
+            b"GET /api/state HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Connection: close\r\n\r\n",
+        )
+        .expect("write 1");
+        let mut resp1 = String::new();
+        s1.read_to_string(&mut resp1).expect("read 1");
+
+        let status1 = resp1.lines().next().unwrap_or("");
+        assert!(
+            status1.starts_with("HTTP/1.1 200"),
+            "expected 200 on first poll, got: {}",
+            status1,
+        );
+        let etag1 =
+            extract_header(&resp1, "ETag").expect("ETag header missing on 200");
+        assert!(
+            etag1.starts_with('"') && etag1.ends_with('"'),
+            "ETag must be RFC 9110 quoted: {:?}",
+            etag1,
+        );
+
+        // ── Request 2: If-None-Match echoes ETag. Expect 304 + same ETag. ──
+        let mut s2 = TcpStream::connect(("127.0.0.1", port)).expect("connect 2");
+        s2.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let req2 = format!(
+            "GET /api/state HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             If-None-Match: {}\r\n\
+             Connection: close\r\n\r\n",
+            etag1,
+        );
+        s2.write_all(req2.as_bytes()).expect("write 2");
+        let mut resp2 = String::new();
+        s2.read_to_string(&mut resp2).expect("read 2");
+
+        let status2 = resp2.lines().next().unwrap_or("");
+        assert!(
+            status2.starts_with("HTTP/1.1 304"),
+            "expected 304 when If-None-Match matches, got: {}\nfull response:\n{}",
+            status2,
+            resp2,
+        );
+        let etag2 =
+            extract_header(&resp2, "ETag").expect("ETag must be echoed on 304");
+        assert_eq!(
+            etag1, etag2,
+            "ETag should be identical across the two responses (snapshot didn't change)",
+        );
+        // 304 MUST have an empty body — assert the response ends right
+        // after the headers (CRLFCRLF terminator).
+        let body_start = resp2.find("\r\n\r\n").map(|i| i + 4).unwrap_or(resp2.len());
+        let body = &resp2[body_start..];
+        assert!(
+            body.is_empty(),
+            "304 must have empty body, got {} bytes: {:?}",
+            body.len(),
+            body,
+        );
+
+        handler.join().expect("handler thread panicked");
+    }
+
+    /// Case-insensitive `Header-Name: value` extractor for the wire
+    /// test above. tiny_http preserves whatever case the server sent
+    /// (we send `ETag`), but a future refactor or proxy might
+    /// normalize — keep the lookup tolerant.
+    fn extract_header(response: &str, name: &str) -> Option<String> {
+        let prefix = format!("{}:", name).to_lowercase();
+        response
+            .lines()
+            .find(|line| line.to_lowercase().starts_with(&prefix))
+            .map(|line| {
+                let colon = line.find(':').unwrap_or(line.len());
+                line[colon + 1..].trim().to_string()
+            })
     }
 
     #[test]
