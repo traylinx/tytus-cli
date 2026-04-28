@@ -1041,7 +1041,56 @@ fn handle_state(request: Request, registry: &Registry) {
             serde_json::to_value(&active).unwrap_or(serde_json::Value::Null),
         );
     }
-    respond_json(request, 200, &value);
+
+    // ETag conditional GET. The client polls /api/state every few
+    // seconds and most polls return identical bodies — caching the
+    // hash and short-circuiting to 304 saves the JSON.parse +
+    // setState round on every no-change tick.
+    //
+    // Hash with std's DefaultHasher (SipHash). Not crypto, but the
+    // ETag only needs to be consistent within one daemon process —
+    // a hash collision would cause us to skip a state update, which
+    // self-corrects on the next non-collision poll.
+    let body = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
+    let etag = compute_state_etag(body.as_bytes());
+
+    if let Some(client_etag) = read_if_none_match(request.headers()) {
+        if client_etag == etag {
+            // 304 Not Modified — empty body, but echo the ETag so a
+            // proxy that drops the response can still validate.
+            let resp = Response::empty(StatusCode(304))
+                .with_header(header("ETag", &etag))
+                .with_header(header("Cache-Control", "no-cache"));
+            let _ = request.respond(resp);
+            return;
+        }
+    }
+
+    let resp = Response::from_string(body)
+        .with_status_code(StatusCode(200))
+        .with_header(header("Content-Type", "application/json"))
+        .with_header(header("ETag", &etag))
+        .with_header(header("Cache-Control", "no-cache"));
+    let _ = request.respond(resp);
+}
+
+/// Compute a stable per-process ETag for the serialized state body.
+/// Returns a quoted hex string per RFC 9110 §8.8.3 (`"abc123"`).
+fn compute_state_etag(body: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    body.hash(&mut h);
+    format!("\"{:016x}\"", h.finish())
+}
+
+fn read_if_none_match(headers: &[Header]) -> Option<String> {
+    for h in headers {
+        if h.field.as_str().as_str().eq_ignore_ascii_case("If-None-Match") {
+            return Some(h.value.as_str().to_string());
+        }
+    }
+    None
 }
 
 /// Build the rich state snapshot that the wizard's budget strip, the
@@ -2778,6 +2827,46 @@ mod tests {
         let b = daemon_started_at();
         assert_eq!(a, b);
         assert!(a > 0, "Unix epoch zero would mean SystemTime::now failed");
+    }
+
+    #[test]
+    fn compute_state_etag_is_deterministic_within_process() {
+        // Pin the contract: two identical bodies produce the same
+        // ETag, so the client's If-None-Match round-trip succeeds.
+        // Different bodies must NOT collide on this fixed input.
+        let a = compute_state_etag(b"{\"tier\":\"operator\"}");
+        let b = compute_state_etag(b"{\"tier\":\"operator\"}");
+        assert_eq!(a, b);
+        assert!(a.starts_with('"') && a.ends_with('"'), "RFC 9110 quoted-string");
+        let c = compute_state_etag(b"{\"tier\":\"explorer\"}");
+        assert_ne!(a, c);
+    }
+
+    fn if_none_match_hdr(value: &str) -> Header {
+        Header::from_bytes(b"If-None-Match", value.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn read_if_none_match_returns_value_when_present() {
+        let v = read_if_none_match(&[if_none_match_hdr("\"abc123\"")]);
+        assert_eq!(v, Some("\"abc123\"".to_string()));
+    }
+
+    #[test]
+    fn read_if_none_match_is_case_insensitive() {
+        // Header field names are case-insensitive per RFC 9110 §5.1.
+        // Some proxies lowercase, others preserve mixed case.
+        let h1 = Header::from_bytes(b"if-none-match", b"\"abc\"").unwrap();
+        let h2 = Header::from_bytes(b"IF-NONE-MATCH", b"\"abc\"").unwrap();
+        assert_eq!(read_if_none_match(&[h1]), Some("\"abc\"".to_string()));
+        assert_eq!(read_if_none_match(&[h2]), Some("\"abc\"".to_string()));
+    }
+
+    #[test]
+    fn read_if_none_match_returns_none_when_absent() {
+        assert_eq!(read_if_none_match(&[]), None);
+        let other = Header::from_bytes(b"X-Other", b"42").unwrap();
+        assert_eq!(read_if_none_match(&[other]), None);
     }
 
     #[test]
