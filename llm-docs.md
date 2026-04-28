@@ -285,6 +285,17 @@ tytus restart [--pod NN]           Restart the agent container via DAM.
                                    the user overlay file. Useful after
                                    editing config.user.json or .yaml.
 
+tytus logs [--pod NN] [--lines N]  Tail the last N (default 200, max 500)
+                                   lines of the agent container's
+                                   stdout/stderr. Proxies to DAM's
+                                   `/agent/<pod_num>/logs?tail=N`. Output
+                                   streams one line at a time so the
+                                   tray's SSE relay (POST `/api/pod/<NN>/
+                                   run-streamed` `{action:"logs"}`) can
+                                   surface each log line as a discrete
+                                   `log` event in the Pod Inspector
+                                   Logs tab.
+
 tytus env [--export] [--raw] [--pod NN] [--json]
                                    Default: stable values
                                    (10.42.42.1 + sk-tytus-user-*).
