@@ -70,14 +70,20 @@ struct Job {
     /// can enforce one-running-action-per-pod and the Tower UI can
     /// badge pod rows that have a live job.
     pod_id: Option<String>,
+    /// Live child PID for cancellation. Set by the spawn thread once
+    /// `Command::spawn()` returns; cleared after `child.wait()`. The
+    /// `POST /api/jobs/<id>/cancel` handler reads this to send SIGTERM.
+    /// `None` means "no running process" (job is queued / failed to
+    /// spawn / already exited) — cancel becomes a no-op.
+    child_pid: Option<u32>,
 }
 
 impl Job {
     fn new_install() -> Self {
-        Job { events: Vec::new(), finished: false, pod_id: None }
+        Job { events: Vec::new(), finished: false, pod_id: None, child_pid: None }
     }
     fn new_pod(pod_id: String) -> Self {
-        Job { events: Vec::new(), finished: false, pod_id: Some(pod_id) }
+        Job { events: Vec::new(), finished: false, pod_id: Some(pod_id), child_pid: None }
     }
 }
 
@@ -289,6 +295,13 @@ fn handle(request: Request, registry: Registry) {
                 .trim_end_matches("/stream")
                 .to_string();
             handle_stream(request, &registry, &job_id);
+        }
+        (Method::Post, p) if p.starts_with("/api/jobs/") && p.ends_with("/cancel") => {
+            let job_id = p
+                .trim_start_matches("/api/jobs/")
+                .trim_end_matches("/cancel")
+                .to_string();
+            handle_job_cancel(request, &registry, &job_id);
         }
         (Method::Get, "/api/state") => {
             handle_state(request, &registry);
@@ -603,6 +616,8 @@ fn spawn_install(job: Arc<Mutex<Job>>, agent_type: String, pod_id: Option<String
                 return;
             }
         };
+        // Track the PID so /api/jobs/<id>/cancel can SIGTERM it.
+        job.lock().unwrap().child_pid = Some(child.id());
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -662,6 +677,10 @@ fn spawn_install(job: Arc<Mutex<Job>>, agent_type: String, pod_id: Option<String
         });
 
         let status = child.wait();
+        // PID is stale once wait() returns. Clear before the terminal
+        // event so the cancel handler can't accidentally signal a
+        // recycled PID.
+        job.lock().unwrap().child_pid = None;
 
         // Join the readers so we can inspect stdout for the final JSON.
         let stdout_captured = stdout_thread.and_then(|h| h.join().ok()).unwrap_or_default();
@@ -967,6 +986,54 @@ fn agent_units_for(agent_type: &str) -> u32 {
         "none" => 0,
         _ => 1, // nemoclaw + future openclaw-family
     }
+}
+
+/// POST /api/jobs/<id>/cancel — SIGTERM the job's child process.
+///
+/// Idempotent and safe to call against a finished job (returns
+/// `cancelled: false` with `reason: "already finished"`). When the
+/// child PID isn't tracked yet (job exists but `Command::spawn` hasn't
+/// returned) — same response with `reason: "no live process"`. The
+/// terminal `exit` SSE event is emitted by the existing wait() path
+/// once the child dies, so the client doesn't need a separate
+/// cancellation event to wind down its EventSource.
+fn handle_job_cancel(request: Request, registry: &Registry, job_id: &str) {
+    let Some(job) = registry.get(job_id) else {
+        respond_json(request, 404, &serde_json::json!({"error": "no such job"}));
+        return;
+    };
+    let (pid, finished) = {
+        let j = job.lock().unwrap();
+        (j.child_pid, j.finished)
+    };
+    if finished {
+        respond_json(request, 200, &serde_json::json!({
+            "cancelled": false,
+            "reason": "already finished",
+        }));
+        return;
+    }
+    let Some(pid) = pid else {
+        respond_json(request, 200, &serde_json::json!({
+            "cancelled": false,
+            "reason": "no live process",
+        }));
+        return;
+    };
+    push_event(&job, JobEvent::Log(format!("[cancel] sending SIGTERM to PID {}", pid)));
+    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if rc != 0 {
+        let errno = std::io::Error::last_os_error();
+        respond_json(request, 500, &serde_json::json!({
+            "cancelled": false,
+            "reason": format!("kill failed: {}", errno),
+        }));
+        return;
+    }
+    respond_json(request, 200, &serde_json::json!({
+        "cancelled": true,
+        "pid": pid,
+    }));
 }
 
 fn handle_state(request: Request, registry: &Registry) {
@@ -1466,6 +1533,7 @@ fn spawn_pod_action(job: Arc<Mutex<Job>>, argv: Vec<String>) {
                 return;
             }
         };
+        job.lock().unwrap().child_pid = Some(child.id());
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -1510,6 +1578,9 @@ fn spawn_pod_action(job: Arc<Mutex<Job>>, argv: Vec<String>) {
         }));
 
         let status = child.wait();
+        // Clear the PID before emitting the terminal event so cancel
+        // can't race ahead and SIGTERM a recycled PID.
+        job.lock().unwrap().child_pid = None;
         let _ = stdout_t.and_then(|h| h.join().ok());
         let _ = stderr_t.and_then(|h| h.join().ok());
 
@@ -1569,6 +1640,7 @@ fn spawn_external_command(job: Arc<Mutex<Job>>, bin: String, args: Vec<String>) 
                 return;
             }
         };
+        job.lock().unwrap().child_pid = Some(child.id());
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -1610,6 +1682,9 @@ fn spawn_external_command(job: Arc<Mutex<Job>>, bin: String, args: Vec<String>) 
         }));
 
         let status = child.wait();
+        // Clear the PID before emitting the terminal event so cancel
+        // can't race ahead and SIGTERM a recycled PID.
+        job.lock().unwrap().child_pid = None;
         let _ = stdout_t.and_then(|h| h.join().ok());
         let _ = stderr_t.and_then(|h| h.join().ok());
 
@@ -2721,5 +2796,26 @@ mod tests {
         assert_eq!(r.active_pods().get("02"), None);
         // It still exists in the registry until reaped.
         assert!(r.get(&id).is_some());
+    }
+
+    #[test]
+    fn job_child_pid_starts_none_and_is_settable() {
+        // Ensures the cancel handler can distinguish "queued, no live
+        // process" from "running, signal me". Spawn paths set the PID
+        // post-spawn; this test asserts the field has the right
+        // pre-spawn value and round-trips after a manual set.
+        let r = Registry::new();
+        let (_id, job) = r.create_pod("02").unwrap();
+        assert!(job.lock().unwrap().child_pid.is_none());
+
+        // Simulate spawn-thread setting it.
+        job.lock().unwrap().child_pid = Some(12345);
+        assert_eq!(job.lock().unwrap().child_pid, Some(12345));
+
+        // Simulate wait()-thread clearing it pre-Exit.
+        job.lock().unwrap().child_pid = None;
+        push_event(&job, JobEvent::Exit { code: 0 });
+        assert!(job.lock().unwrap().finished);
+        assert!(job.lock().unwrap().child_pid.is_none());
     }
 }
