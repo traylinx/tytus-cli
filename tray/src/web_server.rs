@@ -1396,6 +1396,11 @@ fn pod_action_argv(action: &str, pod_id: &str) -> Option<Vec<String>> {
         // when none is supplied). Streamed via the same job channel
         // the other pod actions use; output renders in-tab.
         "ls-inbox"        => v(&["ls", "--pod", pod_id]),
+        // Pod Inspector Logs tab — `tytus logs --pod NN --lines 200`
+        // tails the agent container's stdout/stderr via DAM. The CLI
+        // emits one stdout line per log line, which the SSE relay
+        // surfaces as individual `log` events.
+        "logs"            => v(&["logs", "--pod", pod_id, "--lines", "200"]),
         _ => None,
     }
 }
@@ -2668,6 +2673,12 @@ mod tests {
         assert_eq!(
             pod_action_argv("ls-inbox", "02").unwrap(),
             vec!["ls", "--pod", "02"],
+        );
+        // Pod Inspector Logs tab — defaults to 200 trailing lines so the
+        // SSE relay can flush them as individual `log` events.
+        assert_eq!(
+            pod_action_argv("logs", "02").unwrap(),
+            vec!["logs", "--pod", "02", "--lines", "200"],
         );
 
         // Global commands are intentionally not pod-scoped — they

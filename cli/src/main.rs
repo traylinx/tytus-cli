@@ -326,6 +326,17 @@ enum Commands {
         #[arg(short, long)]
         pod: Option<String>,
     },
+    /// Tail the last N lines of the agent container's stdout/stderr.
+    /// Streams one line per stdout write so the tray's SSE relay surfaces
+    /// each line as a `log` event in the Pod Inspector Logs tab.
+    Logs {
+        /// Pod ID (defaults to first pod)
+        #[arg(short, long)]
+        pod: Option<String>,
+        /// How many trailing log lines to fetch. Capped at 500.
+        #[arg(short, long, default_value = "200")]
+        lines: u32,
+    },
     /// Run a command inside your pod's agent container
     Exec {
         /// Command to run (e.g. "openclaw config set gateway.port 3000")
@@ -647,6 +658,7 @@ async fn main() {
         Some(Commands::Link { dir, only }) => cmd_link(&dir, only, cli.json),
         Some(Commands::Mcp { format }) => cmd_mcp(&format, cli.json),
         Some(Commands::Restart { pod }) => cmd_restart(&http, pod, cli.json).await,
+        Some(Commands::Logs { pod, lines }) => cmd_logs(&http, pod, lines, cli.json).await,
         Some(Commands::Exec { command, pod, timeout }) => cmd_exec(&http, command, pod, timeout, cli.json).await,
         Some(Commands::Lope { args }) => cmd_lope_passthrough("lope", args, cli.json).await,
         Some(Commands::Bridge { args }) => cmd_lope_passthrough("bridge", args, cli.json).await,
@@ -2763,6 +2775,52 @@ async fn cmd_restart(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
         }
         Err(e) => {
             wizard::finish_fail(&pb, &format!("Restart failed: {}", e));
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn cmd_logs(http: &atomek_core::HttpClient, pod_id: Option<String>, lines: u32, json: bool) {
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        wizard::print_fail("Not logged in. Run: tytus login");
+        std::process::exit(1);
+    }
+    if let Err(e) = ensure_token(&mut state, http).await {
+        wizard::print_fail(&format!("Token refresh failed: {}. Run: tytus login", e));
+        std::process::exit(1);
+    }
+    let (sk, auid) = get_credentials(&mut state, http).await;
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+
+    let target_pod_id = pod_id.unwrap_or_else(|| {
+        state.pods.first().map(|p| p.pod_id.clone()).unwrap_or_else(|| {
+            wizard::print_fail("No workspace yet. Run: tytus connect");
+            std::process::exit(1);
+        })
+    });
+
+    match atomek_pods::agent_logs(&client, &target_pod_id, lines).await {
+        Ok(result) => {
+            if json {
+                println!("{}", serde_json::json!({
+                    "pod_id": target_pod_id,
+                    "pod_num": result.pod_num,
+                    "logs": result.logs,
+                }));
+            } else {
+                // Stream one line at a time so the tray's per-pod SSE relay
+                // surfaces each line as its own `log` event in the Logs tab.
+                // The trailing newline from `println!` is intentional — it
+                // also keeps stdout flushed line-by-line for `tail`-like UX
+                // when invoked directly from a terminal.
+                for line in result.logs.lines() {
+                    println!("{}", line);
+                }
+            }
+        }
+        Err(e) => {
+            wizard::print_fail(&format!("Failed to fetch logs: {}", e));
             std::process::exit(1);
         }
     }
