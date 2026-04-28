@@ -76,16 +76,50 @@ struct Job {
     /// `None` means "no running process" (job is queued / failed to
     /// spawn / already exited) — cancel becomes a no-op.
     child_pid: Option<u32>,
+    /// Set when push_event has dropped a Log line because the event
+    /// vec is at MAX_EVENTS. The first such drop emits a single
+    /// truncation sentinel; subsequent drops are silent. This keeps
+    /// cursor indices monotonic (replay never reorders) and bounds
+    /// daemon RAM against a misbehaving subprocess.
+    log_capped: bool,
 }
 
 impl Job {
     fn new_install() -> Self {
-        Job { events: Vec::new(), finished: false, pod_id: None, child_pid: None }
+        Job {
+            events: Vec::new(),
+            finished: false,
+            pod_id: None,
+            child_pid: None,
+            log_capped: false,
+        }
     }
     fn new_pod(pod_id: String) -> Self {
-        Job { events: Vec::new(), finished: false, pod_id: Some(pod_id), child_pid: None }
+        Job {
+            events: Vec::new(),
+            finished: false,
+            pod_id: Some(pod_id),
+            child_pid: None,
+            log_capped: false,
+        }
     }
 }
+
+/// Cap on Log events per job. ~5k lines × 16 KB max line ≈ 80 MB
+/// worst-case, but typical pod actions emit < 200 lines so this is
+/// effectively a runaway-process guard, not a normal-path constraint.
+/// Past the cap, further Log events are dropped (one sentinel inserted
+/// the first time it triggers). Terminal Done / Fail / Exit always
+/// append regardless — they're ≤ a few hundred bytes and the SSE
+/// consumer needs them to wind the EventSource down.
+const MAX_EVENTS: usize = 5_000;
+
+/// Cap on a single Log line's byte length. Truncated lines append a
+/// `…[truncated]` suffix so the consumer can spot it. 16 KB is generous
+/// for real log output (typical lines < 200 B); the cap exists so a
+/// pathological JSON dump or core-dump trace can't pin one frame to
+/// a multi-MB allocation.
+const MAX_LINE_LEN: usize = 16 * 1024;
 
 #[derive(Clone)]
 struct Registry {
@@ -714,8 +748,48 @@ fn push_event(job: &Arc<Mutex<Job>>, ev: JobEvent) {
         ev,
         JobEvent::Done { .. } | JobEvent::Fail { .. } | JobEvent::Exit { .. }
     );
-    j.events.push(ev);
-    if terminal { j.finished = true; }
+    // Terminal events (Done / Fail / Exit) bypass both caps — the SSE
+    // consumer needs them to wind down its EventSource and they're
+    // bounded in size by construction.
+    if terminal {
+        j.events.push(ev);
+        j.finished = true;
+        return;
+    }
+    // Log path: truncate over-long lines and refuse new ones once
+    // we've hit MAX_EVENTS.
+    let truncated = match ev {
+        JobEvent::Log(line) => JobEvent::Log(truncate_log_line(line)),
+        other => other,
+    };
+    if j.events.len() >= MAX_EVENTS {
+        if !j.log_capped {
+            j.log_capped = true;
+            // One-time sentinel so the user sees that output stopped
+            // because of the cap, not because the process went silent.
+            j.events.push(JobEvent::Log(format!(
+                "…[log capped at {} events; further output suppressed]",
+                MAX_EVENTS,
+            )));
+        }
+        return;
+    }
+    j.events.push(truncated);
+}
+
+fn truncate_log_line(mut line: String) -> String {
+    if line.len() > MAX_LINE_LEN {
+        // Truncate at a char boundary so we don't split a UTF-8
+        // sequence. find_floor_char_boundary isn't stable, so walk
+        // backwards from the cap until we land on a boundary.
+        let mut cut = MAX_LINE_LEN;
+        while cut > 0 && !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        line.truncate(cut);
+        line.push_str("…[truncated]");
+    }
+    line
 }
 
 // ── /api/jobs/<id>/stream (SSE) ───────────────────────────────
@@ -2859,6 +2933,83 @@ mod tests {
         assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "")]), 0);
         assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "abc")]), 0);
         assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "-1")]), 0);
+    }
+
+    #[test]
+    fn truncate_log_line_passes_through_short_lines() {
+        let s = "hello world".to_string();
+        assert_eq!(truncate_log_line(s.clone()), s);
+    }
+
+    #[test]
+    fn truncate_log_line_caps_long_lines_with_suffix() {
+        let s = "a".repeat(MAX_LINE_LEN + 100);
+        let out = truncate_log_line(s);
+        // Suffix is appended; total length is MAX_LINE_LEN + suffix.
+        assert!(out.ends_with("…[truncated]"));
+        assert!(out.len() < MAX_LINE_LEN + 50);
+    }
+
+    #[test]
+    fn truncate_log_line_handles_utf8_boundary() {
+        // A line of multibyte chars where MAX_LINE_LEN lands mid-rune.
+        // We must NOT split a UTF-8 sequence — the truncate would
+        // panic if we did.
+        let rune = "🦀"; // 4 bytes
+        let count = (MAX_LINE_LEN / 4) + 50;
+        let s: String = rune.repeat(count);
+        let out = truncate_log_line(s);
+        assert!(out.ends_with("…[truncated]"));
+        // Body before the suffix must be valid UTF-8 (already implied
+        // by .truncate not panicking, but assert explicitly).
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn push_event_caps_log_at_max_events_and_emits_sentinel_once() {
+        let r = Registry::new();
+        let (_id, job) = r.create_pod("02").unwrap();
+        // Push MAX_EVENTS log lines — all should land.
+        for i in 0..MAX_EVENTS {
+            push_event(&job, JobEvent::Log(format!("line {}", i)));
+        }
+        assert_eq!(job.lock().unwrap().events.len(), MAX_EVENTS);
+        // Push one more — the sentinel takes its place; the dropped
+        // line is silently discarded.
+        push_event(&job, JobEvent::Log("dropped".into()));
+        // Inspect under a scoped lock — borrowing &job.lock().unwrap().events
+        // outside a block would extend the MutexGuard's lifetime across the
+        // next push_event() call and deadlock self.
+        {
+            let j = job.lock().unwrap();
+            assert_eq!(j.events.len(), MAX_EVENTS + 1);
+            match j.events.last() {
+                Some(JobEvent::Log(s)) => assert!(s.contains("log capped")),
+                _ => panic!("expected sentinel Log event"),
+            }
+        }
+        // Subsequent drops are silent (no second sentinel).
+        push_event(&job, JobEvent::Log("also dropped".into()));
+        push_event(&job, JobEvent::Log("also dropped 2".into()));
+        assert_eq!(job.lock().unwrap().events.len(), MAX_EVENTS + 1);
+    }
+
+    #[test]
+    fn push_event_terminal_always_appends_even_at_cap() {
+        let r = Registry::new();
+        let (_id, job) = r.create_pod("02").unwrap();
+        // Fill past the log cap.
+        for i in 0..MAX_EVENTS + 10 {
+            push_event(&job, JobEvent::Log(format!("line {}", i)));
+        }
+        let pre_len = job.lock().unwrap().events.len();
+        // Exit must still land — the SSE consumer needs it to wind
+        // down. Daemon RAM impact is negligible (tens of bytes).
+        push_event(&job, JobEvent::Exit { code: 0 });
+        let j = job.lock().unwrap();
+        assert_eq!(j.events.len(), pre_len + 1);
+        assert!(j.finished);
+        assert!(matches!(j.events.last(), Some(JobEvent::Exit { code: 0 })));
     }
 
     #[test]
