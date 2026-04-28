@@ -242,11 +242,53 @@ fn current_port() -> Option<u16> {
 
 // ── Request router ────────────────────────────────────────────
 
+/// Phase 2 security floor (manifest §11): every state-changing POST must
+/// carry `Sec-Fetch-Site: same-origin`. Modern browsers always send this
+/// header; missing or non-`same-origin` values are rejected with 403 so
+/// a malicious tab on the same machine cannot drive the daemon.
+///
+/// `Sec-Fetch-Site` cannot be forged from JavaScript, so the same-origin
+/// check is sufficient even for cross-origin POSTs that try to bypass
+/// CORS via simple form submits. Curl/local tooling that needs to POST
+/// must pass `-H "Sec-Fetch-Site: same-origin"`; the Vite dev proxy
+/// injects it automatically (services/tytus-os/app/vite.config.ts).
+fn sec_fetch_site_value(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Sec-Fetch-Site"))
+        .map(|h| h.value.as_str().to_string())
+}
+
+fn sec_fetch_site_value_ok(value: Option<&str>) -> bool {
+    matches!(value, Some("same-origin"))
+}
+
+fn sec_fetch_site_ok(request: &Request) -> bool {
+    sec_fetch_site_value_ok(sec_fetch_site_value(request).as_deref())
+}
+
+fn deny_cross_origin_post(request: Request) {
+    respond_json(
+        request,
+        403,
+        &serde_json::json!({ "error": "cross-origin POST denied" }),
+    );
+}
+
 fn handle(request: Request, registry: Registry) {
     let method = request.method().clone();
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("").to_string();
     let query = url.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
+
+    // Phase 2: reject any POST without Sec-Fetch-Site: same-origin BEFORE
+    // dispatch. Fail closed — older browsers without the header are
+    // out of scope per manifest §11.
+    if matches!(method, Method::Post) && !sec_fetch_site_ok(&request) {
+        deny_cross_origin_post(request);
+        return;
+    }
 
     match (&method, path.as_str()) {
         (Method::Get, "/tower") | (Method::Get, "/") => {
@@ -2631,7 +2673,9 @@ fn respond_json<T: Serialize>(request: Request, status: u16, body: &T) {
     let json = serde_json::to_string(body).unwrap_or_else(|_| "{}".into());
     let resp = Response::from_string(json)
         .with_status_code(StatusCode(status))
-        .with_header(header("Content-Type", "application/json"));
+        .with_header(header("Content-Type", "application/json"))
+        // Phase 2 floor — block MIME sniffing on the JSON API surface.
+        .with_header(header("X-Content-Type-Options", "nosniff"));
     let _ = request.respond(resp);
 }
 
@@ -2721,5 +2765,39 @@ mod tests {
         assert_eq!(r.active_pods().get("02"), None);
         // It still exists in the registry until reaped.
         assert!(r.get(&id).is_some());
+    }
+
+    // Phase 2 §11: Sec-Fetch-Site POST guard.
+    //
+    // The full guard runs against `&Request`, which is hard to construct
+    // in unit tests. We extract `sec_fetch_site_value_ok` so the policy
+    // can be exercised directly. End-to-end same-origin behaviour is
+    // verified by the live POST hitting tiny_http on a real port — see
+    // the manual smoke notes in the Phase 2 sprint.
+    #[test]
+    fn sec_fetch_site_guard_accepts_same_origin() {
+        assert!(sec_fetch_site_value_ok(Some("same-origin")));
+    }
+
+    #[test]
+    fn sec_fetch_site_guard_rejects_cross_origin_variants() {
+        assert!(!sec_fetch_site_value_ok(Some("cross-site")));
+        assert!(!sec_fetch_site_value_ok(Some("same-site")));
+        assert!(!sec_fetch_site_value_ok(Some("none")));
+    }
+
+    #[test]
+    fn sec_fetch_site_guard_rejects_missing_header() {
+        // Fail closed: no header => 403. Modern browsers always send
+        // Sec-Fetch-Site (Chrome 76+, FF 90+, Safari 16+).
+        assert!(!sec_fetch_site_value_ok(None));
+    }
+
+    #[test]
+    fn sec_fetch_site_guard_is_case_sensitive_on_value() {
+        // Browsers always emit lowercase tokens. We don't loosen the
+        // value comparison to avoid normalising attacker input later.
+        assert!(!sec_fetch_site_value_ok(Some("Same-Origin")));
+        assert!(!sec_fetch_site_value_ok(Some("SAME-ORIGIN")));
     }
 }
