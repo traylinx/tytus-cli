@@ -921,6 +921,18 @@ struct StateSnapshot {
     /// uses this to show a "Stop Forwarder" button on the matching
     /// running-pod panel.
     forwarders: Vec<String>,
+    /// Tray binary version (`CARGO_PKG_VERSION` of `tytus-tray`). Lets
+    /// TytusOS gate UI features that require a newer daemon surface
+    /// without firing a separate /api/version request — saves an HTTP
+    /// roundtrip per poll *and* avoids 404 noise on consumers running
+    /// against pre-version-endpoint daemons.
+    daemon_version: String,
+    /// Daemon boot time, Unix seconds. Stable across the daemon
+    /// process's lifetime via `OnceLock`. TytusOS diffs this between
+    /// polls to detect a daemon restart and drop in-flight job state
+    /// (the registry is in-memory; every active job_id is invalid past
+    /// a restart).
+    daemon_started_at: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -1062,6 +1074,8 @@ fn compute_state_snapshot() -> StateSnapshot {
         daemon_pid: 0,
         app_bundle_installed: crate::check_app_bundle_installed(),
         forwarders: vec![],
+        daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+        daemon_started_at: daemon_started_at(),
     };
 
     let state_path = state_json_path();
@@ -1208,6 +1222,8 @@ fn compute_state_snapshot() -> StateSnapshot {
         daemon_pid: daemon_snap.daemon_pid,
         app_bundle_installed: crate::check_app_bundle_installed(),
         forwarders,
+        daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+        daemon_started_at: daemon_started_at(),
     }
 }
 
