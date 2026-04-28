@@ -24,9 +24,23 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Daemon boot timestamp (Unix epoch seconds). Set once on first
+/// `start()` call; UI consumers compare against the value last seen
+/// to detect a daemon restart and drop stale activeJob state.
+static DAEMON_STARTED_AT: OnceLock<u64> = OnceLock::new();
+
+fn daemon_started_at() -> u64 {
+    *DAEMON_STARTED_AT.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    })
+}
 
 use serde::Serialize;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -152,6 +166,11 @@ fn random_job_id() -> String {
 /// Returns `None` if bind failed (very rare — only when 127.0.0.1 itself
 /// isn't available). Caller stores the returned port for `open_tower()`.
 pub fn start() -> Option<u16> {
+    // Capture boot timestamp before we bind, so /api/version reflects
+    // when the *daemon* came up — not when it first served a version
+    // request. Idempotent (OnceLock).
+    daemon_started_at();
+
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
         Err(e) => {
@@ -292,6 +311,9 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Get, "/api/state") => {
             handle_state(request, &registry);
+        }
+        (Method::Get, "/api/version") => {
+            handle_version(request);
         }
         (Method::Post, "/api/open-external") => {
             handle_open_external(request, &query);
@@ -967,6 +989,27 @@ fn agent_units_for(agent_type: &str) -> u32 {
         "none" => 0,
         _ => 1, // nemoclaw + future openclaw-family
     }
+}
+
+/// GET /api/version — daemon identity for compat checks.
+///
+/// `daemon_started_at` is the Unix-seconds timestamp captured on
+/// first start() call. UI consumers persist this between polls and
+/// drop in-flight `activeJob` state when the value changes — a
+/// daemon restart invalidates every job_id since the registry is
+/// in-memory only.
+///
+/// `daemon_version` is the `tytus-tray` crate version (CARGO_PKG_VERSION).
+/// Future TytusOS releases compare it against a min-required value
+/// so a newer UI can surface "your tray is too old, run `tytus tray
+/// install`" instead of failing with a confused 404 on a missing
+/// route.
+fn handle_version(request: Request) {
+    respond_json(request, 200, &serde_json::json!({
+        "daemon_version": env!("CARGO_PKG_VERSION"),
+        "daemon_pid": std::process::id(),
+        "daemon_started_at": daemon_started_at(),
+    }));
 }
 
 fn handle_state(request: Request, registry: &Registry) {
@@ -2707,6 +2750,18 @@ mod tests {
         assert_eq!(active.get("02"), Some(&1));
         assert_eq!(active.get("04"), Some(&1));
         assert_eq!(active.get("99"), None);
+    }
+
+    #[test]
+    fn daemon_started_at_is_stable_across_calls() {
+        // OnceLock invariant — UI consumers diff this value to detect
+        // restart, so it MUST NOT drift between polls within one
+        // process.
+        let a = daemon_started_at();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let b = daemon_started_at();
+        assert_eq!(a, b);
+        assert!(a > 0, "Unix epoch zero would mean SystemTime::now failed");
     }
 
     #[test]
