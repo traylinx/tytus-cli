@@ -70,16 +70,56 @@ struct Job {
     /// can enforce one-running-action-per-pod and the Tower UI can
     /// badge pod rows that have a live job.
     pod_id: Option<String>,
+    /// Live child PID for cancellation. Set by the spawn thread once
+    /// `Command::spawn()` returns; cleared after `child.wait()`. The
+    /// `POST /api/jobs/<id>/cancel` handler reads this to send SIGTERM.
+    /// `None` means "no running process" (job is queued / failed to
+    /// spawn / already exited) — cancel becomes a no-op.
+    child_pid: Option<u32>,
+    /// Set when push_event has dropped a Log line because the event
+    /// vec is at MAX_EVENTS. The first such drop emits a single
+    /// truncation sentinel; subsequent drops are silent. This keeps
+    /// cursor indices monotonic (replay never reorders) and bounds
+    /// daemon RAM against a misbehaving subprocess.
+    log_capped: bool,
 }
 
 impl Job {
     fn new_install() -> Self {
-        Job { events: Vec::new(), finished: false, pod_id: None }
+        Job {
+            events: Vec::new(),
+            finished: false,
+            pod_id: None,
+            child_pid: None,
+            log_capped: false,
+        }
     }
     fn new_pod(pod_id: String) -> Self {
-        Job { events: Vec::new(), finished: false, pod_id: Some(pod_id) }
+        Job {
+            events: Vec::new(),
+            finished: false,
+            pod_id: Some(pod_id),
+            child_pid: None,
+            log_capped: false,
+        }
     }
 }
+
+/// Cap on Log events per job. ~5k lines × 16 KB max line ≈ 80 MB
+/// worst-case, but typical pod actions emit < 200 lines so this is
+/// effectively a runaway-process guard, not a normal-path constraint.
+/// Past the cap, further Log events are dropped (one sentinel inserted
+/// the first time it triggers). Terminal Done / Fail / Exit always
+/// append regardless — they're ≤ a few hundred bytes and the SSE
+/// consumer needs them to wind the EventSource down.
+const MAX_EVENTS: usize = 5_000;
+
+/// Cap on a single Log line's byte length. Truncated lines append a
+/// `…[truncated]` suffix so the consumer can spot it. 16 KB is generous
+/// for real log output (typical lines < 200 B); the cap exists so a
+/// pathological JSON dump or core-dump trace can't pin one frame to
+/// a multi-MB allocation.
+const MAX_LINE_LEN: usize = 16 * 1024;
 
 #[derive(Clone)]
 struct Registry {
@@ -289,6 +329,13 @@ fn handle(request: Request, registry: Registry) {
                 .trim_end_matches("/stream")
                 .to_string();
             handle_stream(request, &registry, &job_id);
+        }
+        (Method::Post, p) if p.starts_with("/api/jobs/") && p.ends_with("/cancel") => {
+            let job_id = p
+                .trim_start_matches("/api/jobs/")
+                .trim_end_matches("/cancel")
+                .to_string();
+            handle_job_cancel(request, &registry, &job_id);
         }
         (Method::Get, "/api/state") => {
             handle_state(request, &registry);
@@ -603,6 +650,8 @@ fn spawn_install(job: Arc<Mutex<Job>>, agent_type: String, pod_id: Option<String
                 return;
             }
         };
+        // Track the PID so /api/jobs/<id>/cancel can SIGTERM it.
+        job.lock().unwrap().child_pid = Some(child.id());
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -662,6 +711,10 @@ fn spawn_install(job: Arc<Mutex<Job>>, agent_type: String, pod_id: Option<String
         });
 
         let status = child.wait();
+        // PID is stale once wait() returns. Clear before the terminal
+        // event so the cancel handler can't accidentally signal a
+        // recycled PID.
+        job.lock().unwrap().child_pid = None;
 
         // Join the readers so we can inspect stdout for the final JSON.
         let stdout_captured = stdout_thread.and_then(|h| h.join().ok()).unwrap_or_default();
@@ -695,8 +748,48 @@ fn push_event(job: &Arc<Mutex<Job>>, ev: JobEvent) {
         ev,
         JobEvent::Done { .. } | JobEvent::Fail { .. } | JobEvent::Exit { .. }
     );
-    j.events.push(ev);
-    if terminal { j.finished = true; }
+    // Terminal events (Done / Fail / Exit) bypass both caps — the SSE
+    // consumer needs them to wind down its EventSource and they're
+    // bounded in size by construction.
+    if terminal {
+        j.events.push(ev);
+        j.finished = true;
+        return;
+    }
+    // Log path: truncate over-long lines and refuse new ones once
+    // we've hit MAX_EVENTS.
+    let truncated = match ev {
+        JobEvent::Log(line) => JobEvent::Log(truncate_log_line(line)),
+        other => other,
+    };
+    if j.events.len() >= MAX_EVENTS {
+        if !j.log_capped {
+            j.log_capped = true;
+            // One-time sentinel so the user sees that output stopped
+            // because of the cap, not because the process went silent.
+            j.events.push(JobEvent::Log(format!(
+                "…[log capped at {} events; further output suppressed]",
+                MAX_EVENTS,
+            )));
+        }
+        return;
+    }
+    j.events.push(truncated);
+}
+
+fn truncate_log_line(mut line: String) -> String {
+    if line.len() > MAX_LINE_LEN {
+        // Truncate at a char boundary so we don't split a UTF-8
+        // sequence. find_floor_char_boundary isn't stable, so walk
+        // backwards from the cap until we land on a boundary.
+        let mut cut = MAX_LINE_LEN;
+        while cut > 0 && !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        line.truncate(cut);
+        line.push_str("…[truncated]");
+    }
+    line
 }
 
 // ── /api/jobs/<id>/stream (SSE) ───────────────────────────────
@@ -709,14 +802,35 @@ fn handle_stream(request: Request, registry: &Registry, job_id: &str) {
             return;
         }
     };
+    // EventSource auto-resends `Last-Event-ID` on reconnect when the
+    // server emitted `id:` lines. Parse it (if present) so we can
+    // resume from the next event instead of replaying the whole job
+    // and double-delivering log lines after a network blip.
+    let resume_from = parse_last_event_id(request.headers());
     // tiny_http doesn't expose a connection-upgrade primitive; instead
     // we return a Response whose body is a blocking `Read` that we drip-
     // feed from a background thread. The browser sees the event-stream
     // content type and treats it as SSE.
-    sse_response(request, job);
+    sse_response(request, job, resume_from);
 }
 
-fn sse_response(request: Request, job: Arc<Mutex<Job>>) {
+/// Parse the `Last-Event-ID` header into the next event index to send.
+/// We use the event's position in `Job.events` as its id (0, 1, 2 …),
+/// so a Last-Event-ID of N means "I've seen up to N inclusive — start
+/// at N+1". Bad / missing headers fall back to 0 so a fresh subscriber
+/// gets the full replay.
+fn parse_last_event_id(headers: &[Header]) -> usize {
+    for h in headers {
+        if h.field.as_str().as_str().eq_ignore_ascii_case("Last-Event-ID") {
+            if let Ok(n) = h.value.as_str().parse::<usize>() {
+                return n.saturating_add(1);
+            }
+        }
+    }
+    0
+}
+
+fn sse_response(request: Request, job: Arc<Mutex<Job>>, resume_from: usize) {
     // Strategy: spawn a thread that reads events from the job, serializes
     // them to SSE frames, and writes them into a pipe whose read half we
     // hand to tiny_http as the response body. The response header sends
@@ -726,7 +840,7 @@ fn sse_response(request: Request, job: Arc<Mutex<Job>>) {
     let (rx, tx) = pipe();
 
     thread::spawn(move || {
-        let mut cursor = 0usize;
+        let mut cursor = resume_from;
         let mut tx = tx;
         loop {
             let (events_snapshot, finished) = {
@@ -736,21 +850,28 @@ fn sse_response(request: Request, job: Arc<Mutex<Job>>) {
             while cursor < events_snapshot {
                 let frame = {
                     let j = job.lock().unwrap();
+                    // The `id: N\n` prefix is what makes Last-Event-ID
+                    // round-trip work — EventSource parses it and sends
+                    // the last seen value back on its next reconnect.
                     match &j.events[cursor] {
                         JobEvent::Log(line) => format!(
-                            "event: log\ndata: {}\n\n",
+                            "id: {}\nevent: log\ndata: {}\n\n",
+                            cursor,
                             line.replace('\n', "\\n"),
                         ),
                         JobEvent::Done { payload } => format!(
-                            "event: done\ndata: {}\n\n",
+                            "id: {}\nevent: done\ndata: {}\n\n",
+                            cursor,
                             payload.replace('\n', " "),
                         ),
                         JobEvent::Fail { message } => format!(
-                            "event: fail\ndata: {}\n\n",
+                            "id: {}\nevent: fail\ndata: {}\n\n",
+                            cursor,
                             message.replace('\n', " "),
                         ),
                         JobEvent::Exit { code } => format!(
-                            "event: exit\ndata: {{\"code\":{}}}\n\n",
+                            "id: {}\nevent: exit\ndata: {{\"code\":{}}}\n\n",
+                            cursor,
                             code,
                         ),
                     }
@@ -967,6 +1088,54 @@ fn agent_units_for(agent_type: &str) -> u32 {
         "none" => 0,
         _ => 1, // nemoclaw + future openclaw-family
     }
+}
+
+/// POST /api/jobs/<id>/cancel — SIGTERM the job's child process.
+///
+/// Idempotent and safe to call against a finished job (returns
+/// `cancelled: false` with `reason: "already finished"`). When the
+/// child PID isn't tracked yet (job exists but `Command::spawn` hasn't
+/// returned) — same response with `reason: "no live process"`. The
+/// terminal `exit` SSE event is emitted by the existing wait() path
+/// once the child dies, so the client doesn't need a separate
+/// cancellation event to wind down its EventSource.
+fn handle_job_cancel(request: Request, registry: &Registry, job_id: &str) {
+    let Some(job) = registry.get(job_id) else {
+        respond_json(request, 404, &serde_json::json!({"error": "no such job"}));
+        return;
+    };
+    let (pid, finished) = {
+        let j = job.lock().unwrap();
+        (j.child_pid, j.finished)
+    };
+    if finished {
+        respond_json(request, 200, &serde_json::json!({
+            "cancelled": false,
+            "reason": "already finished",
+        }));
+        return;
+    }
+    let Some(pid) = pid else {
+        respond_json(request, 200, &serde_json::json!({
+            "cancelled": false,
+            "reason": "no live process",
+        }));
+        return;
+    };
+    push_event(&job, JobEvent::Log(format!("[cancel] sending SIGTERM to PID {}", pid)));
+    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if rc != 0 {
+        let errno = std::io::Error::last_os_error();
+        respond_json(request, 500, &serde_json::json!({
+            "cancelled": false,
+            "reason": format!("kill failed: {}", errno),
+        }));
+        return;
+    }
+    respond_json(request, 200, &serde_json::json!({
+        "cancelled": true,
+        "pid": pid,
+    }));
 }
 
 fn handle_state(request: Request, registry: &Registry) {
@@ -1473,6 +1642,7 @@ fn spawn_pod_action(job: Arc<Mutex<Job>>, argv: Vec<String>) {
                 return;
             }
         };
+        job.lock().unwrap().child_pid = Some(child.id());
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -1517,6 +1687,9 @@ fn spawn_pod_action(job: Arc<Mutex<Job>>, argv: Vec<String>) {
         }));
 
         let status = child.wait();
+        // Clear the PID before emitting the terminal event so cancel
+        // can't race ahead and SIGTERM a recycled PID.
+        job.lock().unwrap().child_pid = None;
         let _ = stdout_t.and_then(|h| h.join().ok());
         let _ = stderr_t.and_then(|h| h.join().ok());
 
@@ -1576,6 +1749,7 @@ fn spawn_external_command(job: Arc<Mutex<Job>>, bin: String, args: Vec<String>) 
                 return;
             }
         };
+        job.lock().unwrap().child_pid = Some(child.id());
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -1617,6 +1791,9 @@ fn spawn_external_command(job: Arc<Mutex<Job>>, bin: String, args: Vec<String>) 
         }));
 
         let status = child.wait();
+        // Clear the PID before emitting the terminal event so cancel
+        // can't race ahead and SIGTERM a recycled PID.
+        job.lock().unwrap().child_pid = None;
         let _ = stdout_t.and_then(|h| h.join().ok());
         let _ = stderr_t.and_then(|h| h.join().ok());
 
@@ -2738,5 +2915,138 @@ mod tests {
         assert_eq!(r.active_pods().get("02"), None);
         // It still exists in the registry until reaped.
         assert!(r.get(&id).is_some());
+    }
+
+    fn hdr(name: &str, value: &str) -> Header {
+        Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn parse_last_event_id_missing_falls_back_to_zero() {
+        // Fresh subscriber sends no Last-Event-ID — replay from 0.
+        assert_eq!(parse_last_event_id(&[]), 0);
+        assert_eq!(parse_last_event_id(&[hdr("X-Other", "5")]), 0);
+    }
+
+    #[test]
+    fn parse_last_event_id_returns_next_index() {
+        // EventSource sends the last id it saw; we resume at id+1.
+        assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "0")]), 1);
+        assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "42")]), 43);
+    }
+
+    #[test]
+    fn parse_last_event_id_is_case_insensitive() {
+        // Per RFC 9110 §5.1 header names are case-insensitive. Browsers
+        // tend to lowercase but proxies may not.
+        assert_eq!(parse_last_event_id(&[hdr("last-event-id", "7")]), 8);
+        assert_eq!(parse_last_event_id(&[hdr("LAST-EVENT-ID", "7")]), 8);
+    }
+
+    #[test]
+    fn parse_last_event_id_rejects_garbage() {
+        // Tampered / malformed values fall back to 0 so we don't lose
+        // the user's stream history.
+        assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "")]), 0);
+        assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "abc")]), 0);
+        assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "-1")]), 0);
+    }
+
+    #[test]
+    fn truncate_log_line_passes_through_short_lines() {
+        let s = "hello world".to_string();
+        assert_eq!(truncate_log_line(s.clone()), s);
+    }
+
+    #[test]
+    fn truncate_log_line_caps_long_lines_with_suffix() {
+        let s = "a".repeat(MAX_LINE_LEN + 100);
+        let out = truncate_log_line(s);
+        // Suffix is appended; total length is MAX_LINE_LEN + suffix.
+        assert!(out.ends_with("…[truncated]"));
+        assert!(out.len() < MAX_LINE_LEN + 50);
+    }
+
+    #[test]
+    fn truncate_log_line_handles_utf8_boundary() {
+        // A line of multibyte chars where MAX_LINE_LEN lands mid-rune.
+        // We must NOT split a UTF-8 sequence — the truncate would
+        // panic if we did.
+        let rune = "🦀"; // 4 bytes
+        let count = (MAX_LINE_LEN / 4) + 50;
+        let s: String = rune.repeat(count);
+        let out = truncate_log_line(s);
+        assert!(out.ends_with("…[truncated]"));
+        // Body before the suffix must be valid UTF-8 (already implied
+        // by .truncate not panicking, but assert explicitly).
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn push_event_caps_log_at_max_events_and_emits_sentinel_once() {
+        let r = Registry::new();
+        let (_id, job) = r.create_pod("02").unwrap();
+        // Push MAX_EVENTS log lines — all should land.
+        for i in 0..MAX_EVENTS {
+            push_event(&job, JobEvent::Log(format!("line {}", i)));
+        }
+        assert_eq!(job.lock().unwrap().events.len(), MAX_EVENTS);
+        // Push one more — the sentinel takes its place; the dropped
+        // line is silently discarded.
+        push_event(&job, JobEvent::Log("dropped".into()));
+        // Inspect under a scoped lock — borrowing &job.lock().unwrap().events
+        // outside a block would extend the MutexGuard's lifetime across the
+        // next push_event() call and deadlock self.
+        {
+            let j = job.lock().unwrap();
+            assert_eq!(j.events.len(), MAX_EVENTS + 1);
+            match j.events.last() {
+                Some(JobEvent::Log(s)) => assert!(s.contains("log capped")),
+                _ => panic!("expected sentinel Log event"),
+            }
+        }
+        // Subsequent drops are silent (no second sentinel).
+        push_event(&job, JobEvent::Log("also dropped".into()));
+        push_event(&job, JobEvent::Log("also dropped 2".into()));
+        assert_eq!(job.lock().unwrap().events.len(), MAX_EVENTS + 1);
+    }
+
+    #[test]
+    fn push_event_terminal_always_appends_even_at_cap() {
+        let r = Registry::new();
+        let (_id, job) = r.create_pod("02").unwrap();
+        // Fill past the log cap.
+        for i in 0..MAX_EVENTS + 10 {
+            push_event(&job, JobEvent::Log(format!("line {}", i)));
+        }
+        let pre_len = job.lock().unwrap().events.len();
+        // Exit must still land — the SSE consumer needs it to wind
+        // down. Daemon RAM impact is negligible (tens of bytes).
+        push_event(&job, JobEvent::Exit { code: 0 });
+        let j = job.lock().unwrap();
+        assert_eq!(j.events.len(), pre_len + 1);
+        assert!(j.finished);
+        assert!(matches!(j.events.last(), Some(JobEvent::Exit { code: 0 })));
+    }
+
+    #[test]
+    fn job_child_pid_starts_none_and_is_settable() {
+        // Ensures the cancel handler can distinguish "queued, no live
+        // process" from "running, signal me". Spawn paths set the PID
+        // post-spawn; this test asserts the field has the right
+        // pre-spawn value and round-trips after a manual set.
+        let r = Registry::new();
+        let (_id, job) = r.create_pod("02").unwrap();
+        assert!(job.lock().unwrap().child_pid.is_none());
+
+        // Simulate spawn-thread setting it.
+        job.lock().unwrap().child_pid = Some(12345);
+        assert_eq!(job.lock().unwrap().child_pid, Some(12345));
+
+        // Simulate wait()-thread clearing it pre-Exit.
+        job.lock().unwrap().child_pid = None;
+        push_event(&job, JobEvent::Exit { code: 0 });
+        assert!(job.lock().unwrap().finished);
+        assert!(job.lock().unwrap().child_pid.is_none());
     }
 }
