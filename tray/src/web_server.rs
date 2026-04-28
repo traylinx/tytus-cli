@@ -728,14 +728,35 @@ fn handle_stream(request: Request, registry: &Registry, job_id: &str) {
             return;
         }
     };
+    // EventSource auto-resends `Last-Event-ID` on reconnect when the
+    // server emitted `id:` lines. Parse it (if present) so we can
+    // resume from the next event instead of replaying the whole job
+    // and double-delivering log lines after a network blip.
+    let resume_from = parse_last_event_id(request.headers());
     // tiny_http doesn't expose a connection-upgrade primitive; instead
     // we return a Response whose body is a blocking `Read` that we drip-
     // feed from a background thread. The browser sees the event-stream
     // content type and treats it as SSE.
-    sse_response(request, job);
+    sse_response(request, job, resume_from);
 }
 
-fn sse_response(request: Request, job: Arc<Mutex<Job>>) {
+/// Parse the `Last-Event-ID` header into the next event index to send.
+/// We use the event's position in `Job.events` as its id (0, 1, 2 …),
+/// so a Last-Event-ID of N means "I've seen up to N inclusive — start
+/// at N+1". Bad / missing headers fall back to 0 so a fresh subscriber
+/// gets the full replay.
+fn parse_last_event_id(headers: &[Header]) -> usize {
+    for h in headers {
+        if h.field.as_str().as_str().eq_ignore_ascii_case("Last-Event-ID") {
+            if let Ok(n) = h.value.as_str().parse::<usize>() {
+                return n.saturating_add(1);
+            }
+        }
+    }
+    0
+}
+
+fn sse_response(request: Request, job: Arc<Mutex<Job>>, resume_from: usize) {
     // Strategy: spawn a thread that reads events from the job, serializes
     // them to SSE frames, and writes them into a pipe whose read half we
     // hand to tiny_http as the response body. The response header sends
@@ -745,7 +766,7 @@ fn sse_response(request: Request, job: Arc<Mutex<Job>>) {
     let (rx, tx) = pipe();
 
     thread::spawn(move || {
-        let mut cursor = 0usize;
+        let mut cursor = resume_from;
         let mut tx = tx;
         loop {
             let (events_snapshot, finished) = {
@@ -755,21 +776,28 @@ fn sse_response(request: Request, job: Arc<Mutex<Job>>) {
             while cursor < events_snapshot {
                 let frame = {
                     let j = job.lock().unwrap();
+                    // The `id: N\n` prefix is what makes Last-Event-ID
+                    // round-trip work — EventSource parses it and sends
+                    // the last seen value back on its next reconnect.
                     match &j.events[cursor] {
                         JobEvent::Log(line) => format!(
-                            "event: log\ndata: {}\n\n",
+                            "id: {}\nevent: log\ndata: {}\n\n",
+                            cursor,
                             line.replace('\n', "\\n"),
                         ),
                         JobEvent::Done { payload } => format!(
-                            "event: done\ndata: {}\n\n",
+                            "id: {}\nevent: done\ndata: {}\n\n",
+                            cursor,
                             payload.replace('\n', " "),
                         ),
                         JobEvent::Fail { message } => format!(
-                            "event: fail\ndata: {}\n\n",
+                            "id: {}\nevent: fail\ndata: {}\n\n",
+                            cursor,
                             message.replace('\n', " "),
                         ),
                         JobEvent::Exit { code } => format!(
-                            "event: exit\ndata: {{\"code\":{}}}\n\n",
+                            "id: {}\nevent: exit\ndata: {{\"code\":{}}}\n\n",
+                            cursor,
                             code,
                         ),
                     }
@@ -2796,6 +2824,41 @@ mod tests {
         assert_eq!(r.active_pods().get("02"), None);
         // It still exists in the registry until reaped.
         assert!(r.get(&id).is_some());
+    }
+
+    fn hdr(name: &str, value: &str) -> Header {
+        Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn parse_last_event_id_missing_falls_back_to_zero() {
+        // Fresh subscriber sends no Last-Event-ID — replay from 0.
+        assert_eq!(parse_last_event_id(&[]), 0);
+        assert_eq!(parse_last_event_id(&[hdr("X-Other", "5")]), 0);
+    }
+
+    #[test]
+    fn parse_last_event_id_returns_next_index() {
+        // EventSource sends the last id it saw; we resume at id+1.
+        assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "0")]), 1);
+        assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "42")]), 43);
+    }
+
+    #[test]
+    fn parse_last_event_id_is_case_insensitive() {
+        // Per RFC 9110 §5.1 header names are case-insensitive. Browsers
+        // tend to lowercase but proxies may not.
+        assert_eq!(parse_last_event_id(&[hdr("last-event-id", "7")]), 8);
+        assert_eq!(parse_last_event_id(&[hdr("LAST-EVENT-ID", "7")]), 8);
+    }
+
+    #[test]
+    fn parse_last_event_id_rejects_garbage() {
+        // Tampered / malformed values fall back to 0 so we don't lose
+        // the user's stream history.
+        assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "")]), 0);
+        assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "abc")]), 0);
+        assert_eq!(parse_last_event_id(&[hdr("Last-Event-ID", "-1")]), 0);
     }
 
     #[test]
