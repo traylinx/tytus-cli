@@ -2869,6 +2869,122 @@ mod tests {
         assert_eq!(read_if_none_match(&[other]), None);
     }
 
+    /// Real-bytes wire test for the ETag round-trip.
+    ///
+    /// Helper-function tests (compute_state_etag / read_if_none_match)
+    /// can pass while the wire is broken if tiny_http, the dev proxy,
+    /// or a header-encoding quirk drops the ETag in transit. This
+    /// test bottoms out through a real `Server::http`, two raw HTTP/1.1
+    /// requests via `TcpStream`, and parses the response strings —
+    /// catching any layer that mangles `ETag` / `If-None-Match` /
+    /// 304 framing before it bites in production.
+    ///
+    /// Also covers the route dispatcher (`handle`), so a future
+    /// refactor that drops `/api/state` from the match arms surfaces
+    /// here rather than only through manual smoke testing.
+    #[test]
+    fn etag_roundtrip_via_real_http() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let port = server.server_addr().to_ip().expect("ip").port();
+        let registry = Registry::new();
+
+        let server_arc = Arc::new(server);
+        let server_for_thread = server_arc.clone();
+        let handler = thread::spawn(move || {
+            for (i, req) in server_for_thread.incoming_requests().enumerate() {
+                handle(req, registry.clone());
+                if i >= 1 {
+                    break;
+                }
+            }
+        });
+
+        // ── Request 1: no If-None-Match. Expect 200 + ETag. ─────────
+        let mut s1 = TcpStream::connect(("127.0.0.1", port)).expect("connect 1");
+        s1.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s1.write_all(
+            b"GET /api/state HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Connection: close\r\n\r\n",
+        )
+        .expect("write 1");
+        let mut resp1 = String::new();
+        s1.read_to_string(&mut resp1).expect("read 1");
+
+        let status1 = resp1.lines().next().unwrap_or("");
+        assert!(
+            status1.starts_with("HTTP/1.1 200"),
+            "expected 200 on first poll, got: {}",
+            status1,
+        );
+        let etag1 =
+            extract_header(&resp1, "ETag").expect("ETag header missing on 200");
+        assert!(
+            etag1.starts_with('"') && etag1.ends_with('"'),
+            "ETag must be RFC 9110 quoted: {:?}",
+            etag1,
+        );
+
+        // ── Request 2: If-None-Match echoes ETag. Expect 304 + same ETag. ──
+        let mut s2 = TcpStream::connect(("127.0.0.1", port)).expect("connect 2");
+        s2.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let req2 = format!(
+            "GET /api/state HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             If-None-Match: {}\r\n\
+             Connection: close\r\n\r\n",
+            etag1,
+        );
+        s2.write_all(req2.as_bytes()).expect("write 2");
+        let mut resp2 = String::new();
+        s2.read_to_string(&mut resp2).expect("read 2");
+
+        let status2 = resp2.lines().next().unwrap_or("");
+        assert!(
+            status2.starts_with("HTTP/1.1 304"),
+            "expected 304 when If-None-Match matches, got: {}\nfull response:\n{}",
+            status2,
+            resp2,
+        );
+        let etag2 =
+            extract_header(&resp2, "ETag").expect("ETag must be echoed on 304");
+        assert_eq!(
+            etag1, etag2,
+            "ETag should be identical across the two responses (snapshot didn't change)",
+        );
+        // 304 MUST have an empty body — assert the response ends right
+        // after the headers (CRLFCRLF terminator).
+        let body_start = resp2.find("\r\n\r\n").map(|i| i + 4).unwrap_or(resp2.len());
+        let body = &resp2[body_start..];
+        assert!(
+            body.is_empty(),
+            "304 must have empty body, got {} bytes: {:?}",
+            body.len(),
+            body,
+        );
+
+        handler.join().expect("handler thread panicked");
+    }
+
+    /// Case-insensitive `Header-Name: value` extractor for the wire
+    /// test above. tiny_http preserves whatever case the server sent
+    /// (we send `ETag`), but a future refactor or proxy might
+    /// normalize — keep the lookup tolerant.
+    fn extract_header(response: &str, name: &str) -> Option<String> {
+        let prefix = format!("{}:", name).to_lowercase();
+        response
+            .lines()
+            .find(|line| line.to_lowercase().starts_with(&prefix))
+            .map(|line| {
+                let colon = line.find(':').unwrap_or(line.len());
+                line[colon + 1..].trim().to_string()
+            })
+    }
+
     #[test]
     fn job_event_exit_marks_finished() {
         let r = Registry::new();
