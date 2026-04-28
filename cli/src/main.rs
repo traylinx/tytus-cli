@@ -405,8 +405,15 @@ enum Commands {
         #[arg(long)]
         stop: bool,
     },
-    /// Run diagnostics: check auth, tunnel, gateway connectivity
-    Doctor,
+    /// Run diagnostics: check auth, tunnel, gateway connectivity.
+    /// With `--pod NN`, runs a per-pod diagnostic instead: agent
+    /// container status, healthy flag, uptime, image, ports.
+    Doctor {
+        /// Pod ID. If supplied, run per-pod diagnostic instead of
+        /// the daemon-wide checklist.
+        #[arg(short, long)]
+        pod: Option<String>,
+    },
     /// Manage the tytus background daemon (token refresh, health monitoring).
     /// Use 'run' for foreground (launchd/systemd), 'stop' to send shutdown.
     Daemon {
@@ -656,7 +663,10 @@ async fn main() {
             if stop { cmd_ui_stop(pod, cli.json).await; }
             else    { cmd_ui(&http, pod, port, no_open, cli.json).await; }
         }
-        Some(Commands::Doctor) => cmd_doctor(&http, cli.json).await,
+        Some(Commands::Doctor { pod }) => match pod {
+            Some(p) => cmd_doctor_pod(&http, p, cli.json).await,
+            None => cmd_doctor(&http, cli.json).await,
+        },
         Some(Commands::Daemon { action }) => cmd_daemon(action, cli.json).await,
         Some(Commands::Tray { action }) => cmd_tray(action, cli.json),
         // Hidden subcommand: called by elevated helper to activate tunnel from a temp config file
@@ -6751,6 +6761,85 @@ async fn cmd_ui_stop(pod_id: Option<String>, json: bool) {
 }
 
 // ── Doctor (diagnostics) ────────────────────────────────────
+
+/// Per-pod diagnostic. Calls Provider's existing /pod/agent/status
+/// (which proxies to DAM /agent/<pod_num>/status) and prints a
+/// friendly health summary. Streamed by the tray's run-streamed
+/// pipeline as the `doctor` action — each println surfaces as a
+/// discrete `log` event in the Pod Inspector.
+async fn cmd_doctor_pod(http: &atomek_core::HttpClient, pod_id: String, json: bool) {
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        wizard::print_fail("Not logged in. Run: tytus login");
+        std::process::exit(1);
+    }
+    if let Err(e) = ensure_token(&mut state, http).await {
+        wizard::print_fail(&format!("Token refresh failed: {}. Run: tytus login", e));
+        std::process::exit(1);
+    }
+    let (sk, auid) = get_credentials(&mut state, http).await;
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+
+    match atomek_pods::get_agent_status(&client, &pod_id).await {
+        Ok(status) => {
+            if json {
+                println!("{}", serde_json::json!({
+                    "pod_id": pod_id,
+                    "pod_num": status.pod_num,
+                    "agent_type": status.agent_type,
+                    "container_status": status.container_status,
+                    "healthy": status.healthy,
+                    "uptime_seconds": status.uptime_seconds,
+                    "image": status.image,
+                    "ports": {
+                        "api": status.ports.as_ref().and_then(|p| p.api),
+                        "health": status.ports.as_ref().and_then(|p| p.health),
+                    },
+                }));
+                return;
+            }
+            // Plain output — one line per fact so the tray's SSE relay
+            // surfaces them as individual log events.
+            println!("Pod {} — {}", pod_id, status.agent_type.as_deref().unwrap_or("?"));
+            println!("Container: {}", status.container_status.as_deref().unwrap_or("?"));
+            match status.healthy {
+                Some(true) => println!("Health: healthy"),
+                Some(false) => println!("Health: NOT healthy (still starting?)"),
+                None => println!("Health: unknown"),
+            }
+            if let Some(secs) = status.uptime_seconds {
+                println!("Uptime: {}", format_uptime(secs));
+            }
+            if let Some(image) = status.image {
+                println!("Image: {}", image);
+            }
+            if let Some(ports) = status.ports {
+                let api = ports.api.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+                let health = ports.health.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+                println!("Ports: api={} health={}", api, health);
+            }
+        }
+        Err(e) => {
+            wizard::print_fail(&format!("Failed to fetch agent status: {}", e));
+            std::process::exit(1);
+        }
+    }
+}
+
+fn format_uptime(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let mins = (secs % 3_600) / 60;
+    if days > 0 {
+        format!("{}d {}h", days, hours)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else if mins > 0 {
+        format!("{}m {}s", mins, secs % 60)
+    } else {
+        format!("{}s", secs)
+    }
+}
 
 async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
     let mut checks: Vec<(&str, bool, String)> = Vec::new();

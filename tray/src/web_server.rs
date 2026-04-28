@@ -1377,12 +1377,11 @@ struct PodRunBody {
 /// Map an action string to the canonical `tytus` argv. Returns `None`
 /// for unknown actions so the handler can reply 400.
 ///
-/// Per-pod actions ONLY. Global commands (`tytus doctor`, `tytus test`)
-/// are intentionally absent — they aren't pod-scoped (CLI doesn't accept
-/// `--pod` for them), so exposing them under `/api/pod/<NN>/run-streamed`
-/// would be misleading. They're available via dedicated endpoints
-/// (`POST /api/doctor`, `POST /api/test`) and surfaced on the Tower
-/// header / Troubleshoot section, not on per-pod subpages.
+/// Per-pod actions ONLY. `tytus test` stays global (it doesn't accept
+/// `--pod`), but `tytus doctor --pod NN` exists since the per-pod
+/// doctor sprint and is exposed here. The standalone /api/doctor
+/// endpoint still serves the daemon-wide checklist for the Troubleshoot
+/// section.
 fn pod_action_argv(action: &str, pod_id: &str) -> Option<Vec<String>> {
     let v = |args: &[&str]| Some(args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
     match action {
@@ -1396,6 +1395,9 @@ fn pod_action_argv(action: &str, pod_id: &str) -> Option<Vec<String>> {
         // when none is supplied). Streamed via the same job channel
         // the other pod actions use; output renders in-tab.
         "ls-inbox"        => v(&["ls", "--pod", pod_id]),
+        // Per-pod doctor — fetches Provider's /pod/agent/status and
+        // prints a friendly health summary one fact per line.
+        "doctor"          => v(&["doctor", "--pod", pod_id]),
         _ => None,
     }
 }
@@ -2670,9 +2672,13 @@ mod tests {
             vec!["ls", "--pod", "02"],
         );
 
-        // Global commands are intentionally not pod-scoped — they
-        // belong on /api/doctor and /api/test, not here.
-        assert!(pod_action_argv("doctor", "02").is_none());
+        // Per-pod doctor is now allowed (closed manifest §3.7 gap).
+        assert_eq!(
+            pod_action_argv("doctor", "02").unwrap(),
+            vec!["doctor", "--pod", "02"],
+        );
+
+        // `test` stays global — CLI doesn't accept --pod for it.
         assert!(pod_action_argv("test", "02").is_none());
 
         // Unknown / injection-shaped actions reject.

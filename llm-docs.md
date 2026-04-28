@@ -215,10 +215,20 @@ tytus logout                       Revoke all pods + clear local state +
 tytus status [--json]              Plan, pods, units, tunnel state.
                                    Default = human; --json = machine.
 
-tytus doctor                       Full diagnostic: state file,
-                                   logged_in, token_valid, subscription,
-                                   pods, tunnel, mcp_server. Some checks
-                                   may fail before connect — that's normal.
+tytus doctor [--pod NN]            Without --pod: full daemon-wide
+                                   diagnostic (state file, logged_in,
+                                   token_valid, subscription, pods,
+                                   tunnel, mcp_server). Some checks may
+                                   fail before connect — that's normal.
+                                   With --pod NN: per-pod diagnostic —
+                                   container status, healthy flag,
+                                   uptime, image, and ports for that
+                                   pod (proxies via Provider →
+                                   DAM /agent/<pod_num>/status). One
+                                   fact per stdout line so the tray's
+                                   SSE relay can surface each as a
+                                   discrete `log` event in the Pod
+                                   Inspector Doctor pane.
 
 tytus setup                        Interactive wizard: login (if needed),
                                    plan check, agent pick, allocation,
