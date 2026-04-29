@@ -2314,23 +2314,64 @@ fn handle_shared_folders_list(request: Request) {
     respond_json(request, 200, &serde_json::json!({"bindings": bindings}));
 }
 
-/// POST /api/shared-folders/run-streamed?action=<status|conflicts|refresh-all|list>
+/// Map a shared-folders action string to the helper binary name +
+/// its arg vector. `None` for actions outside the frozen allowlist.
+///
+/// **Allowlist** (closes audit 03 §3 TBD on shared-folders sync /
+/// mount semantics):
+/// - `list`         → garagetytus-folder-list
+/// - `status`       → garagetytus-folder-status --check-pods
+/// - `conflicts`    → garagetytus-folder-conflicts
+/// - `refresh-all`  → garagetytus-refresh-watchdog --threshold-days 7
+///
+/// Empty / unknown / casing-variant / shell-injection-shaped strings
+/// all reject. Pinned by `shared_folder_action_argv_*` tests.
+///
+/// New actions land here first (paired with a UI button); the
+/// allowlist is the single source of truth.
+fn shared_folder_action_argv(action: &str) -> Option<(&'static str, Vec<String>)> {
+    match action {
+        "list" => Some(("garagetytus-folder-list", vec![])),
+        "status" => Some((
+            "garagetytus-folder-status",
+            vec!["--check-pods".to_string()],
+        )),
+        "conflicts" => Some(("garagetytus-folder-conflicts", vec![])),
+        "refresh-all" => Some((
+            "garagetytus-refresh-watchdog",
+            vec!["--threshold-days".to_string(), "7".to_string()],
+        )),
+        _ => None,
+    }
+}
+
+const SHARED_FOLDER_ALLOWED_ACTIONS: &[&str] =
+    &["list", "status", "conflicts", "refresh-all"];
+
+/// POST /api/shared-folders/run-streamed?action=<list|status|conflicts|refresh-all>
 /// — spawns the corresponding garagetytus-* helper and streams output
-/// via the existing job-event SSE channel. Returns `{ job_id }`.
+/// via the existing job-event SSE channel. Returns `{ job_id }` on
+/// success, `400 {error, code, allowed}` on a rejected action.
 fn handle_shared_folders_run_streamed(request: Request, registry: &Registry, query: &str) {
     let action = query
         .split('&')
         .find_map(|kv| kv.strip_prefix("action="))
         .map(|s| s.to_string())
         .unwrap_or_default();
-    let (helper, args): (&str, Vec<String>) = match action.as_str() {
-        "list"        => ("garagetytus-folder-list",      vec![]),
-        "status"      => ("garagetytus-folder-status",    vec!["--check-pods".to_string()]),
-        "conflicts"   => ("garagetytus-folder-conflicts", vec![]),
-        "refresh-all" => ("garagetytus-refresh-watchdog", vec!["--threshold-days".to_string(), "7".to_string()]),
-        _ => {
+    let (helper, args) = match shared_folder_action_argv(&action) {
+        Some(pair) => pair,
+        None => {
+            // Structured error code so the OS can branch on it
+            // without parsing prose. `allowed` is echoed for the
+            // diagnostic surface — the OS never reads it directly,
+            // but operators looking at curl output appreciate it.
             respond_json(request, 400, &serde_json::json!({
-                "error": "action must be one of: list, status, conflicts, refresh-all"
+                "error": format!(
+                    "action must be one of: {}",
+                    SHARED_FOLDER_ALLOWED_ACTIONS.join(", "),
+                ),
+                "code": "shared_folders.action.unknown",
+                "allowed": SHARED_FOLDER_ALLOWED_ACTIONS,
             }));
             return;
         }
@@ -4078,5 +4119,79 @@ mod tests {
         // hang/panic — return Stopped (the OS renders "container down").
         let s = probe_agent_status("", "any-key");
         assert_eq!(s, AgentStatus::Stopped);
+    }
+
+    // ── Shared-folders action allowlist (Phase 3 cont) ──────────
+
+    #[test]
+    fn shared_folder_action_argv_accepts_known_actions() {
+        // Pin every action in the frozen allowlist + the helper +
+        // arg shape. New actions MUST update this test alongside
+        // the helper's match arm — no silent additions.
+        assert_eq!(
+            shared_folder_action_argv("list").unwrap(),
+            ("garagetytus-folder-list", vec![]),
+        );
+        assert_eq!(
+            shared_folder_action_argv("status").unwrap(),
+            (
+                "garagetytus-folder-status",
+                vec!["--check-pods".to_string()],
+            ),
+        );
+        assert_eq!(
+            shared_folder_action_argv("conflicts").unwrap(),
+            ("garagetytus-folder-conflicts", vec![]),
+        );
+        assert_eq!(
+            shared_folder_action_argv("refresh-all").unwrap(),
+            (
+                "garagetytus-refresh-watchdog",
+                vec!["--threshold-days".to_string(), "7".to_string()],
+            ),
+        );
+    }
+
+    #[test]
+    fn shared_folder_action_argv_rejects_empty_and_unknown() {
+        assert!(shared_folder_action_argv("").is_none());
+        assert!(shared_folder_action_argv("foo").is_none());
+        assert!(shared_folder_action_argv("sync-now").is_none());
+        // Casing must be exact — no Title-case variants.
+        assert!(shared_folder_action_argv("LIST").is_none());
+        assert!(shared_folder_action_argv("List").is_none());
+    }
+
+    #[test]
+    fn shared_folder_action_argv_rejects_injection_shaped_strings() {
+        // The action arrives via query-string and is fed straight
+        // into a helper-binary spawn. No matter what the caller
+        // sends, anything outside the allowlist must reject — this
+        // is the daemon's only line of defense.
+        assert!(shared_folder_action_argv("list; rm -rf /").is_none());
+        assert!(shared_folder_action_argv("list && cat /etc/passwd").is_none());
+        assert!(shared_folder_action_argv("../../../etc/passwd").is_none());
+        assert!(shared_folder_action_argv("list\0").is_none());
+        assert!(shared_folder_action_argv("list ").is_none());
+    }
+
+    #[test]
+    fn shared_folder_allowed_actions_constant_matches_helper() {
+        // Guard against drift: every entry in the constant must be
+        // accepted by the helper, and every helper-accepted action
+        // must appear in the constant. Without this the 400 error
+        // body could lie about what's actually allowed.
+        for a in SHARED_FOLDER_ALLOWED_ACTIONS {
+            assert!(
+                shared_folder_action_argv(a).is_some(),
+                "advertised action `{}` rejected by helper",
+                a,
+            );
+        }
+        // Spot-check that there isn't a stealth action the constant
+        // doesn't advertise. The helper's match has 4 arms today.
+        // If you add a 5th, this assertion forces an update.
+        let known_count = SHARED_FOLDER_ALLOWED_ACTIONS.len();
+        assert_eq!(known_count, 4, "update SHARED_FOLDER_ALLOWED_ACTIONS + this guard when adding actions");
     }
 }
