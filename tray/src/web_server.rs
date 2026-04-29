@@ -238,6 +238,127 @@ fn idempotency_cache() -> &'static Mutex<HashMap<String, IdemEntry>> {
     IDEMPOTENCY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// ── Per-pod status cache (Phase 2 of remaining sprint) ─────────
+//
+// Lifts the OS's per-pod /api/pod/ready polling server-side. Each
+// agent in StateSnapshot carries a `status` field derived from a
+// gateway probe. With 15 pods on Operator that drops 15 extra HTTP
+// requests per poll cadence to zero — the OS just reads
+// state.agents[].status.
+//
+// Cache TTL: 5s. Stale entries trigger a background-thread refresh
+// while the current /api/state response returns the cached (or
+// Unknown) value. We do NOT block /api/state on a probe — a slow
+// upstream would otherwise cascade into a slow daemon.
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum AgentStatus {
+    /// Last probe returned 200. Pod is serving traffic end-to-end.
+    Ready,
+    /// 401/403/404 — edge auth not yet propagated, route not yet
+    /// published, or pod still booting. Wizard keeps polling.
+    Starting,
+    /// 5xx — gateway answering but upstream unhealthy.
+    Unhealthy,
+    /// Probe returned a connection-level error (refused, timeout,
+    /// DNS) — the gateway itself is unreachable. Treat as "container
+    /// is down or networking is broken".
+    Stopped,
+    /// Never probed yet (pod just appeared) OR a transient failure
+    /// the cache hasn't classified. UI should render as "checking".
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StatusEntry {
+    status: AgentStatus,
+    fetched_at: u64,
+}
+
+const STATUS_TTL_SECS: u64 = 5;
+
+static STATUS_CACHE: OnceLock<Mutex<HashMap<String, StatusEntry>>> =
+    OnceLock::new();
+
+fn status_cache() -> &'static Mutex<HashMap<String, StatusEntry>> {
+    STATUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Read the cached status for `pod_id`. Returns `Unknown` for cache
+/// miss + kicks a background refresh if the entry is stale or missing
+/// AND `api_url` + `user_key` are non-empty (we can't probe without
+/// them).
+fn agent_status_cached(
+    pod_id: &str,
+    api_url: Option<&str>,
+    user_key: &str,
+) -> AgentStatus {
+    let now = now_secs();
+    let (cached, needs_refresh) = {
+        let cache = status_cache().lock().unwrap();
+        match cache.get(pod_id) {
+            Some(e) => {
+                let stale = now.saturating_sub(e.fetched_at) >= STATUS_TTL_SECS;
+                (e.status, stale)
+            }
+            None => (AgentStatus::Unknown, true),
+        }
+    };
+
+    if needs_refresh {
+        if let (Some(url), false) = (api_url, user_key.is_empty()) {
+            if !url.is_empty() {
+                let pod = pod_id.to_string();
+                let url = url.to_string();
+                let key = user_key.to_string();
+                thread::spawn(move || {
+                    let s = probe_agent_status(&url, &key);
+                    let mut cache = status_cache().lock().unwrap();
+                    cache.insert(pod, StatusEntry { status: s, fetched_at: now_secs() });
+                });
+            }
+        }
+    }
+    cached
+}
+
+/// Synchronous-blocking probe of a pod's gateway. Mirrors
+/// handle_pod_ready's classification — same Authorization header,
+/// same 4s timeout, same status-code map. Run inside a per-call
+/// tokio runtime so we can block until it finishes (called from
+/// thread::spawn — never from the request thread).
+fn probe_agent_status(api_url: &str, user_key: &str) -> AgentStatus {
+    if api_url.is_empty() {
+        return AgentStatus::Stopped;
+    }
+    let probe_url = format!("{}/models", api_url.trim_end_matches('/'));
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(_) => return AgentStatus::Unknown,
+    };
+    let http = atomek_core::HttpClient::new();
+    let result = rt.block_on(async {
+        http.get(&probe_url)
+            .header("Authorization", format!("Bearer {}", user_key))
+            .timeout(std::time::Duration::from_secs(4))
+            .send()
+            .await
+    });
+    match result {
+        Ok(resp) => match resp.status().as_u16() {
+            200 => AgentStatus::Ready,
+            401 | 403 | 404 => AgentStatus::Starting,
+            500..=599 => AgentStatus::Unhealthy,
+            _ => AgentStatus::Unknown,
+        },
+        Err(_) => AgentStatus::Stopped,
+    }
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1288,6 +1409,11 @@ struct AgentSlot {
     ui_url: Option<String>,
     /// Stable per-user API key — same across every pod.
     user_key: String,
+    /// Latest gateway-probe verdict cached for STATUS_TTL_SECS.
+    /// Phase 2 of remaining sprint: lifts /api/pod/ready polling
+    /// server-side. New daemons emit; old daemons omit (forward-compat
+    /// — TytusOS treats absent as "fall back to /api/pod/ready").
+    status: AgentStatus,
 }
 
 #[derive(Serialize, Clone)]
@@ -1625,9 +1751,19 @@ fn compute_state_snapshot() -> StateSnapshot {
 
             let units = agent_units_for(&agent_type);
             used += units;
+            // Cache lookup is non-blocking; a stale entry kicks a
+            // background refresh so the next poll sees the fresh
+            // value. First poll for a never-probed pod returns
+            // Unknown, which the OS renders as "checking".
+            let status = agent_status_cached(
+                &pod_id,
+                api_url.as_deref(),
+                &user_key,
+            );
             agents.push(AgentSlot {
                 pod_id, agent_type, units,
                 public_url, api_url, ui_url, user_key,
+                status,
             });
         }
     }
@@ -3841,5 +3977,106 @@ mod tests {
         );
 
         handler.join().expect("handler thread panicked");
+    }
+
+    // ── Per-pod status cache (Phase 2 cont) ──────────────────────
+    //
+    // Cache lookup is fully testable from outside the request thread
+    // since it's just a Mutex<HashMap>. The actual probe involves
+    // HTTP, which we don't exercise here — handle_pod_ready already
+    // covers the probe-classification path and we mirror its logic.
+
+    #[test]
+    fn agent_status_serializes_lowercase() {
+        // Pin the wire shape — TytusOS imports the JSON value
+        // directly into `state.agents[].status` and switches on
+        // string equality. A casing change here would silently
+        // break every consumer.
+        let pairs: Vec<(AgentStatus, &str)> = vec![
+            (AgentStatus::Ready, "\"ready\""),
+            (AgentStatus::Starting, "\"starting\""),
+            (AgentStatus::Unhealthy, "\"unhealthy\""),
+            (AgentStatus::Stopped, "\"stopped\""),
+            (AgentStatus::Unknown, "\"unknown\""),
+        ];
+        for (s, expected) in pairs {
+            assert_eq!(serde_json::to_string(&s).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn agent_status_cache_returns_unknown_for_unseen_pod() {
+        // Use a unique pod_id so this test doesn't collide with
+        // siblings. agent_status_cached MUST NOT block — it returns
+        // Unknown immediately and kicks a background probe.
+        let pod = format!("test-unseen-{}", now_secs());
+        // No api_url means the probe-kick is skipped, so we test
+        // the pure cache-miss return path.
+        let s = agent_status_cached(&pod, None, "");
+        assert_eq!(s, AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn agent_status_cache_returns_cached_value_within_ttl() {
+        let pod = format!("test-cached-{}", now_secs());
+        {
+            let mut cache = status_cache().lock().unwrap();
+            cache.insert(
+                pod.clone(),
+                StatusEntry {
+                    status: AgentStatus::Ready,
+                    fetched_at: now_secs(),
+                },
+            );
+        }
+        // Empty creds means no refresh kick, but the cached entry
+        // is fresh so we get it back.
+        let s = agent_status_cached(&pod, None, "");
+        assert_eq!(s, AgentStatus::Ready);
+    }
+
+    #[test]
+    fn agent_status_cache_treats_stale_entry_as_eligible_for_refresh() {
+        // Insert an entry with a fetched_at older than STATUS_TTL_SECS
+        // and verify the lookup still returns the cached value (we
+        // never block on probe). The "refresh kick" only fires when
+        // api_url + user_key are present; with empty creds we just
+        // assert the cached value comes back.
+        let pod = format!("test-stale-{}", now_secs());
+        {
+            let mut cache = status_cache().lock().unwrap();
+            cache.insert(
+                pod.clone(),
+                StatusEntry {
+                    status: AgentStatus::Starting,
+                    fetched_at: now_secs().saturating_sub(STATUS_TTL_SECS + 10),
+                },
+            );
+        }
+        // Returns the stale value (not Unknown) because we never
+        // wipe an entry on read — fresh probe lands later in the
+        // background thread. UI gets last-known status, not a regression.
+        let s = agent_status_cached(&pod, None, "");
+        assert_eq!(s, AgentStatus::Starting);
+    }
+
+    #[test]
+    fn agent_status_cache_ttl_constant_is_sane() {
+        // Guard the architectural decision: TTL must be longer than
+        // the OS poll interval (currently 4s in DaemonStateProvider)
+        // so a stale-cache poll doesn't trigger probes on every tick.
+        // 5s is the floor. Update if the OS changes intervalMs.
+        assert!(
+            STATUS_TTL_SECS >= 4,
+            "STATUS_TTL_SECS must be ≥ OS poll interval to prevent probe-storm",
+        );
+    }
+
+    #[test]
+    fn probe_agent_status_returns_stopped_for_empty_url() {
+        // Defensive: no api_url means no probe possible. Don't
+        // hang/panic — return Stopped (the OS renders "container down").
+        let s = probe_agent_status("", "any-key");
+        assert_eq!(s, AgentStatus::Stopped);
     }
 }
