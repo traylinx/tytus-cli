@@ -122,6 +122,43 @@ pub async fn agent_logs(client: &TytusClient, pod_id: &str, tail: u32) -> atomek
         .map_err(|e| AtomekError::Other(format!("Failed to parse agent logs: {}", e)))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EnvVar {
+    pub key: String,
+    pub value: String,
+    /// One of: "channels", "agent_default", "operator_override", "runtime".
+    /// Optional in the type so old Provider builds without the field still
+    /// deserialize cleanly — render code falls back to "unknown".
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentEnv {
+    pub pod_num: Option<u32>,
+    pub agent_type: Option<String>,
+    pub reveal_secrets: Option<bool>,
+    pub vars: Vec<EnvVar>,
+}
+
+pub async fn agent_env(
+    client: &TytusClient,
+    pod_id: &str,
+    reveal_secrets: bool,
+) -> atomek_core::Result<AgentEnv> {
+    let mut path = format!("/pod/agent/env?pod_id={}", pod_id);
+    if reveal_secrets {
+        path.push_str("&reveal=secrets");
+    }
+    let resp = client.get_with_retry(&path).await?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AtomekError::ApiStatus { status, message: body });
+    }
+    resp.json().await
+        .map_err(|e| AtomekError::Other(format!("Failed to parse agent env: {}", e)))
+}
+
 pub async fn stop_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Result<()> {
     let resp = client.post("/pod/agent/stop")
         .json(&serde_json::json!({ "pod_id": pod_id }))
