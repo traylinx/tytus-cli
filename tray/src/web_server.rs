@@ -20,6 +20,7 @@
 //!   `recv()`. On tray quit we drop the `Arc<Server>` and the kernel
 //!   tears down the listener.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -189,6 +190,154 @@ impl Registry {
     }
 }
 
+// ── Idempotency cache for destructive POSTs ───────────────────
+//
+// A retry of `POST /api/pod/restart?pod=02` after a flaky tunnel must
+// NOT spawn a second `tytus restart --pod 02` subprocess. RFC-style
+// `Idempotency-Key` solves this: the client mints one key per logical
+// action and reuses it on retry; the daemon caches the first response
+// keyed by it and replays the cached body on subsequent hits.
+//
+// Process-local cache only — keys live for `IDEM_TTL_SECS` and the
+// table is bounded by `IDEM_MAX_ENTRIES`. Daemon restart drops the
+// cache; that's fine because all in-flight job_ids would also be lost
+// on restart (registry is in-memory, see useDaemonState's restart
+// detection that already wipes activeJob state on `daemon_started_at`
+// drift).
+//
+// Concurrency contract: two requests with the same key arriving while
+// the first is still running BOTH execute and last-write-wins on the
+// cache entry. We don't queue the second behind the first because
+// (a) the realistic UI is a single user clicking once, and (b) the
+// cost of duplicate spawn for the rare race is bounded by Registry's
+// `create_pod` 409 — which the second request would already trip if
+// it's a per-pod action. Once the first response lands in the cache,
+// every subsequent retry replays it.
+//
+// 5xx responses are NOT cached: the failure may be transient (network
+// blip to upstream, momentary file lock) and the client should be free
+// to retry without being permanently stuck on a stale error. 2xx and
+// 4xx responses ARE cached because they're deterministic outcomes of
+// the request (success, validation error, 404 unknown pod, etc.) and
+// replaying them keeps the UI consistent across retries.
+
+const IDEM_TTL_SECS: u64 = 600;
+const IDEM_MAX_ENTRIES: usize = 256;
+const IDEM_MAX_KEY_LEN: usize = 200;
+
+#[derive(Clone)]
+struct IdemEntry {
+    status: u16,
+    body: String,
+    inserted_at: u64,
+}
+
+static IDEMPOTENCY_CACHE: OnceLock<Mutex<HashMap<String, IdemEntry>>> = OnceLock::new();
+
+fn idempotency_cache() -> &'static Mutex<HashMap<String, IdemEntry>> {
+    IDEMPOTENCY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Look up `key`. Returns `None` for miss or expired entry; expired
+/// entries are evicted opportunistically on read.
+fn idempotency_get(key: &str) -> Option<IdemEntry> {
+    let now = now_secs();
+    let mut cache = idempotency_cache().lock().unwrap();
+    match cache.get(key) {
+        Some(entry) if now.saturating_sub(entry.inserted_at) < IDEM_TTL_SECS => {
+            Some(entry.clone())
+        }
+        Some(_) => {
+            cache.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+/// Insert `(key, status, body)`. Evicts the oldest entry by
+/// `inserted_at` if at capacity — newer requests displace stale ones
+/// rather than failing closed.
+fn idempotency_put(key: String, status: u16, body: String) {
+    let mut cache = idempotency_cache().lock().unwrap();
+    if cache.len() >= IDEM_MAX_ENTRIES && !cache.contains_key(&key) {
+        if let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, v)| v.inserted_at)
+            .map(|(k, _)| k.clone())
+        {
+            cache.remove(&oldest_key);
+        }
+    }
+    cache.insert(
+        key,
+        IdemEntry {
+            status,
+            body,
+            inserted_at: now_secs(),
+        },
+    );
+}
+
+/// Read the `Idempotency-Key` header. Header field-name lookup is
+/// case-insensitive per RFC 9110 §5.1. The value is required to be
+/// non-empty ASCII-graphic and ≤ `IDEM_MAX_KEY_LEN` so an attacker
+/// can't pin daemon RAM with multi-megabyte keys.
+fn read_idempotency_key(headers: &[Header]) -> Option<String> {
+    for h in headers {
+        if h.field.as_str().as_str().eq_ignore_ascii_case("Idempotency-Key") {
+            let v = h.value.as_str();
+            if !v.is_empty()
+                && v.len() <= IDEM_MAX_KEY_LEN
+                && v.chars().all(|c| c.is_ascii_graphic())
+            {
+                return Some(v.to_string());
+            }
+            // Malformed key: ignore (treat as no key) so a bogus value
+            // can't poison the cache. Caller will get a fresh execution.
+            return None;
+        }
+    }
+    None
+}
+
+// Per-thread carrier for the in-flight idempotency key. Set in
+// `handle()` after a cache miss and consumed by `respond_json` so we
+// can capture status + body without threading the key through every
+// handler signature. Each request is handled on a dedicated thread
+// (see `start()` -> `thread::spawn(move || handle(...))`) so the
+// thread-local has no cross-request leakage.
+thread_local! {
+    static CURRENT_IDEM_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn set_current_idem_key(key: Option<String>) {
+    CURRENT_IDEM_KEY.with(|k| *k.borrow_mut() = key);
+}
+
+fn take_current_idem_key() -> Option<String> {
+    CURRENT_IDEM_KEY.with(|k| k.borrow_mut().take())
+}
+
+/// Replay a cached response for this `Idempotency-Key`. Sends an
+/// `Idempotency-Replayed: true` header so the client (and any test
+/// harness) can tell a replay from a fresh execution.
+fn respond_idempotent_replay(request: Request, entry: &IdemEntry) {
+    let resp = Response::from_string(entry.body.clone())
+        .with_status_code(StatusCode(entry.status))
+        .with_header(header("Content-Type", "application/json"))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+        .with_header(header("Idempotency-Replayed", "true"));
+    let _ = request.respond(resp);
+}
+
 fn random_job_id() -> String {
     // Monotonic nanos + PID is unique enough for a per-session counter.
     // No need to burn an RNG dep for a UI that exists for one human.
@@ -347,6 +496,22 @@ fn handle(request: Request, registry: Registry) {
     if matches!(method, Method::Post) && !sec_fetch_site_ok(&request) {
         deny_cross_origin_post(request);
         return;
+    }
+
+    // Idempotency-Key short-circuit. Only POSTs are destructive enough
+    // to warrant caching; GETs are already safe to retry by definition.
+    // Cache hit: replay the prior response and skip dispatch entirely so
+    // a `tytus restart --pod 02` subprocess isn't spawned twice. Cache
+    // miss: stash the key in a thread-local so respond_json can capture
+    // the response when the handler finishes.
+    if matches!(method, Method::Post) {
+        if let Some(key) = read_idempotency_key(request.headers()) {
+            if let Some(entry) = idempotency_get(&key) {
+                respond_idempotent_replay(request, &entry);
+                return;
+            }
+            set_current_idem_key(Some(key));
+        }
     }
 
     match (&method, path.as_str()) {
@@ -548,6 +713,14 @@ fn handle(request: Request, registry: Registry) {
             let _ = request.respond(resp);
         }
     }
+
+    // Defensive: clear the thread-local in case a handler responded
+    // through a path other than `respond_json` (e.g. raw `Response`
+    // for SSE) and didn't consume the key. The key would otherwise
+    // leak to a subsequent request handled on this thread — though
+    // every request currently spawns its own thread, future tuning
+    // (a thread pool) shouldn't silently regress dedupe correctness.
+    set_current_idem_key(None);
 }
 
 fn serve_bytes(request: Request, body: &[u8], content_type: &str) {
@@ -2963,6 +3136,14 @@ fn handle_configure(request: Request) {
 
 fn respond_json<T: Serialize>(request: Request, status: u16, body: &T) {
     let json = serde_json::to_string(body).unwrap_or_else(|_| "{}".into());
+    // If this request carried an `Idempotency-Key`, capture the
+    // response so a future retry replays it. Skip 5xx — those are
+    // typically transient and we want the client to be free to retry.
+    if let Some(key) = take_current_idem_key() {
+        if status < 500 {
+            idempotency_put(key, status, json.clone());
+        }
+    }
     let resp = Response::from_string(json)
         .with_status_code(StatusCode(status))
         .with_header(header("Content-Type", "application/json"))
@@ -3402,5 +3583,195 @@ mod tests {
         // value comparison to avoid normalising attacker input later.
         assert!(!sec_fetch_site_value_ok(Some("Same-Origin")));
         assert!(!sec_fetch_site_value_ok(Some("SAME-ORIGIN")));
+    }
+
+    // ── Idempotency-Key cache ────────────────────────────────────
+    //
+    // The cache is a process-wide static; tests use unique keys
+    // ("idem-test-<test name>-<role>") to avoid cross-test bleed.
+
+    fn idem_hdr(value: &str) -> Header {
+        Header::from_bytes(b"Idempotency-Key", value.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn read_idempotency_key_returns_value_when_present() {
+        let v = read_idempotency_key(&[idem_hdr("abc-123")]);
+        assert_eq!(v, Some("abc-123".to_string()));
+    }
+
+    #[test]
+    fn read_idempotency_key_is_case_insensitive_on_field_name() {
+        let h1 = Header::from_bytes(b"idempotency-key", b"a").unwrap();
+        let h2 = Header::from_bytes(b"IDEMPOTENCY-KEY", b"a").unwrap();
+        assert_eq!(read_idempotency_key(&[h1]), Some("a".to_string()));
+        assert_eq!(read_idempotency_key(&[h2]), Some("a".to_string()));
+    }
+
+    #[test]
+    fn read_idempotency_key_rejects_empty_or_oversized() {
+        assert_eq!(read_idempotency_key(&[idem_hdr("")]), None);
+        let huge = "x".repeat(IDEM_MAX_KEY_LEN + 1);
+        assert_eq!(read_idempotency_key(&[idem_hdr(&huge)]), None);
+    }
+
+    #[test]
+    fn read_idempotency_key_rejects_non_graphic_chars() {
+        // Whitespace and control bytes are out: would defeat the
+        // ascii-graphic invariant we lean on for log safety.
+        assert_eq!(read_idempotency_key(&[idem_hdr("a b")]), None);
+        assert_eq!(read_idempotency_key(&[idem_hdr("a\tb")]), None);
+    }
+
+    #[test]
+    fn read_idempotency_key_returns_none_when_absent() {
+        assert_eq!(read_idempotency_key(&[]), None);
+        let other = Header::from_bytes(b"X-Other", b"42").unwrap();
+        assert_eq!(read_idempotency_key(&[other]), None);
+    }
+
+    #[test]
+    fn idempotency_get_miss_returns_none() {
+        assert!(idempotency_get("idem-test-miss-no-such-key").is_none());
+    }
+
+    #[test]
+    fn idempotency_put_then_get_round_trips() {
+        let key = "idem-test-roundtrip".to_string();
+        idempotency_put(key.clone(), 202, "{\"job_id\":\"abc\"}".into());
+        let entry = idempotency_get(&key).expect("hit after put");
+        assert_eq!(entry.status, 202);
+        assert_eq!(entry.body, "{\"job_id\":\"abc\"}");
+    }
+
+    #[test]
+    fn idempotency_get_evicts_expired_entry() {
+        // Manually insert an entry with a `inserted_at` older than the
+        // TTL so the next read evicts it. Avoids burning real wall-clock.
+        let key = "idem-test-expired".to_string();
+        {
+            let mut cache = idempotency_cache().lock().unwrap();
+            cache.insert(
+                key.clone(),
+                IdemEntry {
+                    status: 200,
+                    body: "{}".into(),
+                    inserted_at: now_secs().saturating_sub(IDEM_TTL_SECS + 1),
+                },
+            );
+        }
+        assert!(idempotency_get(&key).is_none());
+        // And it's gone from the cache after the read evicted it.
+        assert!(!idempotency_cache().lock().unwrap().contains_key(&key));
+    }
+
+    #[test]
+    fn idempotency_put_skips_eviction_when_updating_existing_key() {
+        // Updating an existing entry (e.g. last-write-wins on a race)
+        // must not displace some unrelated entry just to "make room".
+        let key = "idem-test-update".to_string();
+        idempotency_put(key.clone(), 200, "first".into());
+        let len_before = idempotency_cache().lock().unwrap().len();
+        idempotency_put(key.clone(), 202, "second".into());
+        let len_after = idempotency_cache().lock().unwrap().len();
+        assert_eq!(len_before, len_after);
+        let entry = idempotency_get(&key).unwrap();
+        assert_eq!(entry.status, 202);
+        assert_eq!(entry.body, "second");
+    }
+
+    #[test]
+    fn current_idem_key_thread_local_round_trips() {
+        // sanity: set / take / take-again behavior (consumes on take).
+        assert_eq!(take_current_idem_key(), None);
+        set_current_idem_key(Some("abc".into()));
+        assert_eq!(take_current_idem_key(), Some("abc".into()));
+        assert_eq!(take_current_idem_key(), None);
+    }
+
+    /// End-to-end wire test: same key returns the same body twice and
+    /// the second response carries `Idempotency-Replayed: true`.
+    /// Different key spawns a fresh execution.
+    #[test]
+    fn idempotency_replay_via_real_http() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let port = server.server_addr().to_ip().expect("ip").port();
+        let registry = Registry::new();
+
+        let server_arc = Arc::new(server);
+        let server_for_thread = server_arc.clone();
+        let handler = thread::spawn(move || {
+            for (i, req) in server_for_thread.incoming_requests().enumerate() {
+                handle(req, registry.clone());
+                if i >= 2 {
+                    break;
+                }
+            }
+        });
+
+        let key = format!("idem-test-wire-{}", now_secs());
+        // /api/pod/restart against an unknown pod returns 404 — a
+        // deterministic non-2xx response we can replay without needing
+        // the full state.json fixture wired up. The caching contract
+        // covers 4xx the same as 2xx.
+        let post = |idem: &str| -> String {
+            let req = format!(
+                "POST /api/pod/restart?pod=99 HTTP/1.1\r\n\
+                 Host: localhost\r\n\
+                 Sec-Fetch-Site: same-origin\r\n\
+                 Idempotency-Key: {}\r\n\
+                 Content-Length: 0\r\n\
+                 Connection: close\r\n\r\n",
+                idem,
+            );
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            s.write_all(req.as_bytes()).expect("write");
+            let mut resp = String::new();
+            s.read_to_string(&mut resp).expect("read");
+            resp
+        };
+
+        let r1 = post(&key);
+        let r2 = post(&key);
+
+        // First response: no Idempotency-Replayed header.
+        assert!(
+            !r1.lines().any(|l| l.to_lowercase().starts_with("idempotency-replayed:")),
+            "first response should not be marked as replay: {}",
+            r1,
+        );
+        // Second response: Idempotency-Replayed: true echoed back.
+        let replayed = r2
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("idempotency-replayed:"))
+            .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
+            .expect("replay header missing on second response");
+        assert_eq!(replayed, "true");
+
+        // Body should be byte-identical between the two responses.
+        let body1 = r1
+            .find("\r\n\r\n")
+            .map(|i| r1[i + 4..].to_string())
+            .unwrap_or_default();
+        let body2 = r2
+            .find("\r\n\r\n")
+            .map(|i| r2[i + 4..].to_string())
+            .unwrap_or_default();
+        assert_eq!(body1, body2, "replay body should match original");
+
+        // Third request with a *different* key: should NOT be replayed.
+        let r3 = post(&format!("{}-different", key));
+        assert!(
+            !r3.lines().any(|l| l.to_lowercase().starts_with("idempotency-replayed:")),
+            "third response with new key should not be replay: {}",
+            r3,
+        );
+
+        handler.join().expect("handler thread panicked");
     }
 }
