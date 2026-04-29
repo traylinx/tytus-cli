@@ -2,6 +2,23 @@ use atomek_core::AtomekError;
 use serde::Deserialize;
 use crate::client::TytusClient;
 
+/// Strict pod-id validator for any function that interpolates `pod_id`
+/// into a query string. Pod ids on this product are always
+/// zero-padded decimal (e.g. "02", "04") — accepting anything else
+/// here lets a crafted pod_id smuggle extra query parameters into the
+/// Provider URL (codex review 2026-04-29 caught
+/// `02&reveal=secrets` injection). 3 chars is enough for `0..=99`,
+/// padded; tighten further if pod ids ever get a stricter spec.
+fn validate_pod_id(pod_id: &str) -> Result<(), AtomekError> {
+    if pod_id.is_empty() || pod_id.len() > 3 || !pod_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(AtomekError::Other(format!(
+            "invalid pod_id {:?} (expected 1-3 ASCII digits)",
+            pod_id
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AgentStatus {
     pub pod_num: Option<u32>,
@@ -31,6 +48,7 @@ pub struct AgentDeployResult {
 }
 
 pub async fn get_agent_status(client: &TytusClient, pod_id: &str) -> atomek_core::Result<AgentStatus> {
+    validate_pod_id(pod_id)?;
     let resp = client.get_with_retry(&format!("/pod/agent/status?pod_id={}", pod_id)).await?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -110,6 +128,7 @@ pub struct AgentLogs {
 }
 
 pub async fn agent_logs(client: &TytusClient, pod_id: &str, tail: u32) -> atomek_core::Result<AgentLogs> {
+    validate_pod_id(pod_id)?;
     let tail = tail.clamp(1, 500);
     let path = format!("/pod/agent/logs?pod_id={}&tail={}", pod_id, tail);
     let resp = client.get_with_retry(&path).await?;
@@ -145,6 +164,7 @@ pub async fn agent_env(
     pod_id: &str,
     reveal_secrets: bool,
 ) -> atomek_core::Result<AgentEnv> {
+    validate_pod_id(pod_id)?;
     let mut path = format!("/pod/agent/env?pod_id={}", pod_id);
     if reveal_secrets {
         path.push_str("&reveal=secrets");
@@ -172,4 +192,39 @@ pub async fn stop_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Resu
     let status = resp.status().as_u16();
     let body = resp.text().await.unwrap_or_default();
     Err(AtomekError::ApiStatus { status, message: body })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_pod_id;
+
+    #[test]
+    fn validate_pod_id_accepts_canonical_forms() {
+        assert!(validate_pod_id("02").is_ok());
+        assert!(validate_pod_id("04").is_ok());
+        // Single-digit forms (rare but technically valid).
+        assert!(validate_pod_id("9").is_ok());
+        assert!(validate_pod_id("99").is_ok());
+        assert!(validate_pod_id("999").is_ok());
+    }
+
+    #[test]
+    fn validate_pod_id_rejects_query_injection_shapes() {
+        // Codex review 2026-04-29 — these are the exploits that would
+        // smuggle an extra query param into the Provider URL.
+        assert!(validate_pod_id("02&reveal=secrets").is_err());
+        assert!(validate_pod_id("02 ").is_err());
+        assert!(validate_pod_id("../etc/passwd").is_err());
+        assert!(validate_pod_id("02#frag").is_err());
+        assert!(validate_pod_id("02?reveal=1").is_err());
+    }
+
+    #[test]
+    fn validate_pod_id_rejects_empty_and_oversized() {
+        assert!(validate_pod_id("").is_err());
+        // 4+ digits are out of spec — pods are 0..=99 today (2 digits)
+        // and the reserved block tops out at 99 in any plausible future.
+        assert!(validate_pod_id("0099").is_err());
+        assert!(validate_pod_id("12345").is_err());
+    }
 }
