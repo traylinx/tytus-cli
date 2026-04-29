@@ -711,6 +711,13 @@ fn handle(request: Request, registry: Registry) {
         (Method::Get, "/api/pod/ready") => {
             handle_pod_ready(request, &query);
         }
+        // Per-pod env vars (manifest A.exist A3.5). Spawns `tytus agent
+        // env --pod NN [--reveal-secrets] --json` and forwards the parsed
+        // JSON. Provider does redaction + plan-tier gating; daemon is a
+        // dumb pipe.
+        (Method::Get, "/api/pod/env") => {
+            handle_pod_env(request, &query);
+        }
         // Revoke a pod — frees its units immediately and wipes the
         // pod's workspace state. Wizard's "Revoke & try again" button
         // after an install failure calls this to reset before retry.
@@ -2624,6 +2631,81 @@ fn handle_pod_refresh_creds(request: Request, registry: &Registry, query: &str) 
 /// the public edge. Any 2xx/401/403 means the gateway is answering
 /// (401/403 from the edge auth plugin when our probe doesn't carry
 /// the bearer token — still proof of life). 404/5xx/timeout = not ready.
+/// Build the argv for a `tytus agent env` subprocess. Extracted so
+/// tray-level tests can pin the shape without spawning the binary —
+/// any drift in the flag names is the kind of thing that silently
+/// breaks the OS Env tab.
+fn pod_env_argv(pod_id: &str, reveal: bool) -> Vec<String> {
+    let mut args = vec![
+        "agent".to_string(),
+        "env".to_string(),
+        "--pod".to_string(),
+        pod_id.to_string(),
+    ];
+    if reveal {
+        args.push("--reveal-secrets".to_string());
+    }
+    args.push("--json".to_string());
+    args
+}
+
+/// Parse `?reveal=secrets` from a `&`-separated query string. Returns
+/// false on any other value (including unset, `reveal=true`, or
+/// `reveal=` empty).
+fn parse_reveal_flag(query: &str) -> bool {
+    query.split('&').any(|kv| kv == "reveal=secrets")
+}
+
+/// GET /api/pod/env?pod=NN[&reveal=secrets] — proxies through to
+/// `tytus agent env --pod NN [--reveal-secrets] --json`. Provider
+/// performs redaction + plan-tier gating; this handler is a thin
+/// passthrough that forwards stdout JSON unchanged. A non-zero exit
+/// code is mapped to a 502 with the captured stderr line.
+fn handle_pod_env(request: Request, query: &str) {
+    let pod_id = match parse_pod_id(query) {
+        Some(p) => p,
+        None => {
+            respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
+            return;
+        }
+    };
+    let reveal = parse_reveal_flag(query);
+    let bin = resolve_tytus_bin();
+    let mut cmd = Command::new(&bin);
+    for a in pod_env_argv(&pod_id, reveal) {
+        cmd.arg(a);
+    }
+    cmd.env("TYTUS_HEADLESS", "1");
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            respond_json(request, 502, &serde_json::json!({
+                "error": "spawn_failed", "message": e.to_string(),
+            }));
+            return;
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        respond_json(request, 502, &serde_json::json!({
+            "error": "tytus_subprocess_failed",
+            "exit_code": output.status.code(),
+            "stderr": stderr,
+        }));
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    match serde_json::from_str::<serde_json::Value>(&stdout) {
+        Ok(v) => respond_json(request, 200, &v),
+        Err(e) => {
+            respond_json(request, 502, &serde_json::json!({
+                "error": "invalid_subprocess_json",
+                "message": e.to_string(),
+            }));
+        }
+    }
+}
+
 fn handle_pod_ready(request: Request, query: &str) {
     let pod_id = match parse_pod_id(query) {
         Some(p) => p,
@@ -4173,6 +4255,51 @@ mod tests {
         assert!(shared_folder_action_argv("../../../etc/passwd").is_none());
         assert!(shared_folder_action_argv("list\0").is_none());
         assert!(shared_folder_action_argv("list ").is_none());
+    }
+
+    #[test]
+    fn pod_env_argv_default_redacted_form() {
+        // No --reveal-secrets when reveal=false. --json always present
+        // so tray's JSON parser doesn't get a human banner.
+        assert_eq!(
+            pod_env_argv("02", false),
+            vec![
+                "agent".to_string(),
+                "env".to_string(),
+                "--pod".to_string(),
+                "02".to_string(),
+                "--json".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn pod_env_argv_reveal_form() {
+        // --reveal-secrets is emitted between --pod and --json so a
+        // bare argv inspect still reads naturally.
+        assert_eq!(
+            pod_env_argv("04", true),
+            vec![
+                "agent".to_string(),
+                "env".to_string(),
+                "--pod".to_string(),
+                "04".to_string(),
+                "--reveal-secrets".to_string(),
+                "--json".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn parse_reveal_flag_only_matches_secrets() {
+        assert!(parse_reveal_flag("pod=02&reveal=secrets"));
+        // Order-insensitive — flag can appear anywhere in the query.
+        assert!(parse_reveal_flag("reveal=secrets&pod=02"));
+        // Strict equality only — no fuzzy "true" / "1" / case variants.
+        assert!(!parse_reveal_flag("pod=02"));
+        assert!(!parse_reveal_flag("pod=02&reveal=true"));
+        assert!(!parse_reveal_flag("pod=02&reveal=Secrets"));
+        assert!(!parse_reveal_flag(""));
     }
 
     #[test]

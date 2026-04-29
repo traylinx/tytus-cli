@@ -144,6 +144,23 @@ enum AgentAction {
         #[arg(long)]
         refresh: bool,
     },
+    /// Show the effective environment of the agent container running on
+    /// the given pod, with each variable's source classified as `runtime`
+    /// (DAM-injected), `agent_default` (image / agent-type), `channels`
+    /// (added via `tytus channels add`), or `operator_override`. Secrets
+    /// are redacted by default; pass `--reveal-secrets` to see real
+    /// values (Operator-tier plan required).
+    Env {
+        /// Pod ID (e.g. "02"). Defaults to the first connected pod.
+        #[arg(short, long)]
+        pod: Option<String>,
+        /// Reveal secret values (Operator tier only). Without this flag,
+        /// values for keys matching KEY/TOKEN/SECRET/PASSWORD are shown
+        /// as `<redacted>`. Provider returns 403 if the caller's plan
+        /// tier is below Operator.
+        #[arg(long)]
+        reveal_secrets: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2056,6 +2073,85 @@ async fn cmd_agent(http: &atomek_core::HttpClient, action: AgentAction, json: bo
         AgentAction::Uninstall { pod } => cmd_agent_uninstall(http, &pod, json).await,
         AgentAction::List => cmd_agent_list(http, json).await,
         AgentAction::Catalog { refresh } => cmd_agent_catalog(http, refresh, json).await,
+        AgentAction::Env { pod, reveal_secrets } => cmd_agent_env(http, pod, reveal_secrets, json).await,
+    }
+}
+
+async fn cmd_agent_env(
+    http: &atomek_core::HttpClient,
+    pod_id: Option<String>,
+    reveal_secrets: bool,
+    json: bool,
+) {
+    let mut state = CliState::load();
+    if !state.is_logged_in() {
+        eprintln!("Not logged in. Run: tytus login");
+        std::process::exit(1);
+    }
+    if let Err(e) = ensure_token(&mut state, http).await {
+        eprintln!("Token refresh failed: {}. Run: tytus login", e);
+        std::process::exit(1);
+    }
+    let (sk, auid) = get_credentials(&mut state, http).await;
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+
+    // Resolve the pod id — same strategy as `tytus logs` / `tytus exec`:
+    // explicit --pod wins, otherwise pick the first connected pod.
+    let resolved = match pod_id {
+        Some(p) => p,
+        None => {
+            match atomek_pods::status::get_pod_status(&client).await {
+                Ok(s) => match s.pods.first() {
+                    Some(p) => p.pod_id.clone(),
+                    None => {
+                        eprintln!("No pods. Run: tytus connect");
+                        std::process::exit(1);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to list pods: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+
+    match atomek_pods::agent::agent_env(&client, &resolved, reveal_secrets).await {
+        Ok(env) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "pod_num": env.pod_num,
+                    "agent_type": env.agent_type,
+                    "reveal_secrets": env.reveal_secrets,
+                    "vars": env.vars.iter().map(|v| serde_json::json!({
+                        "key": v.key,
+                        "value": v.value,
+                        "source": v.source.clone().unwrap_or_else(|| "unknown".to_string()),
+                    })).collect::<Vec<_>>(),
+                })).unwrap());
+                return;
+            }
+            let revealed = env.reveal_secrets.unwrap_or(false);
+            println!(
+                "Pod {} — {} — {} variable(s){}",
+                env.pod_num.map(|n| format!("{:02}", n)).unwrap_or_else(|| resolved.clone()),
+                env.agent_type.unwrap_or_else(|| "unknown".to_string()),
+                env.vars.len(),
+                if revealed { " (secrets revealed)" } else { " (secrets redacted; pass --reveal-secrets on Operator tier to see them)" },
+            );
+            for v in &env.vars {
+                let src = v.source.as_deref().unwrap_or("unknown");
+                println!("  [{}] {}={}", src, v.key, v.value);
+            }
+        }
+        Err(atomek_core::AtomekError::ApiStatus { status: 403, .. }) => {
+            eprintln!("403 — revealing secrets requires the Operator plan tier.");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Failed to fetch pod env: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
