@@ -1825,6 +1825,18 @@ fn compute_state_snapshot() -> StateSnapshot {
 /// is not resolvable we fall back to `~/.config/tytus/state.json` so
 /// callers don't have to branch on platform.
 fn state_json_path() -> Option<std::path::PathBuf> {
+    // Test override: lets the etag_roundtrip wire test (and any other
+    // future test) pin compute_state_snapshot to a known fixture
+    // file, isolating it from the live daemon state on the developer
+    // machine. Without this, the wire test flaked when uptime_secs /
+    // forwarders / probe_gateway results moved between request 1 and
+    // request 2 — captured in feedback_etag_wire_test_flake.
+    //
+    // Production never sets TYTUS_STATE_PATH, so the override is a
+    // no-op outside test runs.
+    if let Some(p) = std::env::var_os("TYTUS_STATE_PATH") {
+        return Some(std::path::PathBuf::from(p));
+    }
     if let Some(dir) = dirs::config_dir() {
         return Some(dir.join("tytus").join("state.json"));
     }
@@ -3431,6 +3443,58 @@ fn respond_json<T: Serialize>(request: Request, status: u16, body: &T) {
 mod tests {
     use super::*;
 
+    /// RAII guard that pins `TYTUS_STATE_PATH` for the duration of a
+    /// test, releases the env var on drop, and serializes against
+    /// other guard-using tests via a static mutex (env vars are
+    /// process-global; two parallel tests reading them would race).
+    ///
+    /// Used by `etag_roundtrip_via_real_http` to keep
+    /// `compute_state_snapshot()` deterministic across the test's two
+    /// HTTP requests.
+    struct StateOverrideGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl StateOverrideGuard {
+        fn set(path: &str) -> Self {
+            static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+                std::sync::OnceLock::new();
+            // Even if a prior test panicked while holding the lock,
+            // the guard's PoisonError still gives us the inner mutex.
+            let lock = LOCK
+                .get_or_init(|| std::sync::Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("TYTUS_STATE_PATH");
+            std::env::set_var("TYTUS_STATE_PATH", path);
+            Self { _lock: lock, prev }
+        }
+    }
+
+    impl Drop for StateOverrideGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("TYTUS_STATE_PATH", v),
+                None => std::env::remove_var("TYTUS_STATE_PATH"),
+            }
+        }
+    }
+
+    #[test]
+    fn state_override_guard_round_trips_env_var() {
+        // Pin: guard sets the env var, drop restores prior value.
+        std::env::remove_var("TYTUS_STATE_PATH");
+        {
+            let _g = StateOverrideGuard::set("/tmp/fixture-A.json");
+            assert_eq!(
+                std::env::var_os("TYTUS_STATE_PATH"),
+                Some("/tmp/fixture-A.json".into()),
+            );
+        }
+        assert!(std::env::var_os("TYTUS_STATE_PATH").is_none());
+    }
+
     #[test]
     fn pod_action_argv_whitelist() {
         // Known-good per-pod actions resolve to the canonical tytus argv.
@@ -3628,11 +3692,26 @@ mod tests {
     /// Also covers the route dispatcher (`handle`), so a future
     /// refactor that drops `/api/state` from the match arms surfaces
     /// here rather than only through manual smoke testing.
+    ///
+    /// Pins state via `TYTUS_STATE_PATH` so the snapshot is stable
+    /// across the two HTTP requests. Without that override, when this
+    /// test runs on a developer machine with a live `~/.config/tytus/
+    /// state.json`, `compute_state_snapshot` re-reads the file +
+    /// re-probes the gateway + re-checks forwarder PIDs on each call,
+    /// any of which can flip the ETag between the requests
+    /// (feedback_etag_wire_test_flake).
     #[test]
     fn etag_roundtrip_via_real_http() {
         use std::io::{Read, Write};
         use std::net::TcpStream;
         use std::time::Duration;
+
+        // Point compute_state_snapshot at a non-existent fixture
+        // path so it falls into the empty()/no-state branch — that
+        // branch is fully deterministic (no daemon-socket poll,
+        // no gateway probe, no live PID checks). Tests don't need a
+        // populated state for ETag stability, just a STABLE one.
+        let _guard = StateOverrideGuard::set("/nonexistent/tytus-test-state.json");
 
         let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
         let port = server.server_addr().to_ip().expect("ip").port();
