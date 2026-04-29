@@ -1435,8 +1435,24 @@ fn handle_state(request: Request, registry: &Registry) {
     // ETag only needs to be consistent within one daemon process —
     // a hash collision would cause us to skip a state update, which
     // self-corrects on the next non-collision poll.
+    //
+    // Phase 6 fix: hash a *logical-identity* view of the snapshot
+    // with `uptime_secs` stripped. uptime_secs ticks every second by
+    // wall-clock and would otherwise flip the ETag every second even
+    // when nothing the user cares about changed — defeating the
+    // 304-short-circuit *and* causing the wire-test flake captured
+    // in feedback_etag_wire_test_flake. Pods/auth/units/etc. all
+    // stay in the hash; only the ticker is excluded.
     let body = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
-    let etag = compute_state_etag(body.as_bytes());
+    let etag = {
+        let mut hash_value = value.clone();
+        if let Some(obj) = hash_value.as_object_mut() {
+            obj.remove("uptime_secs");
+        }
+        let hash_body =
+            serde_json::to_string(&hash_value).unwrap_or_else(|_| "{}".into());
+        compute_state_etag(hash_body.as_bytes())
+    };
 
     if let Some(client_etag) = read_if_none_match(request.headers()) {
         if client_etag == etag {
@@ -3259,6 +3275,58 @@ mod tests {
         assert!(a.starts_with('"') && a.ends_with('"'), "RFC 9110 quoted-string");
         let c = compute_state_etag(b"{\"tier\":\"explorer\"}");
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn etag_is_stable_across_uptime_secs_changes() {
+        // Phase 6 invariant: handle_state strips `uptime_secs` from
+        // the ETag input so the client's If-None-Match round-trip
+        // doesn't get punched every wall-clock second. A regression
+        // here would silently re-introduce the etag_roundtrip wire-
+        // test flake AND defeat the whole 304-short-circuit on long-
+        // running daemons.
+        //
+        // Mirror the strip-uptime_secs logic exactly. If handle_state
+        // changes which fields are excluded, this test should track.
+        let v_t0 = serde_json::json!({
+            "tier": "operator",
+            "logged_in": true,
+            "agents": [],
+            "uptime_secs": 0,
+        });
+        let v_t1 = serde_json::json!({
+            "tier": "operator",
+            "logged_in": true,
+            "agents": [],
+            "uptime_secs": 99999,
+        });
+
+        let strip_uptime = |mut v: serde_json::Value| {
+            if let Some(o) = v.as_object_mut() {
+                o.remove("uptime_secs");
+            }
+            serde_json::to_string(&v).unwrap()
+        };
+
+        let etag_t0 = compute_state_etag(strip_uptime(v_t0).as_bytes());
+        let etag_t1 = compute_state_etag(strip_uptime(v_t1).as_bytes());
+        assert_eq!(
+            etag_t0, etag_t1,
+            "ETag must be stable across uptime_secs changes",
+        );
+
+        // And a *real* logical change (different tier) MUST flip it.
+        let v_changed = serde_json::json!({
+            "tier": "explorer",
+            "logged_in": true,
+            "agents": [],
+            "uptime_secs": 0,
+        });
+        let etag_changed = compute_state_etag(strip_uptime(v_changed).as_bytes());
+        assert_ne!(
+            etag_t0, etag_changed,
+            "tier change must flip the ETag",
+        );
     }
 
     fn if_none_match_hdr(value: &str) -> Header {
