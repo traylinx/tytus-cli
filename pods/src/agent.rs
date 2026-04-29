@@ -103,6 +103,25 @@ pub async fn exec_in_agent(client: &TytusClient, pod_id: &str, command: &str, ti
     Err(AtomekError::ApiStatus { status, message: body })
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AgentLogs {
+    pub pod_num: Option<u32>,
+    pub logs: String,
+}
+
+pub async fn agent_logs(client: &TytusClient, pod_id: &str, tail: u32) -> atomek_core::Result<AgentLogs> {
+    let tail = tail.clamp(1, 500);
+    let path = format!("/pod/agent/logs?pod_id={}&tail={}", pod_id, tail);
+    let resp = client.get_with_retry(&path).await?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AtomekError::ApiStatus { status, message: body });
+    }
+    resp.json().await
+        .map_err(|e| AtomekError::Other(format!("Failed to parse agent logs: {}", e)))
+}
+
 pub async fn stop_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Result<()> {
     let resp = client.post("/pod/agent/stop")
         .json(&serde_json::json!({ "pod_id": pod_id }))

@@ -215,10 +215,20 @@ tytus logout                       Revoke all pods + clear local state +
 tytus status [--json]              Plan, pods, units, tunnel state.
                                    Default = human; --json = machine.
 
-tytus doctor                       Full diagnostic: state file,
-                                   logged_in, token_valid, subscription,
-                                   pods, tunnel, mcp_server. Some checks
-                                   may fail before connect — that's normal.
+tytus doctor [--pod NN]            Without --pod: full daemon-wide
+                                   diagnostic (state file, logged_in,
+                                   token_valid, subscription, pods,
+                                   tunnel, mcp_server). Some checks may
+                                   fail before connect — that's normal.
+                                   With --pod NN: per-pod diagnostic —
+                                   container status, healthy flag,
+                                   uptime, image, and ports for that
+                                   pod (proxies via Provider →
+                                   DAM /agent/<pod_num>/status). One
+                                   fact per stdout line so the tray's
+                                   SSE relay can surface each as a
+                                   discrete `log` event in the Pod
+                                   Inspector Doctor pane.
 
 tytus setup                        Interactive wizard: login (if needed),
                                    plan check, agent pick, allocation,
@@ -284,6 +294,17 @@ tytus restart [--pod NN]           Restart the agent container via DAM.
                                    regenerates the base config and merges
                                    the user overlay file. Useful after
                                    editing config.user.json or .yaml.
+
+tytus logs [--pod NN] [--lines N]  Tail the last N (default 200, max 500)
+                                   lines of the agent container's
+                                   stdout/stderr. Proxies to DAM's
+                                   `/agent/<pod_num>/logs?tail=N`. Output
+                                   streams one line at a time so the
+                                   tray's SSE relay (POST `/api/pod/<NN>/
+                                   run-streamed` `{action:"logs"}`) can
+                                   surface each log line as a discrete
+                                   `log` event in the Pod Inspector
+                                   Logs tab.
 
 tytus env [--export] [--raw] [--pod NN] [--json]
                                    Default: stable values
