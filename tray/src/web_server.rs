@@ -1885,6 +1885,12 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/files/delete") => {
             handle_files_delete(request);
         }
+        (Method::Post, "/api/files/copy") => {
+            handle_files_copy(request);
+        }
+        (Method::Post, "/api/files/move") => {
+            handle_files_move(request);
+        }
         (Method::Get, "/api/files/download") => {
             handle_files_download(request, &query);
         }
@@ -4185,6 +4191,7 @@ struct FileMutationBody {
     binding: Option<usize>,
     name: Option<String>,
     new_name: Option<String>,
+    destination_path: Option<String>,
     content_base64: Option<String>,
 }
 
@@ -4417,6 +4424,165 @@ fn handle_files_delete(mut request: Request) {
         fs::remove_file(&target)
     };
     match result {
+        Ok(_) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+fn copy_move_destination(
+    root: &Path,
+    source_rel: &Path,
+    destination_path: Option<String>,
+    new_name: Option<String>,
+) -> Result<PathBuf, String> {
+    let dest_rel = safe_relative_path(destination_path)?;
+    let fallback_name = source_rel
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "invalid source path".to_string())?
+        .to_string();
+    let dest_name = match new_name {
+        Some(v) => safe_file_name(Some(v))?,
+        None => fallback_name,
+    };
+    anchored_child_path(root, &dest_rel, &dest_name)
+}
+
+fn handle_files_copy(mut request: Request) {
+    let body = match read_file_mutation_body(&mut request) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let root = match writable_files_root(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let source_rel = match safe_relative_path(body.path.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let source = match anchored_existing_entry(&root, &source_rel) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let meta = match fs::symlink_metadata(&source) {
+        Ok(m) => m,
+        Err(e) => {
+            respond_json(request, 404, &serde_json::json!({"error": e.to_string()}));
+            return;
+        }
+    };
+    if !meta.is_file() {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"copy supports files only"}),
+        );
+        return;
+    }
+    if meta.len() > MAX_FILE_TRANSFER_BYTES as u64 {
+        respond_json(
+            request,
+            413,
+            &serde_json::json!({"error":"file exceeds 100 MiB transfer cap"}),
+        );
+        return;
+    }
+    let dest = match copy_move_destination(&root, &source_rel, body.destination_path, body.new_name)
+    {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    if dest.exists() {
+        respond_json(
+            request,
+            409,
+            &serde_json::json!({"error":"target already exists"}),
+        );
+        return;
+    }
+    match fs::copy(&source, &dest) {
+        Ok(_) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+fn handle_files_move(mut request: Request) {
+    let body = match read_file_mutation_body(&mut request) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let root = match writable_files_root(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let source_rel = match safe_relative_path(body.path.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let source = match anchored_existing_entry(&root, &source_rel) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let meta = match fs::symlink_metadata(&source) {
+        Ok(m) => m,
+        Err(e) => {
+            respond_json(request, 404, &serde_json::json!({"error": e.to_string()}));
+            return;
+        }
+    };
+    if !meta.is_file() {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"move supports files only"}),
+        );
+        return;
+    }
+    let dest = match copy_move_destination(&root, &source_rel, body.destination_path, body.new_name)
+    {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    if dest.exists() {
+        respond_json(
+            request,
+            409,
+            &serde_json::json!({"error":"target already exists"}),
+        );
+        return;
+    }
+    match fs::rename(&source, &dest) {
         Ok(_) => respond_json(request, 200, &serde_json::json!({"ok": true})),
         Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
     }
@@ -7415,6 +7581,45 @@ mod tests {
         fs::write(root.join("note.txt"), "hello").unwrap();
         let entry = anchored_existing_entry(&root, Path::new("note.txt")).unwrap();
         assert!(entry.starts_with(root.canonicalize().unwrap()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn files_copy_move_destination_stays_in_same_root() {
+        let root = std::env::temp_dir().join(format!(
+            "tytus-files-copy-move-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("Projects")).unwrap();
+
+        let dest = copy_move_destination(
+            &root,
+            Path::new("Inbox/note.txt"),
+            Some("Projects".to_string()),
+            None,
+        )
+        .unwrap();
+        assert!(dest.starts_with(root.canonicalize().unwrap()));
+        assert_eq!(dest.file_name().unwrap().to_string_lossy(), "note.txt");
+
+        assert!(copy_move_destination(
+            &root,
+            Path::new("Inbox/note.txt"),
+            Some("../escape".to_string()),
+            None,
+        )
+        .is_err());
+        assert!(copy_move_destination(
+            &root,
+            Path::new("Inbox/note.txt"),
+            Some("Projects".to_string()),
+            Some("bad/name.txt".to_string()),
+        )
+        .is_err());
+
         let _ = fs::remove_dir_all(root);
     }
 
