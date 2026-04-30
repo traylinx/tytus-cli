@@ -1,0 +1,104 @@
+[
+  {
+    "id": "opencode",
+    "name": "OpenCode",
+    "description": "AI-powered code editor and terminal assistant. Built for developers who want AI pair programming in their terminal.",
+    "category": "Developer Tools",
+    "icon": "Terminal",
+    "url": "https://opencode.ai/",
+    "platforms": ["macos", "linux"],
+    "detect": {
+      "macos": ["opencode"],
+      "linux": ["opencode"]
+    },
+    "install": {
+      "macos": "brew install opencode-ai/tap/opencode",
+      "linux": "curl -fsSL https://opencode.ai/install.sh | sh"
+    }
+  },
+  {
+    "id": "pi",
+    "name": "Pi",
+    "description": "A fast, focused AI coding agent. Minimal UI, maximum productivity. Your personal AI pair programmer.",
+    "category": "Developer Tools",
+    "icon": "Cpu",
+    "url": "https://pi.dev/",
+    "platforms": ["macos", "linux"],
+    "detect": {
+      "macos": ["pi"],
+      "linux": ["pi"]
+    },
+    "install": {
+      "macos": "curl -fsSL https://pi.dev/install.sh | sh",
+      "linux": "curl -fsSL https://pi.dev/install.sh | sh"
+    }
+  },
+  {
+    "id": "ghostty",
+    "name": "Ghostty",
+    "description": "A fast, feature-rich, and cross-platform terminal emulator. GPU-accelerated rendering, native UI, and extensive customization.",
+    "category": "Developer Tools",
+    "icon": "Terminal",
+    "url": "https://ghostty.org/",
+    "platforms": ["macos", "linux"],
+    "detect": {
+      "macos": ["Ghostty", "ghostty"],
+      "linux": ["ghostty"]
+    },
+    "install": {
+      "macos": "brew install --cask ghostty",
+      "linux": "Visit https://ghostty.org/download for your distro"
+    }
+  },
+  {
+    "id": "ail",
+    "name": "AIL (Traylinx)",
+    "description": "Advanced AI Language model by Traylinx. Multi-modal AI platform for text, image, and audio processing.",
+    "category": "AI & ML",
+    "icon": "Brain",
+    "url": "https://ail.traylinx.com/introduction",
+    "platforms": ["macos", "linux"],
+    "detect": {
+      "macos": ["ail"],
+      "linux": ["ail"]
+    },
+    "install": {
+      "macos": "Visit https://ail.traylinx.com for installation instructions",
+      "linux": "Visit https://ail.traylinx.com for installation instructions"
+    }
+  },
+  {
+    "id": "telegram",
+    "name": "Telegram Desktop",
+    "description": "Fast, secure messaging app. Cloud-based, syncs across all your devices. Supports groups, channels, bots, and file sharing.",
+    "category": "Communication",
+    "icon": "MessageCircle",
+    "url": "https://desktop.telegram.org/",
+    "platforms": ["macos", "linux"],
+    "detect": {
+      "macos": ["Telegram", "telegram"],
+      "linux": ["telegram-desktop"]
+    },
+    "install": {
+      "macos": "brew install --cask telegram",
+      "linux": "sudo apt install telegram-desktop"
+    }
+  },
+  {
+    "id": "discord",
+    "name": "Discord",
+    "description": "Voice, video, and text chat platform. Originally for gamers, now used by communities, teams, and friend groups worldwide.",
+    "category": "Communication",
+    "icon": "Headphones",
+    "url": "https://discord.com/download",
+    "platforms": ["macos", "linux"],
+    "detect": {
+      "macos": ["Discord"],
+      "linux": ["discord"]
+    },
+    "install": {
+      "macos": "brew install --cask discord",
+      "linux": "sudo snap install discord"
+    }
+  }
+]

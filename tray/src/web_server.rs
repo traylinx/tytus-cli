@@ -22,17 +22,17 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Daemon boot timestamp (Unix epoch seconds). Set once on first
 /// `start()` call; UI consumers compare against the value last seen
@@ -67,6 +67,9 @@ const TOWER_JS: &[u8] = include_bytes!("../web/assets/tower.js");
 const ICON_OPENCLAW: &[u8] = include_bytes!("../web/assets/icons/openclaw.svg");
 const ICON_HERMES: &[u8] = include_bytes!("../web/assets/icons/hermes.svg");
 const ICON_NVIDIA: &[u8] = include_bytes!("../web/assets/icons/nvidia.svg");
+
+// App Store catalog (static JSON, embedded at compile time)
+const APPS_JSON: &[u8] = include_bytes!("../web/assets/apps.json");
 
 // ── Job registry ──────────────────────────────────────────────
 //
@@ -286,18 +289,40 @@ struct StatusEntry {
 }
 
 const STATUS_TTL_SECS: u64 = 5;
+const BOOTSTRAP_HEALTH_TTL_SECS: u64 = 15;
 
 static STATUS_CACHE: OnceLock<Mutex<HashMap<String, StatusEntry>>> = OnceLock::new();
+static BOOTSTRAP_HEALTH_CACHE: OnceLock<Mutex<HashMap<String, BootstrapHealthEntry>>> =
+    OnceLock::new();
 
 fn status_cache() -> &'static Mutex<HashMap<String, StatusEntry>> {
     STATUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Clone, Debug)]
+struct BootstrapHealthEntry {
+    status: String,
+    detail: String,
+    overall: String,
+    fetched_at: u64,
+}
+
+fn bootstrap_health_cache() -> &'static Mutex<HashMap<String, BootstrapHealthEntry>> {
+    BOOTSTRAP_HEALTH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Read the cached status for `pod_id`. Returns `Unknown` for cache
 /// miss + kicks a background refresh if the entry is stale or missing
 /// AND `api_url` + `user_key` are non-empty (we can't probe without
 /// them).
-fn agent_status_cached(pod_id: &str, api_url: Option<&str>, user_key: &str) -> AgentStatus {
+fn agent_status_cached(
+    pod_id: &str,
+    agent_type: &str,
+    api_url: Option<&str>,
+    user_key: &str,
+    gateway_token: Option<&str>,
+    ui_url: Option<&str>,
+) -> AgentStatus {
     let now = now_secs();
     let (cached, needs_refresh) = {
         let cache = status_cache().lock().unwrap();
@@ -314,10 +339,19 @@ fn agent_status_cached(pod_id: &str, api_url: Option<&str>, user_key: &str) -> A
         if let (Some(url), false) = (api_url, user_key.is_empty()) {
             if !url.is_empty() {
                 let pod = pod_id.to_string();
+                let agent = agent_type.to_string();
                 let url = url.to_string();
                 let key = user_key.to_string();
+                let gateway_key = gateway_token.map(|t| t.to_string());
+                let ui = ui_url.map(|u| u.to_string());
                 thread::spawn(move || {
-                    let s = probe_agent_status(&url, &key);
+                    let s = probe_agent_status(
+                        &agent,
+                        &url,
+                        &key,
+                        gateway_key.as_deref(),
+                        ui.as_deref(),
+                    );
                     let mut cache = status_cache().lock().unwrap();
                     cache.insert(
                         pod,
@@ -338,11 +372,21 @@ fn agent_status_cached(pod_id: &str, api_url: Option<&str>, user_key: &str) -> A
 /// same 4s timeout, same status-code map. Run inside a per-call
 /// tokio runtime so we can block until it finishes (called from
 /// thread::spawn — never from the request thread).
-fn probe_agent_status(api_url: &str, user_key: &str) -> AgentStatus {
+fn probe_agent_status(
+    agent_type: &str,
+    api_url: &str,
+    user_key: &str,
+    gateway_token: Option<&str>,
+    ui_url: Option<&str>,
+) -> AgentStatus {
     if api_url.is_empty() {
         return AgentStatus::Stopped;
     }
     let probe_url = format!("{}/models", api_url.trim_end_matches('/'));
+    let bearer = probe_bearer_token(agent_type, user_key, gateway_token);
+    if bearer.is_empty() {
+        return AgentStatus::Starting;
+    }
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -353,12 +397,12 @@ fn probe_agent_status(api_url: &str, user_key: &str) -> AgentStatus {
     let http = atomek_core::HttpClient::new();
     let result = rt.block_on(async {
         http.get(&probe_url)
-            .header("Authorization", format!("Bearer {}", user_key))
+            .header("Authorization", format!("Bearer {}", bearer))
             .timeout(std::time::Duration::from_secs(4))
             .send()
             .await
     });
-    match result {
+    let api_status = match result {
         Ok(resp) => match resp.status().as_u16() {
             200 => AgentStatus::Ready,
             401 | 403 | 404 => AgentStatus::Starting,
@@ -366,7 +410,438 @@ fn probe_agent_status(api_url: &str, user_key: &str) -> AgentStatus {
             _ => AgentStatus::Unknown,
         },
         Err(_) => AgentStatus::Stopped,
+    };
+
+    if api_status != AgentStatus::Ready {
+        return api_status;
     }
+
+    // OpenClaw/NemoClaw and Hermes expose browser UIs. The SDK gateway can
+    // answer before Caddy has the SPA/dashboard upstream fully wired, which made
+    // TytusOS show "Running" while the user's browser still saw 502.
+    // Treat browser agents as ready only when BOTH /v1/models and the
+    // authenticated UI root serve successfully.
+    if agent_has_browser_ui(agent_type) {
+        let Some(ui) = ui_url.filter(|u| !u.is_empty()) else {
+            return AgentStatus::Starting;
+        };
+        let ui_result = rt.block_on(async {
+            http.get(ui)
+                .timeout(std::time::Duration::from_secs(4))
+                .send()
+                .await
+        });
+        match ui_result {
+            Ok(resp) => match resp.status().as_u16() {
+                200 => AgentStatus::Ready,
+                401 | 403 | 404 => AgentStatus::Starting,
+                500..=599 => AgentStatus::Unhealthy,
+                _ => AgentStatus::Unknown,
+            },
+            Err(_) => AgentStatus::Stopped,
+        }
+    } else {
+        AgentStatus::Ready
+    }
+}
+
+fn agent_has_browser_ui(agent_type: &str) -> bool {
+    matches!(agent_type, "nemoclaw" | "openclaw" | "hermes")
+}
+
+fn probe_bearer_token(agent_type: &str, user_key: &str, gateway_token: Option<&str>) -> String {
+    if agent_type == "hermes" {
+        if let Some(token) = gateway_token.filter(|t| !t.is_empty()) {
+            return token.to_string();
+        }
+    }
+    user_key.to_string()
+}
+
+fn readiness_strict_enabled() -> bool {
+    let raw = std::env::var("TYTUS_READINESS_STRICT").unwrap_or_else(|_| "1".to_string());
+    !matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
+fn agent_status_label(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Ready => "ready",
+        AgentStatus::Starting => "starting",
+        AgentStatus::Unhealthy => "unhealthy",
+        AgentStatus::Stopped => "stopped",
+        AgentStatus::Unknown => "unknown",
+    }
+}
+
+fn stage_status_from_agent(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Ready => "ok",
+        AgentStatus::Starting => "starting",
+        AgentStatus::Unhealthy => "failed",
+        AgentStatus::Stopped => "failed",
+        AgentStatus::Unknown => "unknown",
+    }
+}
+
+fn run_tytus_exec_shell(
+    pod_id: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<(bool, String, String, bool), String> {
+    let bin = resolve_tytus_bin();
+    let started = Instant::now();
+    let mut child = Command::new(&bin)
+        .args(["exec", "--pod", pod_id, "--", "sh", "-lc", script])
+        .env("TYTUS_HEADLESS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to run tytus exec: {}", e))?;
+
+    loop {
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .map_err(|e| format!("failed to collect timed-out tytus exec: {}", e))?;
+            return Ok((
+                false,
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+                true,
+            ));
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|e| format!("failed to collect tytus exec: {}", e))?;
+                return Ok((
+                    output.status.success(),
+                    String::from_utf8_lossy(&output.stdout).to_string(),
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                    false,
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(format!("failed to poll tytus exec: {}", e)),
+        }
+    }
+}
+
+fn summarize_health_json(raw: &str) -> (String, String, String) {
+    let parsed = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                "unknown".to_string(),
+                format!("health.json malformed: {}", e),
+                "unknown".to_string(),
+            )
+        }
+    };
+    let overall = parsed
+        .get("overall")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let checks = parsed
+        .get("checks")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut failed_workspace: Option<String> = None;
+    let mut failed_required: Option<String> = None;
+    let mut degraded: Option<String> = None;
+    for check in checks {
+        let id = check.get("id").and_then(|v| v.as_str()).unwrap_or("check");
+        let status = check
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let detail = check
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or(status);
+        let required = check
+            .get("required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let line = format!("{} {}: {}", id, status, detail);
+        if status == "failed" && id.starts_with("workspace.") {
+            failed_workspace.get_or_insert(line.clone());
+        }
+        if status == "failed" && required {
+            failed_required.get_or_insert(line.clone());
+        }
+        if matches!(status, "degraded" | "skipped" | "failed") {
+            degraded.get_or_insert(line);
+        }
+    }
+
+    match overall.as_str() {
+        "ok" => (
+            "ok".to_string(),
+            "Tytus bootstrap and smoke health OK".to_string(),
+            overall,
+        ),
+        "degraded" => (
+            "degraded".to_string(),
+            degraded.unwrap_or_else(|| "Tytus smoke reported degraded".to_string()),
+            overall,
+        ),
+        "failed" => {
+            if let Some(line) = failed_workspace {
+                ("failed".to_string(), line, overall)
+            } else {
+                // AIL auth/model failures inside the shell are useful
+                // diagnostics, but the daemon's own gateway probe is the
+                // source of truth for PR1 Open gating. Do not false-block a
+                // usable browser UI just because the pod login shell lacks an
+                // exported AIL_API_KEY.
+                (
+                    "degraded".to_string(),
+                    failed_required
+                        .or(degraded)
+                        .unwrap_or_else(|| "Tytus smoke reported failed".to_string()),
+                    overall,
+                )
+            }
+        }
+        "unknown" => (
+            "starting".to_string(),
+            "Tytus smoke health not populated yet".to_string(),
+            overall,
+        ),
+        other => (
+            "unknown".to_string(),
+            format!("Tytus smoke returned unknown overall '{}'", other),
+            overall,
+        ),
+    }
+}
+
+/// Checks the PR1 .tytus bootstrap floor and machine-readable smoke health
+/// inside a pod. Secret-safe: it reads only `.tytus/health.json`; it never cats
+/// env/config files that could contain credentials. A 15s cache prevents the
+/// install wizard from hammering `tytus exec` while it polls readiness.
+fn check_pod_tytus_bootstrap_entry(pod_id: &str, refresh: bool) -> BootstrapHealthEntry {
+    if !readiness_strict_enabled() {
+        return BootstrapHealthEntry {
+            status: "skipped".to_string(),
+            detail: "strict readiness disabled by TYTUS_READINESS_STRICT=0".to_string(),
+            overall: "skipped".to_string(),
+            fetched_at: now_secs(),
+        };
+    }
+
+    let now = now_secs();
+    if !refresh {
+        if let Some(entry) = bootstrap_health_cache()
+            .lock()
+            .unwrap()
+            .get(pod_id)
+            .cloned()
+        {
+            if now.saturating_sub(entry.fetched_at) < BOOTSTRAP_HEALTH_TTL_SECS {
+                return entry;
+            }
+        }
+    }
+
+    let script = r#"cd /app/workspace || exit 20
+test -f README.md && test -f .tytus/capabilities.json && test -f .tytus/health.json && test -x .tytus/smoke.sh || exit 21
+if grep -q '"overall"[[:space:]]*:[[:space:]]*"unknown"' .tytus/health.json 2>/dev/null; then
+  ./.tytus/smoke.sh >/tmp/tytus-smoke-readiness.log 2>&1 || true
+fi
+cat .tytus/health.json
+"#;
+
+    let entry = match run_tytus_exec_shell(pod_id, script, Duration::from_secs(12)) {
+        Ok((true, stdout, _stderr, false)) => {
+            let (status, detail, overall) = summarize_health_json(&stdout);
+            BootstrapHealthEntry {
+                status,
+                detail,
+                overall,
+                fetched_at: now,
+            }
+        }
+        Ok((_success, _stdout, stderr, true)) => BootstrapHealthEntry {
+            status: "unknown".to_string(),
+            detail: format!(
+                "bootstrap health probe timed out{}",
+                stderr
+                    .lines()
+                    .next()
+                    .map(|l| format!(": {}", l))
+                    .unwrap_or_default()
+            ),
+            overall: "unknown".to_string(),
+            fetched_at: now,
+        },
+        Ok((_success, _stdout, stderr, false)) => BootstrapHealthEntry {
+            status: "failed".to_string(),
+            detail: stderr
+                .lines()
+                .next()
+                .unwrap_or("bootstrap pack missing")
+                .to_string(),
+            overall: "failed".to_string(),
+            fetched_at: now,
+        },
+        Err(e) => BootstrapHealthEntry {
+            status: "unknown".to_string(),
+            detail: e,
+            overall: "unknown".to_string(),
+            fetched_at: now,
+        },
+    };
+
+    bootstrap_health_cache()
+        .lock()
+        .unwrap()
+        .insert(pod_id.to_string(), entry.clone());
+    entry
+}
+
+fn bootstrap_status_allows_open(status: &str) -> bool {
+    matches!(status, "ok" | "degraded" | "skipped")
+}
+
+fn bootstrap_status_is_failed(status: &str) -> bool {
+    status == "failed"
+}
+
+fn bootstrap_stage_detail(entry: &BootstrapHealthEntry) -> String {
+    if entry.overall == "skipped" {
+        entry.detail.clone()
+    } else {
+        format!("{} (smoke overall: {})", entry.detail, entry.overall)
+    }
+}
+
+fn cache_agent_status(pod_id: &str, status: AgentStatus) {
+    let mut cache = status_cache().lock().unwrap();
+    cache.insert(
+        pod_id.to_string(),
+        StatusEntry {
+            status,
+            fetched_at: now_secs(),
+        },
+    );
+}
+
+fn extract_pod_id_from_json(payload: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| {
+            v.get("pod_id")
+                .or_else(|| v.get("podId"))
+                .or_else(|| v.get("pod"))
+                .and_then(|p| p.as_str().map(|s| s.to_string()))
+                .or_else(|| {
+                    v.get("pod_id")
+                        .or_else(|| v.get("podId"))
+                        .or_else(|| v.get("pod"))
+                        .and_then(|p| p.as_u64().map(|n| format!("{:02}", n)))
+                })
+        })
+}
+
+fn wait_for_installed_agent_ready(job: &Arc<Mutex<Job>>, pod_id: &str) -> Result<(), String> {
+    const WAIT_SECS: u64 = 180;
+    const SLEEP_MS: u64 = 2_000;
+
+    let started = std::time::Instant::now();
+    let mut last_status: Option<AgentStatus> = None;
+    push_event(
+        job,
+        JobEvent::Log(format!(
+            "Waiting for pod {} to serve traffic end-to-end…",
+            pod_id
+        )),
+    );
+
+    while started.elapsed().as_secs() < WAIT_SECS {
+        let snap = compute_state_snapshot();
+        let Some(agent) = snap.agents.iter().find(|a| a.pod_id == pod_id) else {
+            std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+            continue;
+        };
+
+        let mut status = probe_agent_status(
+            &agent.agent_type,
+            agent.api_url.as_deref().unwrap_or(""),
+            &agent.user_key,
+            agent.gateway_token.as_deref(),
+            agent.ui_url.as_deref(),
+        );
+        if status == AgentStatus::Ready && readiness_strict_enabled() {
+            let bootstrap = check_pod_tytus_bootstrap_entry(pod_id, false);
+            if !bootstrap_status_allows_open(&bootstrap.status) {
+                push_event(
+                    job,
+                    JobEvent::Log(format!(
+                        "Readiness: bootstrap {} ({})",
+                        bootstrap.status,
+                        bootstrap_stage_detail(&bootstrap)
+                    )),
+                );
+                status = AgentStatus::Starting;
+            } else if bootstrap.status == "degraded" {
+                push_event(
+                    job,
+                    JobEvent::Log(format!(
+                        "Readiness: bootstrap degraded but usable ({})",
+                        bootstrap_stage_detail(&bootstrap)
+                    )),
+                );
+            }
+        }
+        cache_agent_status(pod_id, status);
+
+        if last_status != Some(status) {
+            push_event(
+                job,
+                JobEvent::Log(format!(
+                    "Readiness: {:?} (API{}{})",
+                    status,
+                    if agent.api_url.is_some() {
+                        " ready-check"
+                    } else {
+                        " url missing"
+                    },
+                    if agent_has_browser_ui(&agent.agent_type) {
+                        " + UI ready-check"
+                    } else {
+                        ""
+                    }
+                )),
+            );
+            last_status = Some(status);
+        }
+
+        if status == AgentStatus::Ready {
+            push_event(
+                job,
+                JobEvent::Log(format!("Pod {} is ready. Open button enabled.", pod_id)),
+            );
+            return Ok(());
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+    }
+
+    Err(format!(
+        "pod {} installed but did not become ready within {}s",
+        pod_id, WAIT_SECS
+    ))
 }
 
 fn now_secs() -> u64 {
@@ -1198,6 +1673,13 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/install") => {
             handle_install(request, &registry);
         }
+        // ── App Store ────────────────────────────────────────────
+        (Method::Get, "/api/apps") => {
+            handle_apps_catalog(request);
+        }
+        (Method::Post, "/api/apps/check") => {
+            handle_apps_check(request);
+        }
         (Method::Get, p) if p.starts_with("/api/jobs/") && p.ends_with("/stream") => {
             let job_id = p
                 .trim_start_matches("/api/jobs/")
@@ -1238,6 +1720,13 @@ fn handle(request: Request, registry: Registry) {
         // after install. The wizard polls this every 2s until {ready:true}.
         (Method::Get, "/api/pod/ready") => {
             handle_pod_ready(request, &query);
+        }
+        (Method::Get, p) if p.starts_with("/api/pods/") && p.ends_with("/readiness") => {
+            let pod = p
+                .trim_start_matches("/api/pods/")
+                .trim_end_matches("/readiness")
+                .trim_matches('/');
+            handle_pod_readiness(request, pod);
         }
         // Per-pod env vars (manifest A.exist A3.5). Spawns `tytus agent
         // env --pod NN [--reveal-secrets] --json` and forwards the parsed
@@ -1382,7 +1871,10 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/shared-folders/bind") => {
             handle_shared_folders_bind(request, &registry);
         }
-        // ── rc.13: Files tab in-tab actions ──────────────────────────
+        // ── rc.13 / PR3: Files app safe browser actions ─────────────
+        (Method::Get, "/api/files/list") => {
+            handle_files_list(request, &query);
+        }
         // Open the per-pod local downloads dir in Finder. Path is the
         // same `~/Tytus/Downloads/pod-NN/` the tray writes to. Created
         // on demand so the open call doesn't fail on a fresh pod.
@@ -1455,6 +1947,115 @@ fn handle_catalog(request: Request, query: &str) {
             &serde_json::json!({ "error": format!("catalog fetch failed: {}", e) }),
         ),
     }
+}
+
+// ── /api/apps (App Store) ─────────────────────────────────────
+
+fn handle_apps_catalog(request: Request) {
+    serve_bytes(request, APPS_JSON, "application/json; charset=utf-8");
+}
+
+#[derive(serde::Deserialize)]
+struct AppsCheckRequest {
+    app_ids: Vec<String>,
+}
+
+fn handle_apps_check(mut request: Request) {
+    let mut body = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+        respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+        return;
+    }
+    let parsed: AppsCheckRequest = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+            return;
+        }
+    };
+
+    // Parse the embedded catalog to get detect paths per app
+    let catalog: Vec<serde_json::Value> = match serde_json::from_slice(APPS_JSON) {
+        Ok(c) => c,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": format!("catalog parse error: {}", e) }),
+            );
+            return;
+        }
+    };
+
+    let platform = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let mut results: Vec<serde_json::Value> = Vec::new();
+
+    for app_id in &parsed.app_ids {
+        // Validate: alphanumeric + hyphen + underscore only
+        if !app_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            results.push(
+                serde_json::json!({ "id": app_id, "installed": false, "error": "invalid id" }),
+            );
+            continue;
+        }
+
+        let entry = catalog.iter().find(|e| e["id"].as_str() == Some(app_id));
+        let installed = if let Some(entry) = entry {
+            check_app_installed(entry, platform)
+        } else {
+            false
+        };
+
+        results.push(serde_json::json!({ "id": app_id, "installed": installed }));
+    }
+
+    respond_json(request, 200, &serde_json::json!({ "results": results }));
+}
+
+fn check_app_installed(entry: &serde_json::Value, platform: &str) -> bool {
+    // Try detect commands for the platform
+    if let Some(detect) = entry.get("detect").and_then(|d| d.get(platform)) {
+        if let Some(commands) = detect.as_array() {
+            for cmd in commands {
+                if let Some(cmd_str) = cmd.as_str() {
+                    // On macOS: check /Applications/<Name>.app first
+                    #[cfg(target_os = "macos")]
+                    {
+                        let app_path = format!("/Applications/{}.app", cmd_str);
+                        if std::path::Path::new(&app_path).exists() {
+                            return true;
+                        }
+                        // Also check ~/Applications/
+                        if let Ok(home) = std::env::var("HOME") {
+                            let user_app_path = format!("{}/Applications/{}.app", home, cmd_str);
+                            if std::path::Path::new(&user_app_path).exists() {
+                                return true;
+                            }
+                        }
+                    }
+                    // Check if the command is on PATH
+                    if let Ok(output) = std::process::Command::new("which")
+                        .arg(cmd_str)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                    {
+                        if output.success() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 // ── /api/install ──────────────────────────────────────────────
@@ -1675,6 +2276,23 @@ fn spawn_install(job: Arc<Mutex<Job>>, agent_type: String, pod_id: Option<String
                     .find(|l| l.trim_start().starts_with('{'))
                     .unwrap_or("{}")
                     .to_string();
+                if let Some(pod_id) = extract_pod_id_from_json(&payload) {
+                    match wait_for_installed_agent_ready(&job, &pod_id) {
+                        Ok(()) => {}
+                        Err(message) => {
+                            push_event(&job, JobEvent::Fail { message });
+                            return;
+                        }
+                    }
+                } else {
+                    push_event(
+                        &job,
+                        JobEvent::Log(
+                            "Install finished but pod id was not present in CLI JSON; skipping readiness wait."
+                                .to_string(),
+                        ),
+                    );
+                }
                 push_event(&job, JobEvent::Done { payload });
             }
             Ok(s) => push_event(
@@ -2004,9 +2622,14 @@ struct AgentSlot {
     /// OPENAI_BASE_URL. None when public_url is None.
     api_url: Option<String>,
     /// Browser-authenticated UI URL (`{public_url}/?token={gateway_token}`)
-    /// for the OpenClaw web UI. None for agents with no browser UI (Hermes
-    /// dashboard has its own flow) or when tokens are missing.
+    /// for browser agents (OpenClaw/NemoClaw SPA, Hermes dashboard). None
+    /// while the edge URL or per-pod secret is still missing.
     ui_url: Option<String>,
+    /// Per-pod gateway secret used by readiness probes and local forwarder.
+    /// Never serialize to TytusOS: the UI gets only redacted `ui_url` and the
+    /// stable user key.
+    #[serde(skip_serializing)]
+    gateway_token: Option<String>,
     /// Stable per-user API key — same across every pod.
     user_key: String,
     /// Latest gateway-probe verdict cached for STATUS_TTL_SECS.
@@ -2421,7 +3044,14 @@ fn compute_state_snapshot() -> StateSnapshot {
             // background refresh so the next poll sees the fresh
             // value. First poll for a never-probed pod returns
             // Unknown, which the OS renders as "checking".
-            let status = agent_status_cached(&pod_id, api_url.as_deref(), &user_key);
+            let status = agent_status_cached(
+                &pod_id,
+                &agent_type,
+                api_url.as_deref(),
+                &user_key,
+                gateway_token.as_deref(),
+                ui_url.as_deref(),
+            );
             agents.push(AgentSlot {
                 pod_id,
                 agent_type,
@@ -2429,6 +3059,7 @@ fn compute_state_snapshot() -> StateSnapshot {
                 public_url,
                 api_url,
                 ui_url,
+                gateway_token,
                 user_key,
                 status,
             });
@@ -3042,37 +3673,11 @@ fn spawn_external_command(job: Arc<Mutex<Job>>, bin: String, args: Vec<String>) 
 /// `garagetytus folder bind` v0.5.3+). Returns empty `bindings` when
 /// the dir doesn't exist (no bindings yet) — never errors.
 fn handle_shared_folders_list(request: Request) {
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => {
-            respond_json(request, 200, &serde_json::json!({"bindings": []}));
-            return;
-        }
-    };
-    let dir = format!("{}/.cache/garagetytus/bisync", home);
-    let mut bindings = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = match path.file_name().and_then(|s| s.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            if !name.ends_with(".bindings.json") {
-                continue;
-            }
-            let raw = match std::fs::read_to_string(&path) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let json: serde_json::Value = match serde_json::from_str(&raw) {
-                Ok(j) => j,
-                Err(_) => continue,
-            };
-            bindings.push(json);
-        }
-    }
-    respond_json(request, 200, &serde_json::json!({"bindings": bindings}));
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({"bindings": shared_bindings_from_cache()}),
+    );
 }
 
 /// Map a shared-folders action string to the helper binary name +
@@ -3187,6 +3792,348 @@ fn handle_shared_folders_open(mut request: Request) {
         .stderr(Stdio::null())
         .spawn();
     respond_json(request, 200, &serde_json::json!({"ok": true}));
+}
+
+#[derive(Serialize)]
+struct FileListEntry {
+    name: String,
+    path: String,
+    kind: String,
+    size: u64,
+    modified_at: Option<u64>,
+    readonly: bool,
+}
+
+fn percent_decode(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                if i + 2 >= bytes.len() {
+                    return Err("bad percent escape".to_string());
+                }
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .map_err(|_| "bad percent escape".to_string())?;
+                let value =
+                    u8::from_str_radix(hex, 16).map_err(|_| "bad percent escape".to_string())?;
+                out.push(value);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).map_err(|_| "query value is not valid UTF-8".to_string())
+}
+
+fn query_value_decoded(query: &str, key: &str) -> Result<Option<String>, String> {
+    match query_value(query, key) {
+        Some(v) => percent_decode(&v).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn safe_relative_path(raw: Option<String>) -> Result<PathBuf, String> {
+    let raw = raw.unwrap_or_default();
+    let trimmed = raw.trim_matches('/');
+    if trimmed.is_empty() || trimmed == "." {
+        return Ok(PathBuf::new());
+    }
+    let p = Path::new(trimmed);
+    if p.is_absolute() {
+        return Err("absolute paths are not allowed".to_string());
+    }
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::Normal(seg) => out.push(seg),
+            Component::CurDir => {}
+            Component::ParentDir => return Err(".. is not allowed".to_string()),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err("absolute paths are not allowed".to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn path_to_relative_string(path: &Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    if s == "." {
+        "".to_string()
+    } else {
+        s
+    }
+}
+
+fn anchor_local_path(root: &Path, rel: &Path) -> Result<PathBuf, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("root is not accessible: {}", e))?;
+    let candidate = root.join(rel);
+    let resolved = if candidate.exists() {
+        candidate
+            .canonicalize()
+            .map_err(|e| format!("path is not accessible: {}", e))?
+    } else {
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| "path has no parent".to_string())?;
+        let parent_real = parent
+            .canonicalize()
+            .map_err(|e| format!("parent is not accessible: {}", e))?;
+        parent_real.join(candidate.file_name().unwrap_or_default())
+    };
+    if !resolved.starts_with(&root) {
+        return Err("path escapes allowed root".to_string());
+    }
+    Ok(resolved)
+}
+
+fn entry_modified_secs(meta: &fs::Metadata) -> Option<u64> {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+}
+
+fn list_local_dir(root: &Path, rel: &Path) -> Result<Vec<FileListEntry>, String> {
+    let target = anchor_local_path(root, rel)?;
+    if !target.is_dir() {
+        return Err("path is not a directory".to_string());
+    }
+    let mut rows = Vec::new();
+    for entry in fs::read_dir(&target).map_err(|e| format!("read_dir failed: {}", e))? {
+        let entry = entry.map_err(|e| format!("read_dir entry failed: {}", e))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let meta = entry
+            .metadata()
+            .map_err(|e| format!("metadata failed for {}: {}", name, e))?;
+        let child_rel = rel.join(&name);
+        rows.push(FileListEntry {
+            name,
+            path: path_to_relative_string(&child_rel),
+            kind: if meta.is_dir() { "dir" } else { "file" }.to_string(),
+            size: if meta.is_file() { meta.len() } else { 0 },
+            modified_at: entry_modified_secs(&meta),
+            readonly: meta.permissions().readonly(),
+        });
+    }
+    rows.sort_by(|a, b| match (a.kind.as_str(), b.kind.as_str()) {
+        ("dir", "file") => std::cmp::Ordering::Less,
+        ("file", "dir") => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+    Ok(rows)
+}
+
+fn shared_bindings_from_cache() -> Vec<serde_json::Value> {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return Vec::new(),
+    };
+    let dir = format!("{}/.cache/garagetytus/bisync", home);
+    let mut bindings = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !name.ends_with(".bindings.json") {
+                continue;
+            }
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let json: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            bindings.push(json);
+        }
+    }
+    bindings
+}
+
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn pod_workspace_list_script(rel: &Path) -> String {
+    let rel_s = path_to_relative_string(rel);
+    let quoted = shell_single_quote(&rel_s);
+    format!(
+        r#"set -eu
+cd /app/workspace
+rel={}
+case "$rel" in /*|*../*|../*|*'/../'* ) echo "path escapes workspace" >&2; exit 64;; esac
+[ -z "$rel" ] && rel="."
+[ -d "$rel" ] || {{ echo "path is not a directory" >&2; exit 44; }}
+find "$rel" -mindepth 1 -maxdepth 1 -printf '%f\t%y\t%s\t%T@\n' 2>/dev/null | sort -f
+"#,
+        quoted
+    )
+}
+
+fn list_pod_workspace(pod_id: &str, rel: &Path) -> Result<Vec<FileListEntry>, String> {
+    if !valid_pod_id(pod_id) || !pod_exists(pod_id) {
+        return Err("unknown pod".to_string());
+    }
+    let script = pod_workspace_list_script(rel);
+    let (ok, stdout, stderr, timed_out) =
+        run_tytus_exec_shell(pod_id, &script, Duration::from_secs(8))?;
+    if timed_out {
+        return Err("pod listing timed out".to_string());
+    }
+    if !ok {
+        let msg = stderr
+            .lines()
+            .last()
+            .unwrap_or("pod listing failed")
+            .to_string();
+        return Err(msg);
+    }
+    let mut rows = Vec::new();
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let mut parts = line.split('\t');
+        let Some(name) = parts.next() else { continue };
+        let typ = parts.next().unwrap_or("f");
+        let size = parts
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let modified_at = parts
+            .next()
+            .and_then(|s| s.split('.').next())
+            .and_then(|s| s.parse::<u64>().ok());
+        let child_rel = rel.join(name);
+        rows.push(FileListEntry {
+            name: name.to_string(),
+            path: path_to_relative_string(&child_rel),
+            kind: if typ == "d" { "dir" } else { "file" }.to_string(),
+            size: if typ == "d" { 0 } else { size },
+            modified_at,
+            readonly: true,
+        });
+    }
+    rows.sort_by(|a, b| match (a.kind.as_str(), b.kind.as_str()) {
+        ("dir", "file") => std::cmp::Ordering::Less,
+        ("file", "dir") => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+    Ok(rows)
+}
+
+fn handle_files_list(request: Request, query: &str) {
+    let source = match query_value_decoded(query, "source") {
+        Ok(Some(s)) => s,
+        Ok(None) => "tytus-home".to_string(),
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let rel = match query_value_decoded(query, "path").and_then(safe_relative_path) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+
+    let result: Result<(String, String, Vec<FileListEntry>), String> = match source.as_str() {
+        "tytus-home" => {
+            let root = crate::workspace::ensure_tytus_home();
+            list_local_dir(&root, &rel).map(|rows| {
+                (
+                    "Tytus Home".to_string(),
+                    root.to_string_lossy().to_string(),
+                    rows,
+                )
+            })
+        }
+        "shared" => {
+            let idx = match query_value_decoded(query, "binding") {
+                Ok(Some(v)) => v.parse::<usize>().ok(),
+                _ => None,
+            };
+            let Some(idx) = idx else {
+                respond_json(
+                    request,
+                    400,
+                    &serde_json::json!({"error":"missing binding index"}),
+                );
+                return;
+            };
+            let bindings = shared_bindings_from_cache();
+            let Some(binding) = bindings.get(idx) else {
+                respond_json(
+                    request,
+                    404,
+                    &serde_json::json!({"error":"binding not found"}),
+                );
+                return;
+            };
+            let Some(local_path) = binding.get("local_path").and_then(|v| v.as_str()) else {
+                respond_json(
+                    request,
+                    400,
+                    &serde_json::json!({"error":"binding has no local_path"}),
+                );
+                return;
+            };
+            let root = PathBuf::from(local_path);
+            list_local_dir(&root, &rel)
+                .map(|rows| ("Shared".to_string(), local_path.to_string(), rows))
+        }
+        "pod-workspace" => {
+            let pod = match query_value_decoded(query, "pod") {
+                Ok(Some(p)) if valid_pod_id(&p) => p,
+                _ => {
+                    respond_json(
+                        request,
+                        400,
+                        &serde_json::json!({"error":"missing or invalid pod"}),
+                    );
+                    return;
+                }
+            };
+            list_pod_workspace(&pod, &rel).map(|rows| {
+                (
+                    format!("Pod {} workspace", pod),
+                    "/app/workspace".to_string(),
+                    rows,
+                )
+            })
+        }
+        _ => Err("unknown file source".to_string()),
+    };
+
+    match result {
+        Ok((label, root_path, entries)) => respond_json(
+            request,
+            200,
+            &serde_json::json!({
+                "source": source,
+                "path": path_to_relative_string(&rel),
+                "root_label": label,
+                "root_path": root_path,
+                "entries": entries,
+                "readonly": source == "pod-workspace",
+            }),
+        ),
+        Err(e) => respond_json(request, 400, &serde_json::json!({"error": e})),
+    }
 }
 
 /// POST /api/files/open-downloads?pod=NN — opens
@@ -3580,59 +4527,186 @@ fn handle_pod_ready(request: Request, query: &str) {
         }
     };
     let probe_url = format!("{}/models", api.trim_end_matches('/'));
-    let user_key = agent
-        .as_ref()
-        .map(|a| a.user_key.clone())
-        .unwrap_or_default();
-    // Probe WITH the stable user key as Bearer — otherwise the edge
-    // plugin 401s our unauthenticated probe and we can't distinguish
-    // "edge up, pod starting" from "edge up, pod ready". Using the
-    // key we'd actually hand the user means a 200 proves the ENTIRE
-    // path (edge → user-key map → pod gateway) is live.
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(r) => r,
-        Err(e) => {
-            respond_json(request, 500, &serde_json::json!({"error": e.to_string()}));
-            return;
-        }
+    let Some(agent) = agent else {
+        respond_json(
+            request,
+            200,
+            &serde_json::json!({
+                "ready": false, "status": "unknown", "reason": "pod not found"
+            }),
+        );
+        return;
     };
-    let http = atomek_core::HttpClient::new();
-    let result = rt.block_on(async {
-        http.get(&probe_url)
-            .header("Accept", "application/json")
-            .header("Authorization", format!("Bearer {}", user_key))
-            .timeout(std::time::Duration::from_secs(4))
-            .send()
-            .await
-    });
-    let (ready, status, reason) = match result {
-        Ok(resp) => {
-            let s = resp.status().as_u16();
-            // 200 is the only real "ready". 401/403 now mean the edge
-            // is rejecting even our authenticated probe — either the
-            // user-key map hasn't propagated, or the pod is still
-            // starting. 404 = edge route missing. 502/503 = upstream
-            // unhealthy. Any non-200 keeps the wizard waiting.
-            let ok = s == 200;
-            let r = match s {
-                200 => "gateway answering with 200".into(),
-                401 | 403 => "edge auth not yet propagated".into(),
-                404 => "edge route not yet published".into(),
-                502..=504 => "gateway upstream not yet healthy".into(),
-                other => format!("http {}", other),
-            };
-            (ok, s, r)
+    let mut status = probe_agent_status(
+        &agent.agent_type,
+        &api,
+        &agent.user_key,
+        agent.gateway_token.as_deref(),
+        agent.ui_url.as_deref(),
+    );
+    let mut bootstrap_reason: Option<String> = None;
+    if status == AgentStatus::Ready && readiness_strict_enabled() {
+        let bootstrap = check_pod_tytus_bootstrap_entry(&pod_id, false);
+        if !bootstrap_status_allows_open(&bootstrap.status) {
+            status = AgentStatus::Starting;
+            bootstrap_reason = Some(format!(
+                "bootstrap {}: {}",
+                bootstrap.status,
+                bootstrap_stage_detail(&bootstrap)
+            ));
         }
-        Err(e) => (false, 0u16, format!("probe error: {}", e)),
+    }
+    cache_agent_status(&pod_id, status);
+    let (ready, status_label, reason) = match status {
+        AgentStatus::Ready => (
+            true,
+            "ready",
+            "API, UI, and Tytus bootstrap are serving".to_string(),
+        ),
+        AgentStatus::Starting => (
+            false,
+            "starting",
+            bootstrap_reason.unwrap_or_else(|| {
+                "edge, auth, route, UI, or bootstrap still starting".to_string()
+            }),
+        ),
+        AgentStatus::Unhealthy => (
+            false,
+            "unhealthy",
+            "gateway upstream not yet healthy".to_string(),
+        ),
+        AgentStatus::Stopped => (
+            false,
+            "stopped",
+            "probe failed or gateway unreachable".to_string(),
+        ),
+        AgentStatus::Unknown => (
+            false,
+            "unknown",
+            "probe returned an unknown status".to_string(),
+        ),
     };
     respond_json(
         request,
         200,
         &serde_json::json!({
-            "ready": ready, "status": status, "reason": reason, "probe_url": probe_url,
+            "ready": ready, "status": status_label, "reason": reason, "probe_url": probe_url,
+        }),
+    );
+}
+
+fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
+    let pod_id = if valid_pod_id(pod_id_raw) {
+        pod_id_raw.to_string()
+    } else {
+        respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
+        return;
+    };
+
+    let snap = compute_state_snapshot();
+    let Some(agent) = snap.agents.iter().find(|a| a.pod_id == pod_id).cloned() else {
+        respond_json(
+            request,
+            200,
+            &serde_json::json!({
+                "pod_id": pod_id,
+                "agent": null,
+                "overall": "failed",
+                "open_enabled": false,
+                "strict": readiness_strict_enabled(),
+                "stages": [
+                    {"id":"allocated","label":"Pod allocated","status":"failed","detail":"pod not found"}
+                ],
+                "last_checked_at": current_unix_secs(),
+            }),
+        );
+        return;
+    };
+
+    let api_url = agent.api_url.clone().unwrap_or_default();
+    let base_status = if !readiness_strict_enabled() && !api_url.is_empty() {
+        AgentStatus::Ready
+    } else {
+        probe_agent_status(
+            &agent.agent_type,
+            &api_url,
+            &agent.user_key,
+            agent.gateway_token.as_deref(),
+            agent.ui_url.as_deref(),
+        )
+    };
+    let bootstrap = check_pod_tytus_bootstrap_entry(&pod_id, false);
+    let bootstrap_ok = bootstrap_status_allows_open(&bootstrap.status);
+    let core_ready = base_status == AgentStatus::Ready;
+    let open_enabled = core_ready && bootstrap_ok;
+    let overall = if open_enabled {
+        if bootstrap.status == "degraded" {
+            "degraded"
+        } else {
+            "ready"
+        }
+    } else if matches!(base_status, AgentStatus::Unhealthy | AgentStatus::Stopped)
+        || bootstrap_status_is_failed(&bootstrap.status)
+    {
+        "failed"
+    } else {
+        "starting"
+    };
+    cache_agent_status(
+        &pod_id,
+        if open_enabled {
+            AgentStatus::Ready
+        } else {
+            base_status
+        },
+    );
+
+    let mut stages = Vec::new();
+    stages.push(
+        serde_json::json!({"id":"allocated","label":"Pod allocated","status":"ok","detail":null}),
+    );
+    stages.push(serde_json::json!({
+        "id":"tunnel",
+        "label":"Tunnel/public URL assigned",
+        "status": if agent.public_url.is_some() || agent.api_url.is_some() { "ok" } else { "starting" },
+        "detail": agent.public_url.clone().or(agent.api_url.clone())
+    }));
+    stages.push(serde_json::json!({
+        "id":"agent_http",
+        "label":"Agent HTTP/API health",
+        "status": stage_status_from_agent(base_status),
+        "detail": agent_status_label(base_status)
+    }));
+    stages.push(serde_json::json!({
+        "id":"agent_ui",
+        "label":"Agent UI route",
+        "status": if agent_has_browser_ui(&agent.agent_type) { stage_status_from_agent(base_status) } else { "skipped" },
+        "detail": agent.ui_url.clone()
+    }));
+    stages.push(serde_json::json!({
+        "id":"tytus_bootstrap",
+        "label":"Tytus bootstrap + smoke health",
+        "status": bootstrap.status.clone(),
+        "detail": bootstrap_stage_detail(&bootstrap)
+    }));
+    stages.push(serde_json::json!({
+        "id":"shared_storage",
+        "label":"Shared storage",
+        "status":"not_configured",
+        "detail":"PR1 baseline; configured in Sharing sprint PR2"
+    }));
+
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({
+            "pod_id": pod_id,
+            "agent": agent.agent_type,
+            "overall": overall,
+            "open_enabled": open_enabled,
+            "strict": readiness_strict_enabled(),
+            "stages": stages,
+            "last_checked_at": current_unix_secs(),
         }),
     );
 }
@@ -5620,7 +6694,7 @@ mod tests {
         let pod = format!("test-unseen-{}", now_secs());
         // No api_url means the probe-kick is skipped, so we test
         // the pure cache-miss return path.
-        let s = agent_status_cached(&pod, None, "");
+        let s = agent_status_cached(&pod, "nemoclaw", None, "", None, None);
         assert_eq!(s, AgentStatus::Unknown);
     }
 
@@ -5639,7 +6713,7 @@ mod tests {
         }
         // Empty creds means no refresh kick, but the cached entry
         // is fresh so we get it back.
-        let s = agent_status_cached(&pod, None, "");
+        let s = agent_status_cached(&pod, "nemoclaw", None, "", None, None);
         assert_eq!(s, AgentStatus::Ready);
     }
 
@@ -5664,7 +6738,7 @@ mod tests {
         // Returns the stale value (not Unknown) because we never
         // wipe an entry on read — fresh probe lands later in the
         // background thread. UI gets last-known status, not a regression.
-        let s = agent_status_cached(&pod, None, "");
+        let s = agent_status_cached(&pod, "nemoclaw", None, "", None, None);
         assert_eq!(s, AgentStatus::Starting);
     }
 
@@ -5685,8 +6759,31 @@ mod tests {
     fn probe_agent_status_returns_stopped_for_empty_url() {
         // Defensive: no api_url means no probe possible. Don't
         // hang/panic — return Stopped (the OS renders "container down").
-        let s = probe_agent_status("", "any-key");
+        let s = probe_agent_status("nemoclaw", "", "any-key", None, None);
         assert_eq!(s, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn hermes_prefers_gateway_token_for_api_probe() {
+        assert_eq!(
+            probe_bearer_token("hermes", "stable-user", Some("gateway-secret")),
+            "gateway-secret"
+        );
+        assert_eq!(
+            probe_bearer_token("hermes", "stable-user", None),
+            "stable-user"
+        );
+        assert_eq!(
+            probe_bearer_token("nemoclaw", "stable-user", Some("gateway-secret")),
+            "stable-user"
+        );
+    }
+
+    #[test]
+    fn hermes_is_a_browser_ui_agent() {
+        assert!(agent_has_browser_ui("hermes"));
+        assert!(agent_has_browser_ui("nemoclaw"));
+        assert!(!agent_has_browser_ui("none"));
     }
 
     // ── Shared-folders action allowlist (Phase 3 cont) ──────────
