@@ -1843,6 +1843,16 @@ deploy wave (push `main` → `production` on that repo to apply):
   reboot. Without the fix, keychain-slow cold boots silently fail
   autostart.
 
+## [0.6.0-multi-account] — 2026-04-30
+
+- Added Path-A multi-account support: `tytus account list/add/switch/current/remove`.
+- Migrated `state.json` to schema v2 while preserving legacy top-level active-account fields for stale readers.
+- Added state mutation lock beside the resolved state path and atomic 0600 state writes.
+- Added daemon restart/suppression during account switch and bounded daemon RPC timeouts.
+- Added tunnel pidfile ownership metadata to avoid mismatched-account pod-id collisions.
+- Added MCP account pinning via `tytus mcp --account <email>` and `TYTUS_PINNED_ACCOUNT_EMAIL`.
+- Decision record: `account remove` is intentionally LOCAL-ONLY; `logout` remains the server-side revoke verb.
+
 ## [0.3.0] — 2026-04-13
 
 Earlier work included; see `git log v0.2.0..v0.3.0 --oneline` for

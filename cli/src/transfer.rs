@@ -55,9 +55,7 @@ pub enum TransferError {
     SizeCeiling(u64),
     #[error("no pods connected. Run: tytus connect")]
     NoPods,
-    #[error(
-        "multiple pods connected ({0:?}); specify --pod NN"
-    )]
+    #[error("multiple pods connected ({0:?}); specify --pod NN")]
     AmbiguousPod(Vec<String>),
     #[error("local path does not exist: {0}")]
     LocalMissing(String),
@@ -91,10 +89,7 @@ pub fn validate_pod_path(raw: &str) -> Result<String, TransferError> {
 /// Normalise a user-supplied `--to` for push. Empty or missing
 /// defaults to the inbox. Trailing `/` is preserved so callers
 /// know "this is a directory destination".
-pub fn resolve_push_destination(
-    local: &Path,
-    to: Option<&str>,
-) -> Result<String, TransferError> {
+pub fn resolve_push_destination(local: &Path, to: Option<&str>) -> Result<String, TransferError> {
     let base = to.unwrap_or(POD_INBOX);
     validate_pod_path(base)?;
     // If user gave a bare directory (ends in /) we append the
@@ -209,10 +204,7 @@ pub fn append_transfer_log(ev: &TransferEvent) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
+    let f = OpenOptions::new().create(true).append(true).open(&path)?;
 
     // Serialise to one line first so the flock window is minimal.
     let mut line = serde_json::to_string(ev).unwrap_or_else(|_| "{}".into());
@@ -324,11 +316,9 @@ mod tests {
 
     #[test]
     fn resolve_push_destination_trailing_slash_appends_basename() {
-        let dest = resolve_push_destination(
-            Path::new("/tmp/report.pdf"),
-            Some("/app/workspace/sub/"),
-        )
-        .unwrap();
+        let dest =
+            resolve_push_destination(Path::new("/tmp/report.pdf"), Some("/app/workspace/sub/"))
+                .unwrap();
         assert_eq!(dest, "/app/workspace/sub/report.pdf");
     }
 
@@ -372,7 +362,15 @@ mod tests {
             .append(true)
             .open(&log_path)
             .unwrap();
-        let ev = TransferEvent::now("push", "02", "/app/workspace/inbox/x", Some("/tmp/x"), 42, true, None);
+        let ev = TransferEvent::now(
+            "push",
+            "02",
+            "/app/workspace/inbox/x",
+            Some("/tmp/x"),
+            42,
+            true,
+            None,
+        );
         let mut line = serde_json::to_string(&ev).unwrap();
         line.push('\n');
         write_with_flock(&f, line.as_bytes()).unwrap();

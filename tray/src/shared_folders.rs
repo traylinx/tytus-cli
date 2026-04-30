@@ -93,7 +93,11 @@ pub fn prompt_bucket_name(default: Option<&str>) -> Option<String> {
         return None;
     }
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -150,8 +154,13 @@ pub fn spawn_bind_folder(pod_id: &str, local_path: &str, bucket: &str) {
             }
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr).to_string();
-                let trimmed: String = err.lines().last()
-                    .unwrap_or("bind failed").chars().take(140).collect();
+                let trimmed: String = err
+                    .lines()
+                    .last()
+                    .unwrap_or("bind failed")
+                    .chars()
+                    .take(140)
+                    .collect();
                 notify_transfer("garagetytus folder bind FAILED", &trimmed, None);
             }
             Err(e) => {
@@ -178,8 +187,13 @@ pub fn spawn_refresh_creds(pod_id: &str) {
             }
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr).to_string();
-                let trimmed: String = err.lines().last()
-                    .unwrap_or("refresh failed").chars().take(140).collect();
+                let trimmed: String = err
+                    .lines()
+                    .last()
+                    .unwrap_or("refresh failed")
+                    .chars()
+                    .take(140)
+                    .collect();
                 notify_transfer("garagetytus refresh FAILED", &trimmed, None);
             }
             Err(e) => {
@@ -198,15 +212,25 @@ pub fn spawn_refresh_all() {
         match output {
             Ok(out) if out.status.success() => {
                 let lines = String::from_utf8_lossy(&out.stderr).to_string();
-                let summary: String = lines.lines()
+                let summary: String = lines
+                    .lines()
                     .filter(|l| l.contains("watchdog done") || l.contains("rotated"))
-                    .last().unwrap_or("done").chars().take(140).collect();
+                    .next_back()
+                    .unwrap_or("done")
+                    .chars()
+                    .take(140)
+                    .collect();
                 notify_transfer("garagetytus refresh-all", &summary, None);
             }
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr).to_string();
-                let trimmed: String = err.lines().last()
-                    .unwrap_or("watchdog failed").chars().take(140).collect();
+                let trimmed: String = err
+                    .lines()
+                    .last()
+                    .unwrap_or("watchdog failed")
+                    .chars()
+                    .take(140)
+                    .collect();
                 notify_transfer("garagetytus refresh-all FAILED", &trimmed, None);
             }
             Err(e) => {
@@ -235,9 +259,15 @@ pub struct Binding {
 /// dir doesn't exist (no bindings yet) or jq isn't available — never
 /// errors, so the menu always builds even on a fresh machine.
 pub fn list_bindings() -> Vec<Binding> {
-    let home = match std::env::var("HOME") { Ok(h) => h, Err(_) => return vec![] };
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return vec![],
+    };
     let dir = format!("{}/.cache/garagetytus/bisync", home);
-    let entries = match std::fs::read_dir(&dir) { Ok(e) => e, Err(_) => return vec![] };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
@@ -249,17 +279,35 @@ pub fn list_bindings() -> Vec<Binding> {
             Some(s) => s.to_string(),
             None => continue,
         };
-        let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => continue };
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
         // Parse with serde_json (already a workspace dep). Tolerate
         // missing fields by falling back to empty strings — broken
         // sidecars shouldn't poison the menu.
         let json: serde_json::Value = match serde_json::from_str(&raw) {
-            Ok(j) => j, Err(_) => continue,
+            Ok(j) => j,
+            Err(_) => continue,
         };
-        let bucket = json.get("bucket").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let local_path = json.get("local_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        if bucket.is_empty() || local_path.is_empty() { continue; }
-        out.push(Binding { safe_name, bucket, local_path });
+        let bucket = json
+            .get("bucket")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let local_path = json
+            .get("local_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if bucket.is_empty() || local_path.is_empty() {
+            continue;
+        }
+        out.push(Binding {
+            safe_name,
+            bucket,
+            local_path,
+        });
     }
     // Sort for stable menu order (bucket name asc).
     out.sort_by(|a, b| a.bucket.cmp(&b.bucket));
@@ -281,7 +329,10 @@ pub fn parse_open_binding_id(id: &str) -> Option<String> {
 /// Open one binding's local folder in Finder. No-op if the path no
 /// longer exists on disk (orphan sidecar).
 pub fn open_binding_in_finder(safe_name: &str) {
-    if let Some(b) = list_bindings().into_iter().find(|b| b.safe_name == safe_name) {
+    if let Some(b) = list_bindings()
+        .into_iter()
+        .find(|b| b.safe_name == safe_name)
+    {
         if std::path::Path::new(&b.local_path).is_dir() {
             let _ = std::process::Command::new("open")
                 .arg(&b.local_path)

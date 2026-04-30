@@ -50,8 +50,7 @@ pub fn acquire() -> Result<(), String> {
         .write(true)
         .open(&path)
         .map_err(|e| format!("cannot write pidfile {}: {}", path.display(), e))?;
-    writeln!(f, "{}", std::process::id())
-        .map_err(|e| format!("cannot write pid: {}", e))?;
+    writeln!(f, "{}", std::process::id()).map_err(|e| format!("cannot write pid: {}", e))?;
 
     #[cfg(unix)]
     {

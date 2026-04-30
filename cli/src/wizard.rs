@@ -131,13 +131,23 @@ pub fn print_box(title: &str, lines: &[&str]) {
         .max(console::measure_text_width(title))
         + 4;
 
-    let top = format!("╭─ {} {}╮", style(title).bold(), "─".repeat(width.saturating_sub(title.chars().count() + 4)));
+    let top = format!(
+        "╭─ {} {}╮",
+        style(title).bold(),
+        "─".repeat(width.saturating_sub(title.chars().count() + 4))
+    );
     let bot = format!("╰{}╯", "─".repeat(width));
     println!("{}", style(top).cyan());
     flush();
     for line in lines {
         let padding = width.saturating_sub(console::measure_text_width(line) + 2);
-        println!("{} {}{} {}", style("│").cyan(), line, " ".repeat(padding), style("│").cyan());
+        println!(
+            "{} {}{} {}",
+            style("│").cyan(),
+            line,
+            " ".repeat(padding),
+            style("│").cyan()
+        );
     }
     println!("{}", style(bot).cyan());
     flush();

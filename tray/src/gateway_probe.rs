@@ -44,8 +44,12 @@ pub fn probe_gateway() -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    if stream.set_read_timeout(Some(PROBE_TIMEOUT)).is_err() { return false; }
-    if stream.set_write_timeout(Some(PROBE_TIMEOUT)).is_err() { return false; }
+    if stream.set_read_timeout(Some(PROBE_TIMEOUT)).is_err() {
+        return false;
+    }
+    if stream.set_write_timeout(Some(PROBE_TIMEOUT)).is_err() {
+        return false;
+    }
 
     // Minimal request — we don't care about the status code, only that the
     // peer speaks HTTP at all. `Connection: close` so the server hangs up
@@ -54,7 +58,9 @@ pub fn probe_gateway() -> bool {
         "GET /v1/models HTTP/1.0\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
         PROBE_HOST, PROBE_PORT,
     );
-    if stream.write_all(req.as_bytes()).is_err() { return false; }
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
 
     // Read just enough to validate the status line. 16 bytes is plenty
     // for "HTTP/1.1 200 " and similar.

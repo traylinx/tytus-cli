@@ -10,4 +10,8 @@
 // TODO: FIX-2 will likely want to reexport a disconnect-reap helper here too;
 // keep this file narrow so conflicts stay minimal.
 
+pub mod tunnel_pidfile;
 pub mod tunnel_reap;
+
+pub mod account;
+pub mod state;

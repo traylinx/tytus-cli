@@ -1,0 +1,27 @@
+{
+  "email": "sebastian@example.com",
+  "access_token": "access-token",
+  "expires_at_ms": 1893456000000,
+  "secret_key": "sk_test",
+  "agent_user_id": "agent-user-1",
+  "organization_id": "org-1",
+  "tier": "operator",
+  "pods": [
+    {
+      "pod_id": "02",
+      "droplet_id": "drop-2",
+      "droplet_ip": "203.0.113.2",
+      "ai_endpoint": "http://10.42.42.1:18080",
+      "pod_api_key": "sk-pod",
+      "agent_type": "none",
+      "agent_endpoint": null,
+      "tunnel_iface": "utun7",
+      "stable_ai_endpoint": "http://10.42.42.1:18080",
+      "stable_user_key": "sk-tytus-user-test",
+      "edge_slug": "abcdef123456",
+      "edge_public_url": "https://abcdef.tytus.traylinx.com",
+      "gateway_token": "gateway-token",
+      "pod_public_url": "https://abcdef-p02.tytus.traylinx.com"
+    }
+  ]
+}

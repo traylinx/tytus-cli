@@ -40,7 +40,9 @@ pub struct DefaultPodAllocation {
 /// MUST NOT retry on non-network errors — even though /pod/default is
 /// idempotent, a blind retry on e.g. a 503 that actually succeeded
 /// upstream would waste a slot if the server's idempotency key expired.
-pub async fn request_default_pod(client: &TytusClient) -> atomek_core::Result<DefaultPodAllocation> {
+pub async fn request_default_pod(
+    client: &TytusClient,
+) -> atomek_core::Result<DefaultPodAllocation> {
     let resp = client
         .post("/pod/default")
         .json(&serde_json::json!({}))
@@ -69,6 +71,9 @@ pub async fn request_default_pod(client: &TytusClient) -> atomek_core::Result<De
             }),
         }
     } else {
-        Err(AtomekError::ApiStatus { status, message: body })
+        Err(AtomekError::ApiStatus {
+            status,
+            message: body,
+        })
     }
 }

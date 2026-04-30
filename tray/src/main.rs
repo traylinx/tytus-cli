@@ -12,19 +12,20 @@
 //!
 //! Talks to tytus-daemon via Unix socket at /tmp/tytus/daemon.sock.
 
+use std::sync::{Arc, Mutex};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::TrayIconBuilder;
-use std::sync::{Arc, Mutex};
 
 mod error_ui;
 mod files;
+mod gateway_probe;
 mod icon;
 mod launcher;
 mod shared_folders;
-mod socket;
 mod single_instance;
-mod gateway_probe;
+mod socket;
 mod web_server;
+mod workspace;
 
 /// Canonical documentation URL. `tytus.traylinx.com` is the Provider API
 /// (returns 404 on `/`), not a docs site — point at the public README.
@@ -67,8 +68,10 @@ fn apply_tray_update(dot: HealthDot, tooltip: String) {
 // event handlers (and any future code) can trigger an immediate
 // refresh without threading the pair through every function.
 
+type RefreshPair = Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
 thread_local! {
-    static REFRESH_PAIR: std::cell::RefCell<Option<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>>
+    static REFRESH_PAIR: std::cell::RefCell<Option<RefreshPair>>
         = const { std::cell::RefCell::new(None) };
 }
 
@@ -90,8 +93,8 @@ fn trigger_refresh_from_main() {
 /// Global-accessible variant: stashes the Arc in a once-initialized
 /// static so background threads (menu event handlers, action-refresh
 /// timers) can wake the poll loop from any context.
-static REFRESH_GLOBAL: std::sync::OnceLock<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>
-    = std::sync::OnceLock::new();
+static REFRESH_GLOBAL: std::sync::OnceLock<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>> =
+    std::sync::OnceLock::new();
 
 /// Transient "working on it" status shown in the menu while a slow
 /// action (connect, disconnect, add-channel) is in flight. macOS
@@ -103,8 +106,8 @@ static REFRESH_GLOBAL: std::sync::OnceLock<Arc<(std::sync::Mutex<bool>, std::syn
 /// Set when a long action kicks off; cleared when the action's
 /// background thread completes. Read by `build_menu`; any change
 /// triggers a menu rebuild via `menu_signature`.
-static BUSY_STATUS: std::sync::OnceLock<Arc<std::sync::Mutex<Option<BusyState>>>>
-    = std::sync::OnceLock::new();
+static BUSY_STATUS: std::sync::OnceLock<Arc<std::sync::Mutex<Option<BusyState>>>> =
+    std::sync::OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct BusyState {
@@ -129,7 +132,9 @@ fn busy_clear() {
 }
 
 fn busy_current() -> Option<BusyState> {
-    BUSY_STATUS.get().and_then(|c| c.lock().ok().and_then(|g| g.clone()))
+    BUSY_STATUS
+        .get()
+        .and_then(|c| c.lock().ok().and_then(|g| g.clone()))
 }
 
 fn trigger_refresh() {
@@ -175,7 +180,9 @@ fn filesystem_signature() -> String {
                 }
                 let m = e.metadata().ok()?;
                 let size = m.len();
-                let mtime = m.modified().ok()
+                let mtime = m
+                    .modified()
+                    .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
@@ -188,7 +195,9 @@ fn filesystem_signature() -> String {
     if let Some(config) = dirs::config_dir() {
         let p = config.join("tytus").join("state.json");
         if let Ok(m) = std::fs::metadata(&p) {
-            let mtime = m.modified().ok()
+            let mtime = m
+                .modified()
+                .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
@@ -210,20 +219,30 @@ fn menu_signature(s: &TrayState) -> String {
     parts.push(format!("tun={}", s.tunnel_active));
     parts.push(format!("uu={}/{}", s.units_used, s.units_limit));
     parts.push(format!("kc={}", s.keychain_healthy));
-    parts.push(format!("err={}", s.last_refresh_error.as_deref().unwrap_or("")));
+    parts.push(format!(
+        "err={}",
+        s.last_refresh_error.as_deref().unwrap_or("")
+    ));
     // When a long action is in flight, include the elapsed-second
     // count in the signature so the menu rebuilds each second and the
     // "Connecting… (4s)" counter advances visibly without waiting for
     // the user to re-open the menu.
     if let Some(busy) = busy_current() {
-        parts.push(format!("busy={}:{}", busy.label, busy.started_at.elapsed().as_secs()));
+        parts.push(format!(
+            "busy={}:{}",
+            busy.label,
+            busy.started_at.elapsed().as_secs()
+        ));
     } else {
         parts.push("busy=0".into());
     }
     for p in &s.pods {
         let fwd_live = existing_ui_forwarder(&p.pod_id).is_some();
         let tun_live = tunnel_reaches_pod(&p.pod_id);
-        parts.push(format!("{}:{}:{}:{}", p.pod_id, p.agent_type, fwd_live as u8, tun_live as u8));
+        parts.push(format!(
+            "{}:{}:{}:{}",
+            p.pod_id, p.agent_type, fwd_live as u8, tun_live as u8
+        ));
     }
     parts.join("|")
 }
@@ -243,7 +262,7 @@ fn apply_menu_rebuild(state: TrayState) {
         TRAY_CELL.with(|c| {
             if let Some(tray) = c.borrow().as_ref() {
                 let menu = build_menu(&state);
-                let _ = tray.set_menu(Some(Box::new(menu)));
+                tray.set_menu(Some(Box::new(menu)));
             }
         });
     });
@@ -431,7 +450,9 @@ pub fn read_channels_for_pod(pod_id: &str) -> Vec<(String, usize)> {
         Ok(h) => h,
         Err(_) => return Vec::new(),
     };
-    let path = std::path::PathBuf::from(&home).join(".tytus").join("channels.json");
+    let path = std::path::PathBuf::from(&home)
+        .join(".tytus")
+        .join("channels.json");
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -476,7 +497,9 @@ fn check_autostart_installed() -> bool {
             .exists()
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    { false }
+    {
+        false
+    }
 }
 
 /// Check whether the tray launch-at-login LaunchAgent is installed.
@@ -489,15 +512,21 @@ fn check_tray_autostart_installed() -> bool {
             .exists()
     }
     #[cfg(not(target_os = "macos"))]
-    { false }
+    {
+        false
+    }
 }
 
 /// Check whether /Applications/Tytus.app exists.
 pub(crate) fn check_app_bundle_installed() -> bool {
     #[cfg(target_os = "macos")]
-    { std::path::Path::new("/Applications/Tytus.app").exists() }
+    {
+        std::path::Path::new("/Applications/Tytus.app").exists()
+    }
     #[cfg(not(target_os = "macos"))]
-    { false }
+    {
+        false
+    }
 }
 
 /// Coarse health state that drives the colored dot in the menu title.
@@ -555,7 +584,11 @@ impl HealthDot {
             // they'll lose API-plane access until they `tytus login`.
             // Not severe enough for red: the tunnel and LLM calls are
             // fully functional right this second.
-            if !s.keychain_healthy { HealthDot::Warning } else { HealthDot::Connected }
+            if !s.keychain_healthy {
+                HealthDot::Warning
+            } else {
+                HealthDot::Connected
+            }
         } else if s.logged_in {
             // Tunnel down but credentials are fine — click Connect.
             HealthDot::Warning
@@ -576,6 +609,8 @@ fn main() {
         std::process::exit(0);
     }
 
+    let _ = workspace::ensure_tytus_home();
+
     // macOS: must set activation policy BEFORE creating any UI elements
     #[cfg(target_os = "macos")]
     {
@@ -594,7 +629,10 @@ fn main() {
     // a Terminal with `tytus agent install` if the port file is missing.
     // Tray-side integration for SPRINT §6 E1.
     if let Some(port) = web_server::start() {
-        eprintln!("[tray] install wizard ready on http://127.0.0.1:{}/install", port);
+        eprintln!(
+            "[tray] install wizard ready on http://127.0.0.1:{}/install",
+            port
+        );
     } else {
         eprintln!("[tray] install wizard not available (bind failed)");
     }
@@ -720,11 +758,9 @@ fn main() {
 
     // Handle menu events in a background thread
     let event_state = state.clone();
-    std::thread::spawn(move || {
-        loop {
-            if let Ok(event) = MenuEvent::receiver().recv() {
-                handle_menu_event(event.id().0.as_str(), &event_state);
-            }
+    std::thread::spawn(move || loop {
+        if let Ok(event) = MenuEvent::receiver().recv() {
+            handle_menu_event(event.id().0.as_str(), &event_state);
         }
     });
 
@@ -834,7 +870,10 @@ fn build_menu(state: &TrayState) -> Menu {
         // always-on default pod is 0 units and shouldn't inflate the header.
         // Per-pod agent labels live in the submenu, not here.
         if state.units_limit > 0 {
-            bits.push(format!("{} / {} units", state.units_used, state.units_limit));
+            bits.push(format!(
+                "{} / {} units",
+                state.units_used, state.units_limit
+            ));
         }
         if state.daemon_running && state.uptime_secs > 0 {
             bits.push(format!("up {}", format_uptime(state.uptime_secs)));
@@ -893,10 +932,30 @@ fn build_menu(state: &TrayState) -> Menu {
         // arrives in Phase B; rc.2 lands at the page root because
         // tower.html ignores unknown anchors, which still gets the user
         // there — Phase B-D collapse the gap.
-        let _ = menu.append(&MenuItem::with_id("open_tower_chat",     "💬  Chat now…",   true, None));
-        let _ = menu.append(&MenuItem::with_id("open_tower_files",    "📁  Files…",       true, None));
-        let _ = menu.append(&MenuItem::with_id("open_tower_channels", "📨  Channels…",    true, None));
-        let _ = menu.append(&MenuItem::with_id("open_tower",          "🌐  Open Tytus Tower", true, None));
+        let _ = menu.append(&MenuItem::with_id(
+            "open_tower_chat",
+            "💬  Chat now…",
+            true,
+            None,
+        ));
+        let _ = menu.append(&MenuItem::with_id(
+            "open_tower_files",
+            "📁  Files…",
+            true,
+            None,
+        ));
+        let _ = menu.append(&MenuItem::with_id(
+            "open_tower_channels",
+            "📨  Channels…",
+            true,
+            None,
+        ));
+        let _ = menu.append(&MenuItem::with_id(
+            "open_tower",
+            "🌐  Open Tytus Tower",
+            true,
+            None,
+        ));
         let _ = menu.append(&PredefinedMenuItem::separator());
 
         // Phase 4: the public-edge URL works without the WG tunnel, so
@@ -910,9 +969,15 @@ fn build_menu(state: &TrayState) -> Menu {
         // public URL already wired don't need to touch either.
         // All three of these now nest under Quick actions ▸ per Phase C.
         if state.tunnel_active {
-            let _ = quick_actions_sub.append(&MenuItem::with_id("disconnect", "Disconnect", !is_busy, None));
+            let _ = quick_actions_sub.append(&MenuItem::with_id(
+                "disconnect",
+                "Disconnect",
+                !is_busy,
+                None,
+            ));
         } else {
-            let _ = quick_actions_sub.append(&MenuItem::with_id("connect", "Connect", !is_busy, None));
+            let _ =
+                quick_actions_sub.append(&MenuItem::with_id("connect", "Connect", !is_busy, None));
         }
 
         let clis = launcher::detect_installed_clis();
@@ -924,7 +989,12 @@ fn build_menu(state: &TrayState) -> Menu {
         if !clis.is_empty() {
             let _ = open_sub.append(&PredefinedMenuItem::separator());
         }
-        let _ = open_sub.append(&MenuItem::with_id("launch_terminal", "Terminal", true, None));
+        let _ = open_sub.append(&MenuItem::with_id(
+            "launch_terminal",
+            "Terminal",
+            true,
+            None,
+        ));
         let _ = quick_actions_sub.append(&open_sub);
 
         let _ = quick_actions_sub.append(&MenuItem::with_id("test", "Run Health Test", true, None));
@@ -958,13 +1028,9 @@ fn build_menu(state: &TrayState) -> Menu {
         // Display-only rows so the user can see what they'd copy.
         let url_label = match &public_url {
             Some(_) => format!("URL: {}/v1  (public)", endpoint),
-            None    => format!("URL: {}/v1  (tunnel)", endpoint),
+            None => format!("URL: {}/v1  (tunnel)", endpoint),
         };
-        let _ = info_sub.append(&MenuItem::with_id(
-            "ail_info_url",
-            url_label,
-            false, None,
-        ));
+        let _ = info_sub.append(&MenuItem::with_id("ail_info_url", url_label, false, None));
         if let Some(ref k) = key {
             // Preview first 14 chars of the key so the user can recognize
             // it without exposing the whole token in a screenshot.
@@ -976,28 +1042,65 @@ fn build_menu(state: &TrayState) -> Menu {
             let _ = info_sub.append(&MenuItem::with_id(
                 "ail_info_key",
                 format!("Key: {}", preview),
-                false, None,
+                false,
+                None,
             ));
         } else {
             let _ = info_sub.append(&MenuItem::with_id(
                 "ail_info_key",
                 "Key: (none yet — run `tytus login`)",
-                false, None,
+                false,
+                None,
             ));
         }
 
         let _ = info_sub.append(&PredefinedMenuItem::separator());
 
         let has_key = key.is_some();
-        let _ = info_sub.append(&MenuItem::with_id("copy_ail_url", "Copy AIL_URL", true, None));
-        let _ = info_sub.append(&MenuItem::with_id("copy_ail_key", "Copy AIL_API_KEY", has_key, None));
-        let _ = info_sub.append(&MenuItem::with_id("copy_ail_exports", "Copy export block (all aliases)", has_key, None));
-        let _ = info_sub.append(&MenuItem::with_id("copy_openai_block", "Copy as OpenAI exports", has_key, None));
-        let _ = info_sub.append(&MenuItem::with_id("copy_anthropic_block", "Copy as Anthropic exports", has_key, None));
-        let _ = info_sub.append(&MenuItem::with_id("copy_ail_json", "Copy JSON ({url, api_key})", has_key, None));
+        let _ = info_sub.append(&MenuItem::with_id(
+            "copy_ail_url",
+            "Copy AIL_URL",
+            true,
+            None,
+        ));
+        let _ = info_sub.append(&MenuItem::with_id(
+            "copy_ail_key",
+            "Copy AIL_API_KEY",
+            has_key,
+            None,
+        ));
+        let _ = info_sub.append(&MenuItem::with_id(
+            "copy_ail_exports",
+            "Copy export block (all aliases)",
+            has_key,
+            None,
+        ));
+        let _ = info_sub.append(&MenuItem::with_id(
+            "copy_openai_block",
+            "Copy as OpenAI exports",
+            has_key,
+            None,
+        ));
+        let _ = info_sub.append(&MenuItem::with_id(
+            "copy_anthropic_block",
+            "Copy as Anthropic exports",
+            has_key,
+            None,
+        ));
+        let _ = info_sub.append(&MenuItem::with_id(
+            "copy_ail_json",
+            "Copy JSON ({url, api_key})",
+            has_key,
+            None,
+        ));
 
         let _ = info_sub.append(&PredefinedMenuItem::separator());
-        let _ = info_sub.append(&MenuItem::with_id("open_mcp_guide", "Paste into Claude Code / Cursor / OpenCode…", true, None));
+        let _ = info_sub.append(&MenuItem::with_id(
+            "open_mcp_guide",
+            "Paste into Claude Code / Cursor / OpenCode…",
+            true,
+            None,
+        ));
 
         // Phase C: AIL Connection Info nests under Quick actions ▸ — it's
         // a power-user surface (export blocks for Claude/Cursor/OpenCode)
@@ -1013,7 +1116,12 @@ fn build_menu(state: &TrayState) -> Menu {
     if state.logged_in {
         let pods_sub = Submenu::new("Show all pods", true);
         if state.pods.is_empty() {
-            let _ = pods_sub.append(&MenuItem::with_id("no_pods", "No workspace yet", false, None));
+            let _ = pods_sub.append(&MenuItem::with_id(
+                "no_pods",
+                "No workspace yet",
+                false,
+                None,
+            ));
             let _ = pods_sub.append(&PredefinedMenuItem::separator());
         } else {
             // Surface the default pod (agent-less, 0 units) on its own row
@@ -1026,10 +1134,7 @@ fn build_menu(state: &TrayState) -> Menu {
             // still `tytus revoke <pod_id>` from the CLI. Per §4.1 +
             // user feedback 2026-04-19.
             for p in state.pods.iter().filter(|p| p.is_default()) {
-                let header = format!(
-                    "Default Pod {} — AIL only  (0 units)",
-                    p.pod_id,
-                );
+                let header = format!("Default Pod {} — AIL only  (0 units)", p.pod_id,);
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_header_{}", p.pod_id),
                     &header,
@@ -1040,7 +1145,8 @@ fn build_menu(state: &TrayState) -> Menu {
             }
 
             for p in state.pods.iter().filter(|p| !p.is_default()) {
-                let header = format!("Pod {} — {}  ({} unit{})",
+                let header = format!(
+                    "Pod {} — {}  ({} unit{})",
                     p.pod_id,
                     p.display_name(),
                     p.units(),
@@ -1048,7 +1154,9 @@ fn build_menu(state: &TrayState) -> Menu {
                 );
                 let _ = pods_sub.append(&MenuItem::with_id(
                     format!("pod_header_{}", p.pod_id),
-                    &header, false, None,
+                    &header,
+                    false,
+                    None,
                 ));
                 // Open the OpenClaw web UI in the browser. Two paths,
                 // chosen at click time by `pod_..._open`:
@@ -1083,14 +1191,16 @@ fn build_menu(state: &TrayState) -> Menu {
                     // populated — no tunnel needed. Only the forwarder path
                     // depends on tunnel state.
                     let open_label = match (p_public_ui.is_some(), forwarder_live, tunnel_live) {
-                        (true,  _,    _)     => "  💬 Chat now…  (fast)",
-                        (false, true, _)     => "  💬 Chat now…  ✓",
+                        (true, _, _) => "  💬 Chat now…  (fast)",
+                        (false, true, _) => "  💬 Chat now…  ✓",
                         (false, false, true) => "  💬 Chat now…",
                         (false, false, false) => "  💬 Connect & chat…",
                     };
                     let _ = pods_sub.append(&MenuItem::with_id(
                         format!("pod_{}_open", p.pod_id),
-                        open_label, true, None,
+                        open_label,
+                        true,
+                        None,
                     ));
                 }
                 let public_pod_url = p.public_pod_url();
@@ -1106,20 +1216,28 @@ fn build_menu(state: &TrayState) -> Menu {
                 let files_sub = Submenu::new("  📁 Files", true);
                 let _ = files_sub.append(&MenuItem::with_id(
                     files::menu_id_push_file(&p.pod_id),
-                    "Push file…", true, None,
+                    "Push file…",
+                    true,
+                    None,
                 ));
                 let _ = files_sub.append(&MenuItem::with_id(
                     files::menu_id_push_folder(&p.pod_id),
-                    "Push folder…", true, None,
+                    "Push folder…",
+                    true,
+                    None,
                 ));
                 let _ = files_sub.append(&PredefinedMenuItem::separator());
                 let _ = files_sub.append(&MenuItem::with_id(
                     files::menu_id_list_inbox(&p.pod_id),
-                    "List inbox in Terminal", true, None,
+                    "List inbox in Terminal",
+                    true,
+                    None,
                 ));
                 let _ = files_sub.append(&MenuItem::with_id(
                     files::menu_id_open_downloads(&p.pod_id),
-                    "Open local download folder", true, None,
+                    "Open local download folder",
+                    true,
+                    None,
                 ));
                 // ── garagetytus shared-folder integration (v0.5.3) ──
                 // Two per-pod entries that wrap the bash helpers shipped
@@ -1129,10 +1247,18 @@ fn build_menu(state: &TrayState) -> Menu {
                 // silent failure on click.
                 let bind_helper_present =
                     std::path::Path::new("/usr/local/bin/garagetytus-folder-bind").exists()
-                    || std::path::Path::new("/opt/homebrew/bin/garagetytus-folder-bind").exists()
-                    || std::env::var("HOME").ok().map(|h|
-                        std::path::Path::new(&format!("{}/garagetytus/bin/garagetytus-folder-bind", h)).exists()
-                    ).unwrap_or(false);
+                        || std::path::Path::new("/opt/homebrew/bin/garagetytus-folder-bind")
+                            .exists()
+                        || std::env::var("HOME")
+                            .ok()
+                            .map(|h| {
+                                std::path::Path::new(&format!(
+                                    "{}/garagetytus/bin/garagetytus-folder-bind",
+                                    h
+                                ))
+                                .exists()
+                            })
+                            .unwrap_or(false);
                 let _ = files_sub.append(&PredefinedMenuItem::separator());
                 let _ = files_sub.append(&MenuItem::with_id(
                     shared_folders::menu_id_bind_folder(&p.pod_id),
@@ -1141,12 +1267,14 @@ fn build_menu(state: &TrayState) -> Menu {
                     } else {
                         "Bind Mac folder…  (install garagetytus first)"
                     },
-                    bind_helper_present, None,
+                    bind_helper_present,
+                    None,
                 ));
                 let _ = files_sub.append(&MenuItem::with_id(
                     shared_folders::menu_id_refresh_creds(&p.pod_id),
                     "Refresh shared-folder credentials",
-                    bind_helper_present, None,
+                    bind_helper_present,
+                    None,
                 ));
                 let _ = pods_sub.append(&files_sub);
 
@@ -1168,7 +1296,8 @@ fn build_menu(state: &TrayState) -> Menu {
                     let _ = channel_sub.append(&MenuItem::with_id(
                         format!("pod_{}_channels_empty", p.pod_id),
                         "No channels configured",
-                        false, None,
+                        false,
+                        None,
                     ));
                     let _ = channel_sub.append(&PredefinedMenuItem::separator());
                 } else {
@@ -1181,7 +1310,8 @@ fn build_menu(state: &TrayState) -> Menu {
                                 cred_count,
                                 if *cred_count == 1 { "" } else { "s" },
                             ),
-                            false, None,
+                            false,
+                            None,
                         ));
                     }
                     let _ = channel_sub.append(&PredefinedMenuItem::separator());
@@ -1192,7 +1322,8 @@ fn build_menu(state: &TrayState) -> Menu {
                         let _ = channel_sub.append(&MenuItem::with_id(
                             format!("pod_{}_channel_{}_remove", p.pod_id, name),
                             format!("Remove {}", channel_label(name)),
-                            true, None,
+                            true,
+                            None,
                         ));
                     }
                     let _ = channel_sub.append(&PredefinedMenuItem::separator());
@@ -1203,16 +1334,20 @@ fn build_menu(state: &TrayState) -> Menu {
                 let _ = channel_sub.append(&MenuItem::with_id(
                     format!("pod_{}_channels_catalog", p.pod_id),
                     "Browse available channels…",
-                    true, None,
+                    true,
+                    None,
                 ));
                 for known in CHANNEL_MENU_ENTRIES {
                     // Skip channels that are already configured so the
                     // list doesn't duplicate them as "Add X".
-                    if configured.iter().any(|(n, _)| n == known.0) { continue; }
+                    if configured.iter().any(|(n, _)| n == known.0) {
+                        continue;
+                    }
                     let _ = channel_sub.append(&MenuItem::with_id(
                         format!("pod_{}_channel_{}_add", p.pod_id, known.0),
                         format!("Add {}…", known.1),
-                        true, None,
+                        true,
+                        None,
                     ));
                 }
                 let _ = pods_sub.append(&channel_sub);
@@ -1228,18 +1363,24 @@ fn build_menu(state: &TrayState) -> Menu {
                 if public_pod_url.is_some() {
                     let _ = manage_sub.append(&MenuItem::with_id(
                         format!("pod_{}_copy_url", p.pod_id),
-                        "Copy Public API URL", true, None,
+                        "Copy Public API URL",
+                        true,
+                        None,
                     ));
                 }
                 if forwarder_live {
                     let _ = manage_sub.append(&MenuItem::with_id(
                         format!("pod_{}_stop_forwarder", p.pod_id),
-                        "Stop Forwarder", true, None,
+                        "Stop Forwarder",
+                        true,
+                        None,
                     ));
                 }
                 let _ = manage_sub.append(&MenuItem::with_id(
                     format!("pod_{}_restart", p.pod_id),
-                    "Restart Agent", true, None,
+                    "Restart Agent",
+                    true,
+                    None,
                 ));
                 // Uninstall Agent: keeps the pod slot allocated (AIL still
                 // works through it), drops the container. SPRINT §4.3.
@@ -1253,12 +1394,16 @@ fn build_menu(state: &TrayState) -> Menu {
                 // workspace state. (Decision: 2026-04-18, post-sprint UX.)
                 let _ = manage_sub.append(&MenuItem::with_id(
                     format!("pod_{}_uninstall", p.pod_id),
-                    "Uninstall Agent  (keeps pod)", true, None,
+                    "Uninstall Agent  (keeps pod)",
+                    true,
+                    None,
                 ));
                 let _ = manage_sub.append(&PredefinedMenuItem::separator());
                 let _ = manage_sub.append(&MenuItem::with_id(
                     format!("pod_{}_revoke", p.pod_id),
-                    "Revoke Pod", true, None,
+                    "Revoke Pod",
+                    true,
+                    None,
                 ));
                 let _ = pods_sub.append(&manage_sub);
 
@@ -1272,7 +1417,10 @@ fn build_menu(state: &TrayState) -> Menu {
         // the menu itself. Legacy terminal-picker entries stay below as
         // quick shortcuts + fallback if the localhost server didn't bind.
         let _ = pods_sub.append(&MenuItem::with_id(
-            "install_agent", "Install Agent…", true, None,
+            "install_agent",
+            "Install Agent…",
+            true,
+            None,
         ));
         let add_sub = Submenu::new("Install Agent (terminal)", true);
         let remaining = state.units_limit.saturating_sub(state.units_used);
@@ -1280,13 +1428,29 @@ fn build_menu(state: &TrayState) -> Menu {
         let hermes_ok = state.units_limit == 0 || remaining >= 2;
         let _ = add_sub.append(&MenuItem::with_id(
             "install_agent_nemoclaw",
-            format!("OpenClaw  (1 unit){}", if nemo_ok { "" } else { "  — not enough units" }),
-            nemo_ok, None,
+            format!(
+                "OpenClaw  (1 unit){}",
+                if nemo_ok {
+                    ""
+                } else {
+                    "  — not enough units"
+                }
+            ),
+            nemo_ok,
+            None,
         ));
         let _ = add_sub.append(&MenuItem::with_id(
             "install_agent_hermes",
-            format!("Hermes  (2 units){}", if hermes_ok { "" } else { "  — not enough units" }),
-            hermes_ok, None,
+            format!(
+                "Hermes  (2 units){}",
+                if hermes_ok {
+                    ""
+                } else {
+                    "  — not enough units"
+                }
+            ),
+            hermes_ok,
+            None,
         ));
         let _ = pods_sub.append(&add_sub);
 
@@ -1296,7 +1460,8 @@ fn build_menu(state: &TrayState) -> Menu {
             let _ = pods_sub.append(&MenuItem::with_id(
                 "units_line",
                 format!("Units: {} / {} used", state.units_used, state.units_limit),
-                false, None,
+                false,
+                None,
             ));
         }
 
@@ -1310,14 +1475,22 @@ fn build_menu(state: &TrayState) -> Menu {
         // Menu items shell out to bash helpers in
         // github.com/traylinx/garagetytus/bin/. Disabled wholesale
         // when no helper is found on disk.
-        let folder_helper_present =
-            std::path::Path::new("/usr/local/bin/garagetytus-folder-list").exists()
+        let folder_helper_present = std::path::Path::new("/usr/local/bin/garagetytus-folder-list")
+            .exists()
             || std::path::Path::new("/opt/homebrew/bin/garagetytus-folder-list").exists()
-            || std::env::var("HOME").ok().map(|h|
-                std::path::Path::new(&format!("{}/garagetytus/bin/garagetytus-folder-list", h)).exists()
-            ).unwrap_or(false);
+            || std::env::var("HOME")
+                .ok()
+                .map(|h| {
+                    std::path::Path::new(&format!("{}/garagetytus/bin/garagetytus-folder-list", h))
+                        .exists()
+                })
+                .unwrap_or(false);
         let shared_sub = Submenu::new(
-            if folder_helper_present { "Shared Folders" } else { "Shared Folders  (install garagetytus)" },
+            if folder_helper_present {
+                "Shared Folders"
+            } else {
+                "Shared Folders  (install garagetytus)"
+            },
             folder_helper_present,
         );
         // ── Dynamic per-binding entries (click → open in Finder) ──
@@ -1329,7 +1502,8 @@ fn build_menu(state: &TrayState) -> Menu {
             let _ = shared_sub.append(&MenuItem::with_id(
                 "shared_folders_none",
                 "No folders bound yet",
-                false, None,
+                false,
+                None,
             ));
         } else {
             for b in &bindings {
@@ -1341,27 +1515,43 @@ fn build_menu(state: &TrayState) -> Menu {
                 let _ = shared_sub.append(&MenuItem::with_id(
                     shared_folders::menu_id_open_binding(&b.safe_name),
                     format!("{}  ↔  {}", b.bucket, display_path),
-                    true, None,
+                    true,
+                    None,
                 ));
             }
         }
         let _ = shared_sub.append(&PredefinedMenuItem::separator());
         let _ = shared_sub.append(&MenuItem::with_id(
-            shared_folders::ID_LIST_BINDINGS, "List bindings (full table)…", true, None,
+            shared_folders::ID_LIST_BINDINGS,
+            "List bindings (full table)…",
+            true,
+            None,
         ));
         let _ = shared_sub.append(&MenuItem::with_id(
-            shared_folders::ID_STATUS, "Status (with pod check)…", true, None,
+            shared_folders::ID_STATUS,
+            "Status (with pod check)…",
+            true,
+            None,
         ));
         let _ = shared_sub.append(&MenuItem::with_id(
-            shared_folders::ID_CONFLICTS, "Find conflicts…", true, None,
+            shared_folders::ID_CONFLICTS,
+            "Find conflicts…",
+            true,
+            None,
         ));
         let _ = shared_sub.append(&PredefinedMenuItem::separator());
         let _ = shared_sub.append(&MenuItem::with_id(
-            shared_folders::ID_OPEN_CACHE, "Open ~/.cache/garagetytus", true, None,
+            shared_folders::ID_OPEN_CACHE,
+            "Open ~/.cache/garagetytus",
+            true,
+            None,
         ));
         let _ = shared_sub.append(&PredefinedMenuItem::separator());
         let _ = shared_sub.append(&MenuItem::with_id(
-            shared_folders::ID_REFRESH_ALL, "Run cred refresh now (every pod)", true, None,
+            shared_folders::ID_REFRESH_ALL,
+            "Run cred refresh now (every pod)",
+            true,
+            None,
         ));
         // Phase C: Shared Folders nests under Quick actions ▸. Direct
         // per-binding "open in Finder" entries are still ≤3 clicks deep
@@ -1380,24 +1570,44 @@ fn build_menu(state: &TrayState) -> Menu {
     // ── Settings ▸ ────────────────────────────────────────
     let settings_sub = Submenu::new("Settings", true);
     if state.daemon_running && state.logged_in {
-        let _ = settings_sub.append(&MenuItem::with_id("settings_configure", "Configure your AI…", true, None));
+        let _ = settings_sub.append(&MenuItem::with_id(
+            "settings_configure",
+            "Configure your AI…",
+            true,
+            None,
+        ));
     }
     let autostart_label = if state.autostart_installed {
         "Start Tunnel at Login  ✓"
     } else {
         "Start Tunnel at Login"
     };
-    let _ = settings_sub.append(&MenuItem::with_id("autostart_toggle", autostart_label, true, None));
+    let _ = settings_sub.append(&MenuItem::with_id(
+        "autostart_toggle",
+        autostart_label,
+        true,
+        None,
+    ));
     let tray_autostart_label = if state.tray_autostart_installed {
         "Launch Tray at Login  ✓"
     } else {
         "Launch Tray at Login"
     };
-    let _ = settings_sub.append(&MenuItem::with_id("tray_autostart_toggle", tray_autostart_label, true, None));
+    let _ = settings_sub.append(&MenuItem::with_id(
+        "tray_autostart_toggle",
+        tray_autostart_label,
+        true,
+        None,
+    ));
     // Only surface the bundle installer when it's actually missing —
     // reinstalling over a good bundle is harmless but noisy.
     if !state.app_bundle_installed {
-        let _ = settings_sub.append(&MenuItem::with_id("install_app", "Install Tytus in Applications…", true, None));
+        let _ = settings_sub.append(&MenuItem::with_id(
+            "install_app",
+            "Install Tytus in Applications…",
+            true,
+            None,
+        ));
     }
     if state.logged_in {
         let _ = settings_sub.append(&PredefinedMenuItem::separator());
@@ -1417,15 +1627,21 @@ fn build_menu(state: &TrayState) -> Menu {
         let _ = trouble_sub.append(&MenuItem::with_id(
             "diag_keychain",
             "⚠︎ Keychain access pending — approve dialog or re-run Sign In",
-            false, None,
+            false,
+            None,
         ));
     }
     if let Some(ref err) = state.last_refresh_error {
-        let truncated = if err.len() > 80 { format!("{}…", &err[..80]) } else { err.clone() };
+        let truncated = if err.len() > 80 {
+            format!("{}…", &err[..80])
+        } else {
+            err.clone()
+        };
         let _ = trouble_sub.append(&MenuItem::with_id(
             "diag_refresh_err",
             format!("Last refresh error: {}", truncated),
-            false, None,
+            false,
+            None,
         ));
     }
     if !state.keychain_healthy || state.last_refresh_error.is_some() {
@@ -1437,7 +1653,12 @@ fn build_menu(state: &TrayState) -> Menu {
     // available, regardless of connection state. Grandma clicks this
     // when anything looks wrong and gets either a one-click retry
     // or a paste-to-support blob.
-    let _ = trouble_sub.append(&MenuItem::with_id("help_dialog", "Help…  (something's not working)", true, None));
+    let _ = trouble_sub.append(&MenuItem::with_id(
+        "help_dialog",
+        "Help…  (something's not working)",
+        true,
+        None,
+    ));
     // Phase C: Documentation + About fold into Help ▸ so the top-level
     // tray no longer carries two text-link items grandma never clicks.
     let _ = trouble_sub.append(&PredefinedMenuItem::separator());
@@ -1450,15 +1671,40 @@ fn build_menu(state: &TrayState) -> Menu {
     // get every existing action one click deeper. No actions removed.
     let _ = trouble_sub.append(&PredefinedMenuItem::separator());
     let dev_sub = Submenu::new("Developer options", true);
-    let _ = dev_sub.append(&MenuItem::with_id("doctor", "Run diagnostics (advanced)", true, None));
-    let _ = dev_sub.append(&MenuItem::with_id("view_daemon_log", "View Daemon Log", true, None));
-    let _ = dev_sub.append(&MenuItem::with_id("view_startup_log", "View Startup Log", true, None));
+    let _ = dev_sub.append(&MenuItem::with_id(
+        "doctor",
+        "Run diagnostics (advanced)",
+        true,
+        None,
+    ));
+    let _ = dev_sub.append(&MenuItem::with_id(
+        "view_daemon_log",
+        "View Daemon Log",
+        true,
+        None,
+    ));
+    let _ = dev_sub.append(&MenuItem::with_id(
+        "view_startup_log",
+        "View Startup Log",
+        true,
+        None,
+    ));
     let _ = dev_sub.append(&PredefinedMenuItem::separator());
     if state.daemon_running {
-        let _ = dev_sub.append(&MenuItem::with_id("daemon_restart", "Restart Daemon", true, None));
+        let _ = dev_sub.append(&MenuItem::with_id(
+            "daemon_restart",
+            "Restart Daemon",
+            true,
+            None,
+        ));
         let _ = dev_sub.append(&MenuItem::with_id("daemon_stop", "Stop Daemon", true, None));
     } else {
-        let _ = dev_sub.append(&MenuItem::with_id("daemon_start", "Start Daemon", true, None));
+        let _ = dev_sub.append(&MenuItem::with_id(
+            "daemon_start",
+            "Start Daemon",
+            true,
+            None,
+        ));
     }
     let _ = trouble_sub.append(&dev_sub);
     let _ = menu.append(&trouble_sub);
@@ -1490,9 +1736,13 @@ fn format_uptime(secs: u64) -> String {
     let days = secs / 86400;
     let hours = (secs % 86400) / 3600;
     let mins = (secs % 3600) / 60;
-    if days > 0 { format!("{}d {}h", days, hours) }
-    else if hours > 0 { format!("{}h {}m", hours, mins) }
-    else { format!("{}m", mins) }
+    if days > 0 {
+        format!("{}d {}h", days, hours)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{}m", mins)
+    }
 }
 
 // ── Menu event handler ──────────────────────────────────────
@@ -1541,7 +1791,10 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 }
                 busy_clear();
                 // Timed out. User-visible recovery path.
-                notify("Tytus", "Couldn't verify connection. Tap the tray for Help.");
+                notify(
+                    "Tytus",
+                    "Couldn't verify connection. Tap the tray for Help.",
+                );
                 show_connect_failure_help();
             });
             // Terminal window auto-closes on success via `exit` after
@@ -1568,7 +1821,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 use gateway_probe::probe_gateway;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 while std::time::Instant::now() < deadline {
-                    if !probe_gateway() { break; }
+                    if !probe_gateway() {
+                        break;
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
                 notify("Tytus", "Disconnected.");
@@ -1597,7 +1852,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             spawn_detached("tytus", &["daemon", "stop"]);
         }
         "daemon_restart" => {
-            let _ = std::process::Command::new("tytus").args(["daemon", "stop"]).status();
+            let _ = std::process::Command::new("tytus")
+                .args(["daemon", "stop"])
+                .status();
             std::thread::sleep(std::time::Duration::from_millis(500));
             spawn_detached("tytus", &["daemon", "run"]);
         }
@@ -1627,7 +1884,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             open_in_terminal_simple(cmd);
         }
         "install_app" => {
-            open_in_terminal_simple("tytus tray install; echo; echo 'Press Enter to close…'; read _");
+            open_in_terminal_simple(
+                "tytus tray install; echo; echo 'Press Enter to close…'; read _",
+            );
         }
         "copy_env" => {
             copy_connection_info(state);
@@ -1721,9 +1980,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             });
         }
         "docs" => {
-            let _ = std::process::Command::new("open")
-                .arg(DOCS_URL)
-                .status();
+            let _ = std::process::Command::new("open").arg(DOCS_URL).status();
         }
         "about" => {
             let version = env!("CARGO_PKG_VERSION");
@@ -1778,10 +2035,14 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             // which validates the token there. Falls back to the legacy
             // forwarder when either the edge URL or the gateway-token is
             // missing (old daemon, EDGE_PATH_ENABLED=0, mid-rollout).
-            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_open").to_string();
+            let pod_id = other
+                .trim_start_matches("pod_")
+                .trim_end_matches("_open")
+                .to_string();
             let public_ui = {
                 let s = state.lock().unwrap();
-                s.pods.iter()
+                s.pods
+                    .iter()
                     .find(|p| p.pod_id == pod_id)
                     .and_then(|p| p.public_ui_url())
             };
@@ -1799,10 +2060,14 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             // Copy the per-pod public API URL to clipboard for paste into
             // OpenAI-shaped client config (Cursor / Claude Desktop / SDKs).
             // Includes the trailing `/v1` so it's a drop-in OPENAI_BASE_URL.
-            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_copy_url").to_string();
+            let pod_id = other
+                .trim_start_matches("pod_")
+                .trim_end_matches("_copy_url")
+                .to_string();
             let url = {
                 let s = state.lock().unwrap();
-                s.pods.iter()
+                s.pods
+                    .iter()
                     .find(|p| p.pod_id == pod_id)
                     .and_then(|p| p.public_pod_url())
             };
@@ -1812,12 +2077,18 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                     copy_to_clipboard(&api_url);
                     notify("Tytus", &format!("Copied: {}", api_url));
                 }
-                None => notify("Tytus", "No public URL yet — refresh state with `tytus env`."),
+                None => notify(
+                    "Tytus",
+                    "No public URL yet — refresh state with `tytus env`.",
+                ),
             }
         }
         // Stop the per-pod forwarder daemon.
         other if other.starts_with("pod_") && other.ends_with("_stop_forwarder") => {
-            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_stop_forwarder").to_string();
+            let pod_id = other
+                .trim_start_matches("pod_")
+                .trim_end_matches("_stop_forwarder")
+                .to_string();
             // Run via CLI so we get the same marker cleanup + exit code path
             // that CLI users see. Detached — no Terminal window for this.
             spawn_detached("tytus", &["ui", "--stop", "--pod", &pod_id]);
@@ -1826,7 +2097,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // via /api/pod/restart and Phase B will stream output in-page;
         // the JS hash handler also confirms on the user's behalf.
         other if other.starts_with("pod_") && other.ends_with("_restart") => {
-            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_restart");
+            let pod_id = other
+                .trim_start_matches("pod_")
+                .trim_end_matches("_restart");
             web_server::open_tower_at(&format!("#/pod/{}/restart", pod_id));
         }
         // Destructive: frees units + wipes pod workspace. Tower confirms
@@ -1845,7 +2118,11 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // command skeleton so the user only needs to paste their token.
         // The command stays on screen after completion so the user can
         // see the success/failure message before the window closes.
-        other if other.starts_with("pod_") && other.contains("_channel_") && other.ends_with("_add") => {
+        other
+            if other.starts_with("pod_")
+                && other.contains("_channel_")
+                && other.ends_with("_add") =>
+        {
             if let Some(rest) = other.strip_prefix("pod_") {
                 if let Some(middle) = rest.strip_suffix("_add") {
                     // middle = "<pod>_channel_<type>"
@@ -1864,7 +2141,11 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // Remove a configured channel — clears keychain + manifest +
         // redeploys agent. Tower confirms before POSTing
         // /api/channels/remove and renders the result inline.
-        other if other.starts_with("pod_") && other.contains("_channel_") && other.ends_with("_remove") => {
+        other
+            if other.starts_with("pod_")
+                && other.contains("_channel_")
+                && other.ends_with("_remove") =>
+        {
             if let Some(rest) = other.strip_prefix("pod_") {
                 if let Some(middle) = rest.strip_suffix("_remove") {
                     if let Some((pod_id, channel)) = middle.split_once("_channel_") {
@@ -1879,7 +2160,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // Agent uninstall = stop container, keep pod slot (AIL still
         // works). Tower confirms before POSTing /api/pod/uninstall.
         other if other.starts_with("pod_") && other.ends_with("_uninstall") => {
-            let pod_id = other.trim_start_matches("pod_").trim_end_matches("_uninstall");
+            let pod_id = other
+                .trim_start_matches("pod_")
+                .trim_end_matches("_uninstall");
             web_server::open_tower_at(&format!("#/pod/{}/uninstall", pod_id));
         }
         // Primary install entry point — opens the localhost wizard in
@@ -1906,12 +2189,12 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // Install a specific agent via the terminal-picker fallback.
         "install_agent_nemoclaw" => {
             open_in_terminal_simple(
-                "tytus agent install nemoclaw; echo; echo 'Press Enter to close…'; read _"
+                "tytus agent install nemoclaw; echo; echo 'Press Enter to close…'; read _",
             );
         }
         "install_agent_hermes" => {
             open_in_terminal_simple(
-                "tytus agent install hermes; echo; echo 'Press Enter to close…'; read _"
+                "tytus agent install hermes; echo; echo 'Press Enter to close…'; read _",
             );
         }
         other if other.starts_with("launch_") => {
@@ -1949,7 +2232,10 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             shared_folders::open_binding_in_finder(&safe_name);
         }
         shared_folders::ID_REFRESH_ALL => {
-            notify("Tytus", "Running garagetytus-refresh-watchdog across every pod…");
+            notify(
+                "Tytus",
+                "Running garagetytus-refresh-watchdog across every pod…",
+            );
             shared_folders::spawn_refresh_all();
         }
         // garagetytus per-pod actions (parsed BEFORE files:: because
@@ -1964,8 +2250,12 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                         if let Some(bucket) = shared_folders::prompt_bucket_name(None) {
                             notify(
                                 "Tytus",
-                                &format!("Binding {} ↔ {} on pod-{}…",
-                                    short_basename(&path), bucket, pod_id),
+                                &format!(
+                                    "Binding {} ↔ {} on pod-{}…",
+                                    short_basename(&path),
+                                    bucket,
+                                    pod_id
+                                ),
                             );
                             shared_folders::spawn_bind_folder(&pod_id, &path, &bucket);
                         }
@@ -1983,13 +2273,19 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             match action {
                 files::FilesAction::PushFile => {
                     if let Some(path) = files::pick_path(files::PickerKind::File) {
-                        notify("Tytus", &format!("Pushing {} → pod-{}…", short_basename(&path), pod_id));
+                        notify(
+                            "Tytus",
+                            &format!("Pushing {} → pod-{}…", short_basename(&path), pod_id),
+                        );
                         files::spawn_push(&pod_id, &path);
                     }
                 }
                 files::FilesAction::PushFolder => {
                     if let Some(path) = files::pick_path(files::PickerKind::Folder) {
-                        notify("Tytus", &format!("Pushing {} → pod-{}…", short_basename(&path), pod_id));
+                        notify(
+                            "Tytus",
+                            &format!("Pushing {} → pod-{}…", short_basename(&path), pod_id),
+                        );
                         files::spawn_push(&pod_id, &path);
                     }
                 }
@@ -2024,7 +2320,9 @@ fn short_basename(path: &str) -> String {
 /// poll the marker for ~3s before launching the browser.
 fn open_pod_via_forwarder(pod_id: &str) {
     if let Some(existing_url) = existing_ui_forwarder(pod_id) {
-        let _ = std::process::Command::new("open").arg(&existing_url).spawn();
+        let _ = std::process::Command::new("open")
+            .arg(&existing_url)
+            .spawn();
         return;
     }
     spawn_detached_ui(pod_id);
@@ -2095,11 +2393,21 @@ pub(crate) fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
 /// actively routing packets.
 fn tunnel_reaches_pod(pod_id: &str) -> bool {
     let path = format!("/tmp/tytus/tunnel-{}.pid", pod_id);
-    let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => return false };
-    let pid: i32 = match raw.trim().parse() { Ok(p) => p, Err(_) => return false };
-    if pid <= 1 { return false; }
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let pid: i32 = match raw.trim().parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    if pid <= 1 {
+        return false;
+    }
     unsafe {
-        if libc::kill(pid, 0) == 0 { return true; }
+        if libc::kill(pid, 0) == 0 {
+            return true;
+        }
     }
     // libc::kill failed. Alive-but-EPERM means the daemon is running
     // under a different uid (root), which is the normal happy path.
@@ -2116,9 +2424,14 @@ fn spawn_detached_ui(pod_id: &str) {
     use std::process::Stdio;
     let log_path = format!("/tmp/tytus/ui-{}.log", pod_id);
     let log = std::fs::OpenOptions::new()
-        .create(true).append(true).open(&log_path);
+        .create(true)
+        .append(true)
+        .open(&log_path);
     let stdout: Stdio = match &log {
-        Ok(f) => Stdio::from(f.try_clone().unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap())),
+        Ok(f) => Stdio::from(
+            f.try_clone()
+                .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap()),
+        ),
         Err(_) => Stdio::null(),
     };
     let stderr: Stdio = match log {
@@ -2136,7 +2449,11 @@ fn spawn_detached_ui(pod_id: &str) {
 fn shell_escape(s: &str) -> String {
     let mut out = String::from("'");
     for c in s.chars() {
-        if c == '\'' { out.push_str("'\\''"); } else { out.push(c); }
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
     }
     out.push('\'');
     out
@@ -2177,8 +2494,7 @@ fn run_silent_with_notify<F>(
     action_label: &'static str,
     busy_label: &'static str,
     probe_outcome: F,
-)
-where
+) where
     F: Fn(bool) -> Result<String, String> + Send + 'static,
 {
     let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -2194,21 +2510,27 @@ where
     std::thread::spawn(move || {
         // Best-effort log capture. File failure is non-fatal — we
         // still want the notification at the end.
-        let log_path = std::env::var("HOME")
-            .ok()
-            .map(|h| {
-                let dir = std::path::PathBuf::from(h).join(".tytus/logs");
-                let _ = std::fs::create_dir_all(&dir);
-                dir.join(format!("{}.log", action_label.to_lowercase()))
-            });
+        let log_path = std::env::var("HOME").ok().map(|h| {
+            let dir = std::path::PathBuf::from(h).join(".tytus/logs");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join(format!("{}.log", action_label.to_lowercase()))
+        });
         let stdout: std::process::Stdio = match log_path.as_ref().and_then(|p| {
-            std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .ok()
         }) {
             Some(f) => std::process::Stdio::from(f),
             None => std::process::Stdio::null(),
         };
         let stderr: std::process::Stdio = match log_path.as_ref().and_then(|p| {
-            std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .ok()
         }) {
             Some(f) => std::process::Stdio::from(f),
             None => std::process::Stdio::null(),
@@ -2228,12 +2550,10 @@ where
         trigger_refresh();
 
         match status {
-            Ok(s) if s.success() => {
-                match probe_outcome(was_reachable_before) {
-                    Ok(msg) => notify("Tytus", &msg),
-                    Err(msg) => notify("Tytus", &msg),
-                }
-            }
+            Ok(s) if s.success() => match probe_outcome(was_reachable_before) {
+                Ok(msg) => notify("Tytus", &msg),
+                Err(msg) => notify("Tytus", &msg),
+            },
             Ok(s) => {
                 notify(
                     "Tytus",
@@ -2328,7 +2648,8 @@ fn show_connect_failure_help() {
         body.replace('"', "\\\"").replace('\n', "\\n"),
     );
     let out = std::process::Command::new("osascript")
-        .arg("-e").arg(script)
+        .arg("-e")
+        .arg(script)
         .output();
     let stdout = match out {
         Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
@@ -2358,7 +2679,10 @@ fn show_connect_failure_help() {
             }
             let _ = child.wait();
         }
-        notify("Tytus", "Diagnostic copied to clipboard — paste it when asking for help.");
+        notify(
+            "Tytus",
+            "Diagnostic copied to clipboard — paste it when asking for help.",
+        );
     }
 }
 
@@ -2390,29 +2714,40 @@ fn build_diag_summary() -> String {
     let _ = writeln!(s, "tunnel_iface_up: {}", tunnel_up);
 
     // Daemon status (from daemon socket, read-only).
-    let daemon = socket::send_raw_command("status").and_then(|v| {
-        let d = v.get("data")?.get("daemon")?;
-        let a = v.get("data")?.get("auth")?;
-        Some(format!(
-            "status={} uptime={}s logged_in={} tier={}",
-            d.get("status").and_then(|x| x.as_str()).unwrap_or("?"),
-            d.get("uptime_secs").and_then(|x| x.as_u64()).unwrap_or(0),
-            a.get("logged_in").and_then(|x| x.as_bool()).unwrap_or(false),
-            a.get("tier").and_then(|x| x.as_str()).unwrap_or("?"),
-        ))
-    }).unwrap_or_else(|| "daemon_unreachable".into());
+    let daemon = socket::send_raw_command("status")
+        .and_then(|v| {
+            let d = v.get("data")?.get("daemon")?;
+            let a = v.get("data")?.get("auth")?;
+            Some(format!(
+                "status={} uptime={}s logged_in={} tier={}",
+                d.get("status").and_then(|x| x.as_str()).unwrap_or("?"),
+                d.get("uptime_secs").and_then(|x| x.as_u64()).unwrap_or(0),
+                a.get("logged_in")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false),
+                a.get("tier").and_then(|x| x.as_str()).unwrap_or("?"),
+            ))
+        })
+        .unwrap_or_else(|| "daemon_unreachable".into());
     let _ = writeln!(s, "daemon: {}", daemon);
 
     // Pod list (no keys).
     if let Some(v) = socket::send_raw_command("status") {
-        if let Some(arr) = v.get("data").and_then(|d| d.get("pods")).and_then(|p| p.as_array()) {
-            let summary: Vec<String> = arr.iter().map(|p| {
-                format!(
-                    "{}/{}",
-                    p.get("pod_id").and_then(|x| x.as_str()).unwrap_or("?"),
-                    p.get("agent_type").and_then(|x| x.as_str()).unwrap_or("?"),
-                )
-            }).collect();
+        if let Some(arr) = v
+            .get("data")
+            .and_then(|d| d.get("pods"))
+            .and_then(|p| p.as_array())
+        {
+            let summary: Vec<String> = arr
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{}/{}",
+                        p.get("pod_id").and_then(|x| x.as_str()).unwrap_or("?"),
+                        p.get("agent_type").and_then(|x| x.as_str()).unwrap_or("?"),
+                    )
+                })
+                .collect();
             let _ = writeln!(s, "pods: {}", summary.join(", "));
         }
     }
@@ -2423,7 +2758,14 @@ fn build_diag_summary() -> String {
         .map(|h| std::path::PathBuf::from(h).join(".tytus/logs/connect.log"));
     if let Some(path) = log_path {
         if let Ok(raw) = std::fs::read_to_string(&path) {
-            let tail: Vec<&str> = raw.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail: Vec<&str> = raw
+                .lines()
+                .rev()
+                .take(10)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             let scan = tail.join("\n");
             let _ = writeln!(s, "--- connect.log (last {} lines) ---", tail.len());
             for line in &tail {
@@ -2497,7 +2839,10 @@ fn copy_to_clipboard(text: &str) {
     #[cfg(not(target_os = "macos"))]
     {
         use std::io::Write;
-        for (bin, args) in [("xclip", &["-selection", "clipboard"][..]), ("xsel", &["--clipboard", "--input"][..])] {
+        for (bin, args) in [
+            ("xclip", &["-selection", "clipboard"][..]),
+            ("xsel", &["--clipboard", "--input"][..]),
+        ] {
             if let Ok(mut child) = std::process::Command::new(bin)
                 .args(args)
                 .stdin(std::process::Stdio::piped())
@@ -2532,7 +2877,7 @@ fn copy_connection_info(state: &Arc<Mutex<TrayState>>) {
     // Anthropic's gateway path is /v1 too and its SDKs route calls to
     // {base}/v1/messages. We strip the trailing /v1 from AIL_URL when
     // setting ANTHROPIC_BASE_URL so the SDK doesn't double-append.
-    let ail_bare = url.as_str();  // e.g. http://10.42.42.1:18080 (no /v1)
+    let ail_bare = url.as_str(); // e.g. http://10.42.42.1:18080 (no /v1)
     let text = format!(
         "# AIL — your private AI gateway (canonical names)\n\
          export AIL_URL=\"{bare}/v1\"\n\
@@ -2573,7 +2918,10 @@ fn copy_connection_info(state: &Arc<Mutex<TrayState>>) {
     {
         // Best-effort: try xclip, then xsel.
         use std::io::Write;
-        for (bin, args) in [("xclip", &["-selection", "clipboard"][..]), ("xsel", &["--clipboard", "--input"][..])] {
+        for (bin, args) in [
+            ("xclip", &["-selection", "clipboard"][..]),
+            ("xsel", &["--clipboard", "--input"][..]),
+        ] {
             if let Ok(mut child) = std::process::Command::new(bin)
                 .args(args)
                 .stdin(std::process::Stdio::piped())
@@ -2600,15 +2948,11 @@ fn open_log_file(path: &str) {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open")
-            .arg(path)
-            .spawn();
+        let _ = std::process::Command::new("open").arg(path).spawn();
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn();
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
     }
 }
 
@@ -2652,14 +2996,9 @@ pub(crate) fn open_in_terminal_simple(cmd: &str) {
     }
 
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(
-        &script_path,
-        std::fs::Permissions::from_mode(0o700),
-    );
+    let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
 
-    let _ = std::process::Command::new("open")
-        .arg(&script_path)
-        .spawn();
+    let _ = std::process::Command::new("open").arg(&script_path).spawn();
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2689,10 +3028,12 @@ fn get_pod_connection(state: &Arc<Mutex<TrayState>>) -> Option<launcher::PodConn
     let pods = data.get("pods")?.as_array()?;
     let pod = pods.first()?;
 
-    let gateway = pod.get("stable_ai_endpoint")
+    let gateway = pod
+        .get("stable_ai_endpoint")
         .and_then(|v| v.as_str())
         .or_else(|| pod.get("ai_endpoint").and_then(|v| v.as_str()))?;
-    let key = pod.get("stable_user_key")
+    let key = pod
+        .get("stable_user_key")
         .and_then(|v| v.as_str())
         .or_else(|| pod.get("pod_api_key").and_then(|v| v.as_str()))
         .unwrap_or("sk-tytus");
@@ -2710,11 +3051,15 @@ mod scopeguard_lite {
         f: Option<F>,
     }
     impl<F: FnOnce()> OnDrop<F> {
-        pub fn new(f: F) -> Self { Self { f: Some(f) } }
+        pub fn new(f: F) -> Self {
+            Self { f: Some(f) }
+        }
     }
     impl<F: FnOnce()> Drop for OnDrop<F> {
         fn drop(&mut self) {
-            if let Some(f) = self.f.take() { f(); }
+            if let Some(f) = self.f.take() {
+                f();
+            }
         }
     }
 }

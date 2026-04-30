@@ -89,7 +89,7 @@ const PATTERNS: &[Pattern] = &[
     },
     Pattern {
         needles: &[
-            "tunnel up but",  // followed by "times out" / "timed out" in real errors
+            "tunnel up but", // followed by "times out" / "timed out" in real errors
             "gateway unreachable but tunnel active",
             "gateway timeout while tunnel active",
         ],
@@ -116,14 +116,21 @@ const PATTERNS: &[Pattern] = &[
         try_this: "Reopen the form and try again.",
     },
     Pattern {
-        needles: &["command not found", "tytus: command not found", "failed to launch tytus"],
+        needles: &[
+            "command not found",
+            "tytus: command not found",
+            "failed to launch tytus",
+        ],
         title: "Tytus not installed",
         body: "The tytus CLI isn't on your PATH.",
         try_this: "Run the installer: curl -fsSL https://get.traylinx.com/install.sh | bash",
     },
     Pattern {
         needles: &[
-            "http 500", "http 502", "http 503", "http 504",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
             "internal server error",
             "5xx response from gateway",
         ],
@@ -150,21 +157,35 @@ const PATTERNS: &[Pattern] = &[
         try_this: "Quit Tytus, restart your Mac, then relaunch.",
     },
     Pattern {
-        needles: &["network unreachable", "enetunreach", "no route to host", "dns failure", "dns failed"],
+        needles: &[
+            "network unreachable",
+            "enetunreach",
+            "no route to host",
+            "dns failure",
+            "dns failed",
+        ],
         title: "Computer is offline",
         body: "Your Mac can't reach the network.",
         try_this: "Reconnect to Wi-Fi and try again.",
     },
     Pattern {
-        needles: &["bucket already exists", "bucketalreadyownedbyyou", "conflict on bucket"],
+        needles: &[
+            "bucket already exists",
+            "bucketalreadyownedbyyou",
+            "conflict on bucket",
+        ],
         title: "Folder name taken",
         body: "A shared folder with that name already exists.",
         try_this: "Pick a different name.",
     },
     Pattern {
         needles: &[
-            "bucket name invalid", "bucket name too short", "bucket name too long",
-            "folder name invalid", "folder name too short", "folder name too long",
+            "bucket name invalid",
+            "bucket name too short",
+            "bucket name too long",
+            "folder name invalid",
+            "folder name too short",
+            "folder name too long",
             "invalid bucket name",
         ],
         title: "Invalid folder name",
@@ -178,25 +199,42 @@ const PATTERNS: &[Pattern] = &[
         try_this: "Empty the Trash or delete large files.",
     },
     Pattern {
-        needles: &["wireguard not installed", "wireguard not found", "wg-quick: not found"],
+        needles: &[
+            "wireguard not installed",
+            "wireguard not found",
+            "wg-quick: not found",
+        ],
         title: "Tytus needs WireGuard",
         body: "The WireGuard tools aren't installed.",
         try_this: "brew install wireguard-tools",
     },
     Pattern {
-        needles: &["revoke would orphan", "would lose data", "unsynced bindings"],
+        needles: &[
+            "revoke would orphan",
+            "would lose data",
+            "unsynced bindings",
+        ],
         title: "Workspace has unsaved files",
         body: "Revoking would lose unsaved files.",
         try_this: "tytus pull <pod> first, then revoke.",
     },
     Pattern {
-        needles: &["token expired", "refresh token invalid", "sentinel 401", "sentinel: 401"],
+        needles: &[
+            "token expired",
+            "refresh token invalid",
+            "sentinel 401",
+            "sentinel: 401",
+        ],
         title: "Sign-in expired",
         body: "Your Tytus account session ran out.",
         try_this: "tytus login",
     },
     Pattern {
-        needles: &["not logged in", "sentinel unauthorized", "sentinel: unauthorized"],
+        needles: &[
+            "not logged in",
+            "sentinel unauthorized",
+            "sentinel: unauthorized",
+        ],
         title: "Not signed in",
         body: "You're not signed in to Tytus.",
         try_this: "tytus login",

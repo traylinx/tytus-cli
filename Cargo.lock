@@ -173,6 +173,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3457,6 +3458,7 @@ name = "tytus-mcp"
 version = "0.6.0"
 dependencies = [
  "atomek-auth",
+ "atomek-cli",
  "atomek-core",
  "atomek-pods",
  "chrono",
@@ -3473,6 +3475,7 @@ dependencies = [
 name = "tytus-tray"
 version = "0.6.0"
 dependencies = [
+ "atomek-auth",
  "atomek-core",
  "atomek-pods",
  "dirs",

@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use crate::client::TytusClient;
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct PodStatus {
@@ -25,5 +25,7 @@ pub struct PodEntry {
 
 pub async fn get_pod_status(client: &TytusClient) -> atomek_core::Result<PodStatus> {
     let resp = client.get_with_retry("/pod/status").await?;
-    resp.json().await.map_err(|e| atomek_core::AtomekError::Other(format!("Failed to parse pod status: {}", e)))
+    resp.json()
+        .await
+        .map_err(|e| atomek_core::AtomekError::Other(format!("Failed to parse pod status: {}", e)))
 }

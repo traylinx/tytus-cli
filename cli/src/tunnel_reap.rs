@@ -22,6 +22,7 @@
 //
 // Sprint: docs/sprints/SPRINT-TYTUS-PAYING-CUSTOMER-READY.md (FIX-2, FIX-3)
 
+use crate::tunnel_pidfile;
 use std::path::PathBuf;
 
 /// Outcome of attempting to reap the tunnel daemon for a pod.
@@ -49,7 +50,10 @@ impl ReapOutcome {
                 format!("  (cleaned stale pidfile, pid={} was already dead)", pid)
             }
             ReapOutcome::ReapFailed { pid, reason } => {
-                format!("  (WARNING: tunnel daemon pid={} still alive: {})", pid, reason)
+                format!(
+                    "  (WARNING: tunnel daemon pid={} still alive: {})",
+                    pid, reason
+                )
             }
             ReapOutcome::NoPidfile => String::new(),
         }
@@ -213,9 +217,13 @@ fn find_orphan_tunnel_daemon(pod_num: &str) -> Option<i32> {
         .args(["-ax", "-o", "pid=,command="])
         .output()
         .ok()?;
-    if !output.status.success() { return None; }
+    if !output.status.success() {
+        return None;
+    }
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if !line.contains(&needle) { continue; }
+        if !line.contains(&needle) {
+            continue;
+        }
         // Line begins with whitespace + pid + space + command
         let trimmed = line.trim_start();
         let pid_str: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -241,9 +249,13 @@ fn find_orphan_tunnel_daemon(pod_num: &str) -> Option<i32> {
 /// process that refuses to die.
 fn reap_duplicates_for_pod(pod_num: &str) {
     for _ in 0..5 {
-        let Some(dup_pid) = find_orphan_tunnel_daemon(pod_num) else { return; };
+        let Some(dup_pid) = find_orphan_tunnel_daemon(pod_num) else {
+            return;
+        };
         let path = pidfile_path(pod_num);
-        if std::fs::write(&path, format!("{}", dup_pid)).is_err() { return; }
+        if tunnel_pidfile::write_legacy(&path, dup_pid).is_err() {
+            return;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -255,7 +267,9 @@ fn reap_duplicates_for_pod(pod_num: &str) {
         }
         // Give it a beat to exit before we scan again.
         for _ in 0..10 {
-            if !pid_is_alive(dup_pid) { break; }
+            if !pid_is_alive(dup_pid) {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         cleanup_files(pod_num);
@@ -264,15 +278,29 @@ fn reap_duplicates_for_pod(pod_num: &str) {
 
 fn read_pid_from_file(pod_num: &str) -> Option<i32> {
     let path = pidfile_path(pod_num);
-    let contents = std::fs::read_to_string(&path).ok()?;
-    let trimmed = contents.trim();
-    if trimmed.is_empty() {
-        return None;
+    tunnel_pidfile::read(&path).map(|p| p.pid)
+}
+
+pub fn pidfile_owner_matches(pod_num: &str, email: &str) -> bool {
+    let path = pidfile_path(pod_num);
+    tunnel_pidfile::read(&path)
+        .as_ref()
+        .is_some_and(|meta| tunnel_pidfile::owner_matches(meta, email))
+}
+
+pub fn list_owned_pod_pidfiles(email: &str) -> Vec<(String, PathBuf)> {
+    list_pod_pidfiles()
+        .into_iter()
+        .filter(|(pod, _)| pidfile_owner_matches(pod, email))
+        .collect()
+}
+
+pub fn reap_tunnel_for_pod_owned(pod_num: &str, email: &str) -> ReapOutcome {
+    let path = pidfile_path(pod_num);
+    if path.exists() && !pidfile_owner_matches(pod_num, email) {
+        return ReapOutcome::NoPidfile;
     }
-    if !trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    trimmed.parse::<i32>().ok()
+    reap_tunnel_for_pod(pod_num)
 }
 
 /// List every `tunnel-*.pid` file under the configured base directory.
@@ -314,13 +342,23 @@ pub fn list_orphan_tunnel_pods() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let output = match std::process::Command::new("ps")
         .args(["-ax", "-o", "command="])
-        .output() { Ok(o) => o, Err(_) => return out };
-    if !output.status.success() { return out; }
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return out,
+    };
+    if !output.status.success() {
+        return out;
+    }
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         // Look for ".../tunnel-<pod>.json" in the argv. Skip the sudo
         // wrapper line — we only want the actual tytus tunnel-up child.
-        if line.contains("sudo") { continue; }
-        if !line.contains("tytus tunnel-up") { continue; }
+        if line.contains("sudo") {
+            continue;
+        }
+        if !line.contains("tytus tunnel-up") {
+            continue;
+        }
         if let Some(start) = line.find("/tmp/tytus/tunnel-") {
             let rest = &line[start + "/tmp/tytus/tunnel-".len()..];
             if let Some(end) = rest.find(".json") {
@@ -395,7 +433,10 @@ pub fn reap_tunnel_for_pod(pod_num: &str) -> ReapOutcome {
     if !is_safe_pod_num(pod_num) {
         return ReapOutcome::ReapFailed {
             pid: 0,
-            reason: format!("unsafe pod_num {:?} rejected before filesystem touch", pod_num),
+            reason: format!(
+                "unsafe pod_num {:?} rejected before filesystem touch",
+                pod_num
+            ),
         };
     }
 
@@ -416,11 +457,12 @@ pub fn reap_tunnel_for_pod(pod_num: &str) -> ReapOutcome {
                 // the user and the root helper can read — same convention
                 // as the cmd_tunnel_up post-fix permissions.
                 let path = pidfile_path(pod_num);
-                if std::fs::write(&path, format!("{}", orphan_pid)).is_ok() {
+                if tunnel_pidfile::write_legacy(&path, orphan_pid).is_ok() {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+                        let _ =
+                            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
                     }
                     orphan_pid
                 } else {
@@ -482,7 +524,10 @@ pub fn reap_tunnel_for_pod(pod_num: &str) -> ReapOutcome {
                 cleanup_files(pod_num);
                 ReapOutcome::Reaped { pid: pid as u32 }
             } else {
-                ReapOutcome::ReapFailed { pid: pid as u32, reason }
+                ReapOutcome::ReapFailed {
+                    pid: pid as u32,
+                    reason,
+                }
             }
         }
     }
@@ -501,10 +546,7 @@ mod tests {
     fn init_test_base_dir() {
         static ONCE: OnceLock<()> = OnceLock::new();
         ONCE.get_or_init(|| {
-            let dir = std::env::temp_dir().join(format!(
-                "tytus-reap-test-{}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir().join(format!("tytus-reap-test-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             // set_var is process-global; we do this exactly once, before
             // any reap_tunnel_for_pod call, and only inside `#[cfg(test)]`.
@@ -615,7 +657,10 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
             match reap_tunnel_for_pod(&pod) {
                 ReapOutcome::NoPidfile => {}
-                other => panic!("expected NoPidfile for {} {:?}, got {:?}", tag, contents, other),
+                other => panic!(
+                    "expected NoPidfile for {} {:?}, got {:?}",
+                    tag, contents, other
+                ),
             }
             assert!(!path.exists(), "{} pidfile should be cleaned up", tag);
         }

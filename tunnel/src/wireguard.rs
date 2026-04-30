@@ -29,22 +29,32 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
     // 1. Parse keys from base64
     let private_key = parse_static_secret(&config.private_key, "PrivateKey")?;
     let peer_public_key = parse_public_key(&config.peer_public_key, "PublicKey")?;
-    let preshared_key: Option<[u8; 32]> = config.preshared_key.as_ref()
+    let preshared_key: Option<[u8; 32]> = config
+        .preshared_key
+        .as_ref()
         .map(|k| parse_key_bytes(k, "PresharedKey"))
         .transpose()?;
 
     // 2. Parse network config
-    let local_ip = config.address.split('/').next()
+    let local_ip = config
+        .address
+        .split('/')
+        .next()
         .ok_or_else(|| AtomekError::Other("Invalid address format".into()))?
         .to_string();
-    let cidr: u8 = config.address.split('/').nth(1)
+    let cidr: u8 = config
+        .address
+        .split('/')
+        .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(24);
 
     // Compute peer WG IP (typically the .1 of the subnet) for point-to-point destination
     // Parse the DNS field if available (it's set to the server's tunnel IP in our configs),
     // otherwise derive from the subnet (first IP of allowed_ips).
-    let peer_wg_ip = config.dns.clone()
+    let peer_wg_ip = config
+        .dns
+        .clone()
         .or_else(|| {
             config.allowed_ips.split(',').next().and_then(|cidr_str| {
                 let net = cidr_str.trim().split('/').next()?;
@@ -59,8 +69,9 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
         })
         .unwrap_or_else(|| local_ip.clone());
 
-    let endpoint: SocketAddr = config.endpoint.parse()
-        .map_err(|e| AtomekError::Other(format!("Invalid endpoint '{}': {}", config.endpoint, e)))?;
+    let endpoint: SocketAddr = config.endpoint.parse().map_err(|e| {
+        AtomekError::Other(format!("Invalid endpoint '{}': {}", config.endpoint, e))
+    })?;
 
     tracing::info!(
         local_ip = %local_ip,
@@ -71,7 +82,8 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
 
     // 3. Create TUN device
     let mut tun_config = tun::Configuration::default();
-    tun_config.address(&local_ip)
+    tun_config
+        .address(&local_ip)
         .netmask(cidr_to_netmask(cidr))
         .destination(&peer_wg_ip) // point-to-point peer (server's tunnel IP)
         .mtu(1420) // WireGuard standard MTU
@@ -96,12 +108,17 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
             if msg.contains("permission") || msg.contains("Operation not permitted") {
                 return Err(AtomekError::PrivilegesRequired);
             } else {
-                return Err(AtomekError::Tunnel(format!("Failed to create TUN device: {}", msg)));
+                return Err(AtomekError::Tunnel(format!(
+                    "Failed to create TUN device: {}",
+                    msg
+                )));
             }
         }
     };
 
-    let interface_name = tun_device.as_ref().tun_name()
+    let interface_name = tun_device
+        .as_ref()
+        .tun_name()
         .map_err(|e| AtomekError::Tunnel(format!("Failed to get TUN name: {}", e)))?
         .to_string();
 
@@ -113,7 +130,15 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
     #[cfg(target_os = "macos")]
     {
         let status = std::process::Command::new("/sbin/ifconfig")
-            .args([&interface_name, "inet", &local_ip, &peer_wg_ip, "netmask", "255.255.255.255", "up"])
+            .args([
+                &interface_name,
+                "inet",
+                &local_ip,
+                &peer_wg_ip,
+                "netmask",
+                "255.255.255.255",
+                "up",
+            ])
             .output();
         match status {
             Ok(o) if o.status.success() => {
@@ -140,7 +165,14 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
         #[cfg(target_os = "macos")]
         {
             let output = std::process::Command::new("/sbin/route")
-                .args(["-n", "add", "-net", &format!("{}/{}", network, cidr_bits), "-interface", &interface_name])
+                .args([
+                    "-n",
+                    "add",
+                    "-net",
+                    &format!("{}/{}", network, cidr_bits),
+                    "-interface",
+                    &interface_name,
+                ])
                 .output();
             match output {
                 Ok(o) if o.status.success() => tracing::info!("Route added: {}", allowed_ip),
@@ -171,7 +203,8 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
     // 4. Create UDP socket for WireGuard traffic
     let std_socket = StdUdpSocket::bind("0.0.0.0:0")
         .map_err(|e| AtomekError::Tunnel(format!("Failed to bind UDP socket: {}", e)))?;
-    std_socket.set_nonblocking(true)
+    std_socket
+        .set_nonblocking(true)
         .map_err(|e| AtomekError::Tunnel(format!("Failed to set non-blocking: {}", e)))?;
 
     let udp_socket = UdpSocket::from_std(std_socket)
@@ -191,7 +224,10 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
     // is cheap on the wire (one empty packet every 25s per peer).
     // See sprint doc: docs/sprints/SPRINT-TYTUS-PAYING-CUSTOMER-READY.md FIX-1.
     if let Some(k) = config.persistent_keepalive {
-        tracing::debug!("Server-provided PersistentKeepalive={}s overridden to 25s", k);
+        tracing::debug!(
+            "Server-provided PersistentKeepalive={}s overridden to 25s",
+            k
+        );
     }
     let keepalive: Option<u16> = Some(25);
 
@@ -200,7 +236,7 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
         peer_public_key,
         preshared_key,
         keepalive,
-        0, // index — single peer, always 0
+        0,    // index — single peer, always 0
         None, // rate limiter
     );
 
@@ -219,7 +255,9 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
         }
     };
     if let Some(data) = handshake_data {
-        udp_socket.send_to(&data, endpoint).await
+        udp_socket
+            .send_to(&data, endpoint)
+            .await
             .map_err(|e| AtomekError::Tunnel(format!("Failed to send handshake: {}", e)))?;
         tracing::info!("Handshake initiation sent to {}", endpoint);
     }
@@ -266,9 +304,7 @@ async fn packet_loop(
     let mut udp_buf = vec![0u8; MAX_PACKET];
     let mut out_buf = vec![0u8; MAX_PACKET];
 
-    let mut timer_interval = tokio::time::interval(
-        std::time::Duration::from_millis(TIMER_TICK_MS)
-    );
+    let mut timer_interval = tokio::time::interval(std::time::Duration::from_millis(TIMER_TICK_MS));
 
     let mut handshake_complete = false;
 
@@ -447,11 +483,16 @@ async fn packet_loop(
 
 fn parse_key_bytes(b64: &str, name: &str) -> Result<[u8; 32], AtomekError> {
     use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(b64.trim())
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
         .map_err(|e| AtomekError::Other(format!("Invalid {} base64: {}", name, e)))?;
 
     if bytes.len() != 32 {
-        return Err(AtomekError::Other(format!("{} must be 32 bytes, got {}", name, bytes.len())));
+        return Err(AtomekError::Other(format!(
+            "{} must be 32 bytes, got {}",
+            name,
+            bytes.len()
+        )));
     }
 
     let mut arr = [0u8; 32];
@@ -470,12 +511,16 @@ fn parse_public_key(b64: &str, name: &str) -> Result<x25519_dalek::PublicKey, At
 }
 
 fn cidr_to_netmask(cidr: u8) -> String {
-    let mask: u32 = if cidr >= 32 { 0xFFFFFFFF } else { !((1u32 << (32 - cidr)) - 1) };
-    format!("{}.{}.{}.{}",
+    let mask: u32 = if cidr >= 32 {
+        0xFFFFFFFF
+    } else {
+        !((1u32 << (32 - cidr)) - 1)
+    };
+    format!(
+        "{}.{}.{}.{}",
         (mask >> 24) & 0xFF,
         (mask >> 16) & 0xFF,
         (mask >> 8) & 0xFF,
         mask & 0xFF,
     )
 }
-

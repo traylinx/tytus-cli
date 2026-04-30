@@ -31,10 +31,7 @@ use std::sync::OnceLock;
 fn init_base_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "tytus-reap-it-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("tytus-reap-it-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Single-shot initialisation inside an integration test binary.
         std::env::set_var("TYTUS_TUNNEL_REAP_DIR", &dir);
@@ -98,8 +95,12 @@ fn revoke_reaps_stale_pidfile_and_clears_state() {
     write_ifacefile(&pod, "utun99");
 
     let mut pods = vec![
-        FakePodEntry { pod_id: pod.clone() },
-        FakePodEntry { pod_id: "99".into() },
+        FakePodEntry {
+            pod_id: pod.clone(),
+        },
+        FakePodEntry {
+            pod_id: "99".into(),
+        },
     ];
 
     // Step 1: reap
@@ -129,7 +130,9 @@ fn revoke_is_noop_when_no_pidfile() {
     let _ = std::fs::remove_file(pidfile(&pod));
     let _ = std::fs::remove_file(ifacefile(&pod));
 
-    let mut pods = vec![FakePodEntry { pod_id: pod.clone() }];
+    let mut pods = vec![FakePodEntry {
+        pod_id: pod.clone(),
+    }];
 
     let outcome = tunnel_reap::reap_tunnel_for_pod(&pod);
     assert!(matches!(outcome, tunnel_reap::ReapOutcome::NoPidfile));

@@ -35,10 +35,7 @@ use atomek_cli::tunnel_reap::{
 /// Runs exactly once per test binary — `std::env::set_var` is global.
 fn init_base_dir() -> PathBuf {
     static ONCE: Once = Once::new();
-    let dir = std::env::temp_dir().join(format!(
-        "tytus-reap-inttest-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("tytus-reap-inttest-{}", std::process::id()));
     ONCE.call_once(|| {
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("TYTUS_TUNNEL_REAP_DIR", &dir);
@@ -333,4 +330,45 @@ fn disconnect_message_exact_wording_matches_sprint_spec() {
     assert!(failed.starts_with("✗ Reap failed for pod 02"));
     assert!(failed.contains("pid 5569"));
     assert!(failed.contains("sudo"));
+}
+
+#[test]
+fn account_switch_ignores_tunnel_pidfile_with_mismatched_owner() {
+    let tmp = init_base_dir();
+    let pod = unique_pod("ff");
+    let pidfile = tmp.join(format!("tunnel-{}.pid", pod));
+    atomek_cli::tunnel_pidfile::write(&pidfile, 999_999, "a@example.com", &pod, Some("utun9"))
+        .unwrap();
+    assert!(!atomek_cli::tunnel_reap::pidfile_owner_matches(
+        &pod,
+        "b@example.com"
+    ));
+    let outcome = atomek_cli::tunnel_reap::reap_tunnel_for_pod_owned(&pod, "b@example.com");
+    assert!(matches!(
+        outcome,
+        atomek_cli::tunnel_reap::ReapOutcome::NoPidfile
+    ));
+    assert!(
+        pidfile.exists(),
+        "foreign pidfile must not be killed or removed"
+    );
+}
+
+#[test]
+fn account_switch_preserves_tunnel_pidfiles_with_matching_owner() {
+    let tmp = init_base_dir();
+    let pod = unique_pod("fo");
+    let pidfile = tmp.join(format!("tunnel-{}.pid", pod));
+    atomek_cli::tunnel_pidfile::write(&pidfile, 999_999, "a@example.com", &pod, Some("utun9"))
+        .unwrap();
+    assert!(atomek_cli::tunnel_reap::pidfile_owner_matches(
+        &pod,
+        "A@EXAMPLE.COM"
+    ));
+    let outcome = atomek_cli::tunnel_reap::reap_tunnel_for_pod_owned(&pod, "a@example.com");
+    assert!(matches!(
+        outcome,
+        atomek_cli::tunnel_reap::ReapOutcome::StalePidfile { .. }
+    ));
+    assert!(!pidfile.exists(), "owned stale pidfile should be cleaned");
 }

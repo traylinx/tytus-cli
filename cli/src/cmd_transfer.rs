@@ -14,9 +14,9 @@ use base64::Engine as _;
 
 use crate::state::CliState;
 use crate::transfer::{
-    append_transfer_log, enforce_size_ceiling, resolve_pod, resolve_push_destination,
-    shell_escape, validate_pod_path, TransferError, TransferEvent, CHUNK_PAYLOAD_BYTES,
-    POD_INBOX, PROGRESS_THRESHOLD_BYTES,
+    append_transfer_log, enforce_size_ceiling, resolve_pod, resolve_push_destination, shell_escape,
+    validate_pod_path, TransferError, TransferEvent, CHUNK_PAYLOAD_BYTES, POD_INBOX,
+    PROGRESS_THRESHOLD_BYTES,
 };
 
 // ── Shared auth bootstrap (matches cmd_exec pattern) ────────
@@ -87,8 +87,16 @@ pub async fn cmd_push(
 ) {
     let local_path = PathBuf::from(&local);
     if !local_path.exists() {
-        log_and_exit("push", "?", to.as_deref().unwrap_or(POD_INBOX), Some(&local),
-            0, false, &format!("local path does not exist: {}", local), json);
+        log_and_exit(
+            "push",
+            "?",
+            to.as_deref().unwrap_or(POD_INBOX),
+            Some(&local),
+            0,
+            false,
+            &format!("local path does not exist: {}", local),
+            json,
+        );
     }
 
     let Some((state, client)) = bootstrap_client(http).await else {
@@ -96,8 +104,16 @@ pub async fn cmd_push(
     };
     let pod_id = match resolve_pod(pod.as_deref(), &state) {
         Ok(p) => p,
-        Err(e) => log_and_exit("push", "?", to.as_deref().unwrap_or(POD_INBOX), Some(&local),
-            0, false, &e.to_string(), json),
+        Err(e) => log_and_exit(
+            "push",
+            "?",
+            to.as_deref().unwrap_or(POD_INBOX),
+            Some(&local),
+            0,
+            false,
+            &e.to_string(),
+            json,
+        ),
     };
 
     // If directory, pack to a local tarball and treat it as file
@@ -108,34 +124,74 @@ pub async fn cmd_push(
             Ok(p) => {
                 let dest_root = match resolve_dir_push_destination(&local_path, to.as_deref()) {
                     Ok(d) => d,
-                    Err(e) => log_and_exit("push", &pod_id, to.as_deref().unwrap_or(POD_INBOX),
-                        Some(&local), 0, false, &e.to_string(), json),
+                    Err(e) => log_and_exit(
+                        "push",
+                        &pod_id,
+                        to.as_deref().unwrap_or(POD_INBOX),
+                        Some(&local),
+                        0,
+                        false,
+                        &e.to_string(),
+                        json,
+                    ),
                 };
                 (p, true, dest_root)
             }
-            Err(e) => log_and_exit("push", &pod_id, to.as_deref().unwrap_or(POD_INBOX),
-                Some(&local), 0, false, &format!("tar pack failed: {}", e), json),
+            Err(e) => log_and_exit(
+                "push",
+                &pod_id,
+                to.as_deref().unwrap_or(POD_INBOX),
+                Some(&local),
+                0,
+                false,
+                &format!("tar pack failed: {}", e),
+                json,
+            ),
         }
     } else {
         let dest = match resolve_push_destination(&local_path, to.as_deref()) {
             Ok(d) => d,
-            Err(e) => log_and_exit("push", &pod_id, to.as_deref().unwrap_or(POD_INBOX),
-                Some(&local), 0, false, &e.to_string(), json),
+            Err(e) => log_and_exit(
+                "push",
+                &pod_id,
+                to.as_deref().unwrap_or(POD_INBOX),
+                Some(&local),
+                0,
+                false,
+                &e.to_string(),
+                json,
+            ),
         };
         (local_path.clone(), false, dest)
     };
 
     let size = match std::fs::metadata(&payload_path).map(|m| m.len()) {
         Ok(s) => s,
-        Err(e) => log_and_exit("push", &pod_id, &remote_dest, Some(&local), 0, false,
-            &format!("stat failed: {}", e), json),
+        Err(e) => log_and_exit(
+            "push",
+            &pod_id,
+            &remote_dest,
+            Some(&local),
+            0,
+            false,
+            &format!("stat failed: {}", e),
+            json,
+        ),
     };
     if let Err(e) = enforce_size_ceiling(size) {
         if payload_cleanup {
             let _ = std::fs::remove_file(&payload_path);
         }
-        log_and_exit("push", &pod_id, &remote_dest, Some(&local), size, false,
-            &e.to_string(), json);
+        log_and_exit(
+            "push",
+            &pod_id,
+            &remote_dest,
+            Some(&local),
+            size,
+            false,
+            &e.to_string(),
+            json,
+        );
     }
 
     // Perform the chunked upload.
@@ -143,16 +199,34 @@ pub async fn cmd_push(
     let remote_tmp = format!("/app/workspace/.tytus-push-{}.b64", nonce);
     let pb = make_progress(size, quiet);
 
-    let upload_result = upload_chunked(&client, &pod_id, &payload_path, &remote_tmp, pb.as_ref()).await;
-    if let Some(ref p) = pb { p.finish_and_clear(); }
+    let upload_result =
+        upload_chunked(&client, &pod_id, &payload_path, &remote_tmp, pb.as_ref()).await;
+    if let Some(ref p) = pb {
+        p.finish_and_clear();
+    }
 
     if payload_cleanup {
         let _ = std::fs::remove_file(&payload_path);
     }
 
     if let Err(e) = upload_result {
-        let _ = pod_exec(&client, &pod_id, &format!("rm -f {}", shell_escape(&remote_tmp)), 30).await;
-        log_and_exit("push", &pod_id, &remote_dest, Some(&local), size, false, &e, json);
+        let _ = pod_exec(
+            &client,
+            &pod_id,
+            &format!("rm -f {}", shell_escape(&remote_tmp)),
+            30,
+        )
+        .await;
+        log_and_exit(
+            "push",
+            &pod_id,
+            &remote_dest,
+            Some(&local),
+            size,
+            false,
+            &e,
+            json,
+        );
     }
 
     // Finalise: decode + (if dir) untar.
@@ -175,15 +249,27 @@ pub async fn cmd_push(
     match pod_exec(&client, &pod_id, &finalise_cmd, 120).await {
         Ok(r) if r.exit_code == 0 => {
             let _ = append_transfer_log(&TransferEvent::now(
-                "push", &pod_id, &remote_dest, Some(&local), size, true, None,
+                "push",
+                &pod_id,
+                &remote_dest,
+                Some(&local),
+                size,
+                true,
+                None,
             ));
             if json {
-                println!("{}", serde_json::json!({
-                    "ok": true, "verb": "push", "pod": pod_id,
-                    "remote": remote_dest, "size_bytes": size,
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true, "verb": "push", "pod": pod_id,
+                        "remote": remote_dest, "size_bytes": size,
+                    })
+                );
             } else {
-                eprintln!("pushed {} → pod-{}:{} ({} bytes)", local, pod_id, remote_dest, size);
+                eprintln!(
+                    "pushed {} → pod-{}:{} ({} bytes)",
+                    local, pod_id, remote_dest, size
+                );
             }
         }
         Ok(r) => {
@@ -193,9 +279,27 @@ pub async fn cmd_push(
                 r.stderr.clone().unwrap_or_default(),
                 r.stdout.clone().unwrap_or_default(),
             );
-            log_and_exit("push", &pod_id, &remote_dest, Some(&local), size, false, &err, json);
+            log_and_exit(
+                "push",
+                &pod_id,
+                &remote_dest,
+                Some(&local),
+                size,
+                false,
+                &err,
+                json,
+            );
         }
-        Err(e) => log_and_exit("push", &pod_id, &remote_dest, Some(&local), size, false, &e, json),
+        Err(e) => log_and_exit(
+            "push",
+            &pod_id,
+            &remote_dest,
+            Some(&local),
+            size,
+            false,
+            &e,
+            json,
+        ),
     }
 }
 
@@ -212,7 +316,9 @@ async fn upload_chunked(
     let mut first = true;
     loop {
         let n = f.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         let b64 = engine.encode(&buf[..n]);
         let redirect = if first { ">" } else { ">>" };
         let cmd = format!(
@@ -229,7 +335,9 @@ async fn upload_chunked(
                 r.stderr.unwrap_or_default(),
             ));
         }
-        if let Some(p) = pb { p.inc(n as u64); }
+        if let Some(p) = pb {
+            p.inc(n as u64);
+        }
         first = false;
     }
     Ok(())
@@ -237,7 +345,8 @@ async fn upload_chunked(
 
 fn pack_dir_to_tarball(dir: &Path) -> std::io::Result<PathBuf> {
     let parent = dir.parent().unwrap_or(Path::new("."));
-    let name = dir.file_name()
+    let name = dir
+        .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad dir name"))?;
     let tmp = tempfile::Builder::new()
@@ -248,7 +357,10 @@ fn pack_dir_to_tarball(dir: &Path) -> std::io::Result<PathBuf> {
     // Persist the tempfile so we can re-open it for reading
     // after tar writes to it. NamedTempFile::into_path consumes
     // the guard (caller must delete later).
-    let _ = tmp.into_temp_path().keep().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let _ = tmp
+        .into_temp_path()
+        .keep()
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     let status = std::process::Command::new("tar")
         .arg("czf")
@@ -259,10 +371,7 @@ fn pack_dir_to_tarball(dir: &Path) -> std::io::Result<PathBuf> {
         .status()?;
     if !status.success() {
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("tar exited with {}", status),
-        ));
+        return Err(std::io::Error::other(format!("tar exited with {}", status)));
     }
     Ok(tmp_path)
 }
@@ -335,13 +444,29 @@ pub async fn cmd_pull(
     );
     let kind = match pod_exec(&client, &pod_id, &stat_cmd, 30).await {
         Ok(r) if r.exit_code == 0 => r.stdout.unwrap_or_default().trim().to_string(),
-        Ok(r) => log_and_exit("pull", &pod_id, &remote, None, 0, false,
-            &format!("stat failed: {}", r.stderr.unwrap_or_default()), json),
+        Ok(r) => log_and_exit(
+            "pull",
+            &pod_id,
+            &remote,
+            None,
+            0,
+            false,
+            &format!("stat failed: {}", r.stderr.unwrap_or_default()),
+            json,
+        ),
         Err(e) => log_and_exit("pull", &pod_id, &remote, None, 0, false, &e, json),
     };
     if kind == "missing" {
-        log_and_exit("pull", &pod_id, &remote, None, 0, false,
-            &format!("remote path does not exist: {}", remote), json);
+        log_and_exit(
+            "pull",
+            &pod_id,
+            &remote,
+            None,
+            0,
+            false,
+            &format!("remote path does not exist: {}", remote),
+            json,
+        );
     }
     let is_dir = kind == "dir";
 
@@ -350,7 +475,11 @@ pub async fn cmd_pull(
     let remote_tmp = format!("/app/workspace/.tytus-pull-{}.b64", nonce);
     let pack_cmd = if is_dir {
         let parent = parent_dir(&remote);
-        let name = remote.trim_end_matches('/').rsplit('/').next().unwrap_or(".");
+        let name = remote
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(".");
         format!(
             "tar cz -C {par} {name} | base64 > {tmp}",
             par = shell_escape(&parent),
@@ -365,7 +494,13 @@ pub async fn cmd_pull(
         )
     };
     if let Err(e) = run_ok(&client, &pod_id, &pack_cmd, 300).await {
-        let _ = pod_exec(&client, &pod_id, &format!("rm -f {}", shell_escape(&remote_tmp)), 30).await;
+        let _ = pod_exec(
+            &client,
+            &pod_id,
+            &format!("rm -f {}", shell_escape(&remote_tmp)),
+            30,
+        )
+        .await;
         log_and_exit("pull", &pod_id, &remote, None, 0, false, &e, json);
     }
 
@@ -377,8 +512,23 @@ pub async fn cmd_pull(
     };
     let raw_estimate = (b64_bytes / 4) * 3;
     if let Err(e) = enforce_size_ceiling(raw_estimate) {
-        let _ = pod_exec(&client, &pod_id, &format!("rm -f {}", shell_escape(&remote_tmp)), 30).await;
-        log_and_exit("pull", &pod_id, &remote, None, raw_estimate, false, &e.to_string(), json);
+        let _ = pod_exec(
+            &client,
+            &pod_id,
+            &format!("rm -f {}", shell_escape(&remote_tmp)),
+            30,
+        )
+        .await;
+        log_and_exit(
+            "pull",
+            &pod_id,
+            &remote,
+            None,
+            raw_estimate,
+            false,
+            &e.to_string(),
+            json,
+        );
     }
 
     // Step 3: read chunks with dd (base64 block-size = 4, so
@@ -399,14 +549,26 @@ pub async fn cmd_pull(
     // then untar. For file, decode straight to target.
     let mut tmp_local: Option<tempfile::NamedTempFile> = None;
     let mut out_file: Box<dyn Write> = if is_dir {
-        let nt = tempfile::Builder::new().prefix("tytus-pull-").suffix(".tgz").tempfile().unwrap();
+        let nt = tempfile::Builder::new()
+            .prefix("tytus-pull-")
+            .suffix(".tgz")
+            .tempfile()
+            .unwrap();
         let f = nt.reopen().unwrap();
         tmp_local = Some(nt);
         Box::new(f)
     } else {
         Box::new(std::fs::File::create(&local_target).unwrap_or_else(|e| {
-            log_and_exit("pull", &pod_id, &remote, Some(&local_target.display().to_string()),
-                raw_estimate, false, &format!("create local: {}", e), json);
+            log_and_exit(
+                "pull",
+                &pod_id,
+                &remote,
+                Some(&local_target.display().to_string()),
+                raw_estimate,
+                false,
+                &format!("create local: {}", e),
+                json,
+            );
         }))
     };
 
@@ -420,14 +582,47 @@ pub async fn cmd_pull(
         let r = match pod_exec(&client, &pod_id, &cmd, 120).await {
             Ok(r) => r,
             Err(e) => {
-                let _ = pod_exec(&client, &pod_id, &format!("rm -f {}", shell_escape(&remote_tmp)), 30).await;
-                log_and_exit("pull", &pod_id, &remote, None, raw_estimate, false, &e, json);
+                let _ = pod_exec(
+                    &client,
+                    &pod_id,
+                    &format!("rm -f {}", shell_escape(&remote_tmp)),
+                    30,
+                )
+                .await;
+                log_and_exit(
+                    "pull",
+                    &pod_id,
+                    &remote,
+                    None,
+                    raw_estimate,
+                    false,
+                    &e,
+                    json,
+                );
             }
         };
         if r.exit_code != 0 {
-            let _ = pod_exec(&client, &pod_id, &format!("rm -f {}", shell_escape(&remote_tmp)), 30).await;
-            log_and_exit("pull", &pod_id, &remote, None, raw_estimate, false,
-                &format!("chunk read failed (exit {}): {}", r.exit_code, r.stderr.unwrap_or_default()), json);
+            let _ = pod_exec(
+                &client,
+                &pod_id,
+                &format!("rm -f {}", shell_escape(&remote_tmp)),
+                30,
+            )
+            .await;
+            log_and_exit(
+                "pull",
+                &pod_id,
+                &remote,
+                None,
+                raw_estimate,
+                false,
+                &format!(
+                    "chunk read failed (exit {}): {}",
+                    r.exit_code,
+                    r.stderr.unwrap_or_default()
+                ),
+                json,
+            );
         }
         let stdout = r.stdout.unwrap_or_default();
         // Strip whitespace (base64 may wrap); decode sees raw b64 only.
@@ -435,19 +630,52 @@ pub async fn cmd_pull(
         let decoded = match engine.decode(compact.as_bytes()) {
             Ok(d) => d,
             Err(e) => {
-                let _ = pod_exec(&client, &pod_id, &format!("rm -f {}", shell_escape(&remote_tmp)), 30).await;
-                log_and_exit("pull", &pod_id, &remote, None, raw_estimate, false,
-                    &format!("base64 decode: {}", e), json);
+                let _ = pod_exec(
+                    &client,
+                    &pod_id,
+                    &format!("rm -f {}", shell_escape(&remote_tmp)),
+                    30,
+                )
+                .await;
+                log_and_exit(
+                    "pull",
+                    &pod_id,
+                    &remote,
+                    None,
+                    raw_estimate,
+                    false,
+                    &format!("base64 decode: {}", e),
+                    json,
+                );
             }
         };
         if let Err(e) = out_file.write_all(&decoded) {
-            let _ = pod_exec(&client, &pod_id, &format!("rm -f {}", shell_escape(&remote_tmp)), 30).await;
-            log_and_exit("pull", &pod_id, &remote, None, raw_estimate, false, &format!("local write: {}", e), json);
+            let _ = pod_exec(
+                &client,
+                &pod_id,
+                &format!("rm -f {}", shell_escape(&remote_tmp)),
+                30,
+            )
+            .await;
+            log_and_exit(
+                "pull",
+                &pod_id,
+                &remote,
+                None,
+                raw_estimate,
+                false,
+                &format!("local write: {}", e),
+                json,
+            );
         }
-        if let Some(ref p) = pb { p.inc(decoded.len() as u64); }
+        if let Some(ref p) = pb {
+            p.inc(decoded.len() as u64);
+        }
     }
     drop(out_file);
-    if let Some(ref p) = pb { p.finish_and_clear(); }
+    if let Some(ref p) = pb {
+        p.finish_and_clear();
+    }
 
     // Untar if directory.
     if is_dir {
@@ -463,33 +691,81 @@ pub async fn cmd_pull(
         match status {
             Ok(s) if s.success() => {}
             Ok(s) => {
-                let _ = pod_exec(&client, &pod_id, &format!("rm -f {}", shell_escape(&remote_tmp)), 30).await;
-                log_and_exit("pull", &pod_id, &remote, Some(&local_target.display().to_string()),
-                    raw_estimate, false, &format!("local tar xzf exited {}", s), json);
+                let _ = pod_exec(
+                    &client,
+                    &pod_id,
+                    &format!("rm -f {}", shell_escape(&remote_tmp)),
+                    30,
+                )
+                .await;
+                log_and_exit(
+                    "pull",
+                    &pod_id,
+                    &remote,
+                    Some(&local_target.display().to_string()),
+                    raw_estimate,
+                    false,
+                    &format!("local tar xzf exited {}", s),
+                    json,
+                );
             }
             Err(e) => {
-                let _ = pod_exec(&client, &pod_id, &format!("rm -f {}", shell_escape(&remote_tmp)), 30).await;
-                log_and_exit("pull", &pod_id, &remote, Some(&local_target.display().to_string()),
-                    raw_estimate, false, &format!("local tar: {}", e), json);
+                let _ = pod_exec(
+                    &client,
+                    &pod_id,
+                    &format!("rm -f {}", shell_escape(&remote_tmp)),
+                    30,
+                )
+                .await;
+                log_and_exit(
+                    "pull",
+                    &pod_id,
+                    &remote,
+                    Some(&local_target.display().to_string()),
+                    raw_estimate,
+                    false,
+                    &format!("local tar: {}", e),
+                    json,
+                );
             }
         }
     }
 
     // Cleanup remote tmp.
-    let _ = pod_exec(&client, &pod_id, &format!("rm -f {}", shell_escape(&remote_tmp)), 30).await;
+    let _ = pod_exec(
+        &client,
+        &pod_id,
+        &format!("rm -f {}", shell_escape(&remote_tmp)),
+        30,
+    )
+    .await;
 
     let _ = append_transfer_log(&TransferEvent::now(
-        "pull", &pod_id, &remote, Some(&local_target.display().to_string()),
-        raw_estimate, true, None,
+        "pull",
+        &pod_id,
+        &remote,
+        Some(&local_target.display().to_string()),
+        raw_estimate,
+        true,
+        None,
     ));
 
     if json {
-        println!("{}", serde_json::json!({
-            "ok": true, "verb": "pull", "pod": pod_id,
-            "remote": remote, "local": local_target, "size_bytes": raw_estimate,
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true, "verb": "pull", "pod": pod_id,
+                "remote": remote, "local": local_target, "size_bytes": raw_estimate,
+            })
+        );
     } else {
-        eprintln!("pulled pod-{}:{} → {} (~{} bytes)", pod_id, remote, local_target.display(), raw_estimate);
+        eprintln!(
+            "pulled pod-{}:{} → {} (~{} bytes)",
+            pod_id,
+            remote,
+            local_target.display(),
+            raw_estimate
+        );
     }
 }
 
@@ -555,7 +831,10 @@ pub async fn cmd_ls(
     };
     let pod_id = match resolve_pod(pod.as_deref(), &state) {
         Ok(p) => p,
-        Err(e) => { eprintln!("tytus ls: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("tytus ls: {}", e);
+            std::process::exit(1);
+        }
     };
 
     // Use a machine-parseable format: mode|size|mtime-epoch|name
@@ -588,11 +867,14 @@ pub async fn cmd_ls(
                     .filter(|l| !l.trim().is_empty())
                     .filter_map(parse_stat_line)
                     .collect();
-                println!("{}", serde_json::json!({
-                    "pod": pod_id, "path": target, "entries": entries,
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "pod": pod_id, "path": target, "entries": entries,
+                    })
+                );
             } else {
-                println!("{:<6} {:>10} {:<25} {}", "mode", "size", "mtime", "name");
+                println!("{:<6} {:>10} {:<25} name", "mode", "size", "mtime");
                 for line in out.lines() {
                     if let Some(v) = parse_stat_line(line) {
                         println!(
@@ -609,10 +891,17 @@ pub async fn cmd_ls(
             }
         }
         Ok(r) => {
-            eprintln!("tytus ls: pod returned non-zero ({}): {}", r.exit_code, r.stderr.unwrap_or_default());
+            eprintln!(
+                "tytus ls: pod returned non-zero ({}): {}",
+                r.exit_code,
+                r.stderr.unwrap_or_default()
+            );
             std::process::exit(1);
         }
-        Err(e) => { eprintln!("tytus ls: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("tytus ls: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
@@ -662,17 +951,41 @@ pub async fn cmd_rm(
     );
     let kind = match pod_exec(&client, &pod_id, &kind_cmd, 30).await {
         Ok(r) if r.exit_code == 0 => r.stdout.unwrap_or_default().trim().to_string(),
-        Ok(r) => log_and_exit("rm", &pod_id, &remote, None, 0, false,
-            &format!("stat failed: {}", r.stderr.unwrap_or_default()), json),
+        Ok(r) => log_and_exit(
+            "rm",
+            &pod_id,
+            &remote,
+            None,
+            0,
+            false,
+            &format!("stat failed: {}", r.stderr.unwrap_or_default()),
+            json,
+        ),
         Err(e) => log_and_exit("rm", &pod_id, &remote, None, 0, false, &e, json),
     };
     if kind == "missing" {
-        log_and_exit("rm", &pod_id, &remote, None, 0, false,
-            &format!("no such path: {}", remote), json);
+        log_and_exit(
+            "rm",
+            &pod_id,
+            &remote,
+            None,
+            0,
+            false,
+            &format!("no such path: {}", remote),
+            json,
+        );
     }
     if kind == "dir" && !recursive {
-        log_and_exit("rm", &pod_id, &remote, None, 0, false,
-            "refusing to remove directory without --recursive", json);
+        log_and_exit(
+            "rm",
+            &pod_id,
+            &remote,
+            None,
+            0,
+            false,
+            "refusing to remove directory without --recursive",
+            json,
+        );
     }
 
     let cmd = if recursive {
@@ -687,15 +1000,22 @@ pub async fn cmd_rm(
                 "rm", &pod_id, &remote, None, 0, true, None,
             ));
             if json {
-                println!("{}", serde_json::json!({
-                    "ok": true, "verb": "rm", "pod": pod_id, "remote": remote,
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true, "verb": "rm", "pod": pod_id, "remote": remote,
+                    })
+                );
             } else {
                 eprintln!("removed pod-{}:{}", pod_id, remote);
             }
         }
         Ok(r) => {
-            let err = format!("rm failed (exit {}): {}", r.exit_code, r.stderr.unwrap_or_default());
+            let err = format!(
+                "rm failed (exit {}): {}",
+                r.exit_code,
+                r.stderr.unwrap_or_default()
+            );
             log_and_exit("rm", &pod_id, &remote, None, 0, false, &err, json);
         }
         Err(e) => log_and_exit("rm", &pod_id, &remote, None, 0, false, &e, json),
@@ -707,13 +1027,19 @@ pub async fn cmd_rm(
 pub async fn cmd_transfers(tail: usize, pod_filter: Option<String>, json: bool) {
     let path = crate::transfer::transfer_log_path();
     if !path.exists() {
-        if json { println!("[]"); }
-        else    { eprintln!("no transfers logged yet (log: {})", path.display()); }
+        if json {
+            println!("[]");
+        } else {
+            eprintln!("no transfers logged yet (log: {})", path.display());
+        }
         return;
     }
     let contents = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(e) => { eprintln!("tytus transfers: read {}: {}", path.display(), e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("tytus transfers: read {}: {}", path.display(), e);
+            std::process::exit(1);
+        }
     };
 
     let mut rows: Vec<TransferEvent> = contents
@@ -737,7 +1063,10 @@ pub async fn cmd_transfers(tail: usize, pod_filter: Option<String>, json: bool) 
             println!("{}", serde_json::to_string(r).unwrap_or_default());
         }
     } else {
-        println!("{:<26} {:<5} {:<3} {:<10} {:<8} {}", "ts", "verb", "pod", "size", "ok", "remote");
+        println!(
+            "{:<26} {:<5} {:<3} {:<10} {:<8} remote",
+            "ts", "verb", "pod", "size", "ok"
+        );
         for r in &rows {
             println!(
                 "{:<26} {:<5} {:<3} {:<10} {:<8} {}",
@@ -761,6 +1090,7 @@ pub async fn cmd_transfers(tail: usize, pod_filter: Option<String>, json: bool) 
 
 /// Log failure to the transfer audit log and exit with non-zero.
 /// `!` return so it can replace the bail-out arm of a match.
+#[allow(clippy::too_many_arguments)] // Audit event shape mirrors transfer fields; struct would add churn for no behavior gain.
 fn log_and_exit(
     verb: &str,
     pod: &str,
@@ -772,12 +1102,21 @@ fn log_and_exit(
     json: bool,
 ) -> ! {
     let _ = append_transfer_log(&TransferEvent::now(
-        verb, pod, remote, local, size, ok, Some(reason),
+        verb,
+        pod,
+        remote,
+        local,
+        size,
+        ok,
+        Some(reason),
     ));
     if json {
-        println!("{}", serde_json::json!({
-            "ok": false, "verb": verb, "pod": pod, "remote": remote, "error": reason,
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": false, "verb": verb, "pod": pod, "remote": remote, "error": reason,
+            })
+        );
     } else {
         eprintln!("tytus {}: {}", verb, reason);
     }
@@ -793,7 +1132,10 @@ mod tests {
 
     #[test]
     fn parent_dir_extracts_correctly() {
-        assert_eq!(parent_dir("/app/workspace/inbox/foo.pdf"), "/app/workspace/inbox");
+        assert_eq!(
+            parent_dir("/app/workspace/inbox/foo.pdf"),
+            "/app/workspace/inbox"
+        );
         assert_eq!(parent_dir("/app/workspace/foo.pdf"), "/app/workspace");
         assert_eq!(parent_dir("/foo"), "/");
     }

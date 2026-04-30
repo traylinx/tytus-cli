@@ -18,19 +18,18 @@
 
 use std::path::PathBuf;
 
-/// Local staging dir for pulls — mirrors what the CLI uses when
-/// the user pulls from the tray. `~/Downloads/tytus/pod-NN/`.
+/// Local staging dir for pulls. New user-visible home is
+/// `~/Tytus/Downloads/pod-NN/`. The old `~/Downloads/tytus/pod-NN/`
+/// is left untouched for compatibility.
+#[allow(dead_code)]
 pub fn download_dir_for_pod(pod_id: &str) -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join("Downloads").join("tytus").join(format!("pod-{}", pod_id))
+    crate::workspace::download_dir_for_pod(pod_id)
 }
 
 /// Ensure the per-pod download dir exists. Best-effort; ignored
 /// if filesystem refuses.
 pub fn ensure_download_dir(pod_id: &str) -> PathBuf {
-    let path = download_dir_for_pod(pod_id);
-    let _ = std::fs::create_dir_all(&path);
-    path
+    crate::workspace::ensure_download_dir_for_pod(pod_id)
 }
 
 // ── osascript file/folder picker ─────────────────────────────
@@ -62,7 +61,11 @@ pub fn pick_path(kind: PickerKind) -> Option<String> {
         return None;
     }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() { None } else { Some(path) }
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -143,12 +146,14 @@ pub fn spawn_push(pod_id: &str, local_path: &str) {
             }
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr).to_string();
-                let trimmed: String = err.lines().last().unwrap_or("push failed").chars().take(120).collect();
-                notify_transfer(
-                    "Tytus push failed",
-                    &trimmed,
-                    None,
-                );
+                let trimmed: String = err
+                    .lines()
+                    .last()
+                    .unwrap_or("push failed")
+                    .chars()
+                    .take(120)
+                    .collect();
+                notify_transfer("Tytus push failed", &trimmed, None);
             }
             Err(e) => {
                 notify_transfer("Tytus push error", &e.to_string(), None);
@@ -158,7 +163,7 @@ pub fn spawn_push(pod_id: &str, local_path: &str) {
 }
 
 /// Kick off a pull from the tray. Pulls into
-/// `~/Downloads/tytus/pod-NN/` and reveals in Finder on success.
+/// `~/Tytus/Downloads/pod-NN/` and reveals in Finder on success.
 /// Currently used indirectly via the CLI; kept pub for the future
 /// SwiftUI list-view panel (Phase 2 follow-up).
 #[allow(dead_code)]
@@ -191,7 +196,13 @@ pub fn spawn_pull(pod_id: &str, remote_path: &str) {
             }
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr).to_string();
-                let trimmed: String = err.lines().last().unwrap_or("pull failed").chars().take(120).collect();
+                let trimmed: String = err
+                    .lines()
+                    .last()
+                    .unwrap_or("pull failed")
+                    .chars()
+                    .take(120)
+                    .collect();
                 notify_transfer("Tytus pull failed", &trimmed, None);
             }
             Err(e) => {
@@ -264,7 +275,7 @@ mod tests {
     #[test]
     fn download_dir_includes_pod_id() {
         let p = download_dir_for_pod("02");
-        assert!(p.to_string_lossy().contains("tytus"));
+        assert!(p.to_string_lossy().contains("Tytus"));
         assert!(p.to_string_lossy().ends_with("pod-02"));
     }
 

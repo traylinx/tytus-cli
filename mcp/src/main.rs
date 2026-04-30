@@ -45,10 +45,20 @@ struct JsonRpcError {
 
 impl JsonRpcResponse {
     fn success(id: Value, result: Value) -> Self {
-        Self { jsonrpc: "2.0".into(), id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0".into(),
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
     fn error(id: Value, code: i64, message: String) -> Self {
-        Self { jsonrpc: "2.0".into(), id, result: None, error: Some(JsonRpcError { code, message }) }
+        Self {
+            jsonrpc: "2.0".into(),
+            id,
+            result: None,
+            error: Some(JsonRpcError { code, message }),
+        }
     }
 }
 
@@ -79,13 +89,19 @@ struct ContentBlock {
 impl ToolResult {
     fn text(s: String) -> Self {
         Self {
-            content: vec![ContentBlock { content_type: "text".into(), text: s }],
+            content: vec![ContentBlock {
+                content_type: "text".into(),
+                text: s,
+            }],
             is_error: None,
         }
     }
     fn error(s: String) -> Self {
         Self {
-            content: vec![ContentBlock { content_type: "text".into(), text: s }],
+            content: vec![ContentBlock {
+                content_type: "text".into(),
+                text: s,
+            }],
             is_error: Some(true),
         }
     }
@@ -228,14 +244,15 @@ async fn main() {
             Ok(l) => l,
             Err(_) => break,
         };
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
 
         let req: JsonRpcRequest = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                let resp = JsonRpcResponse::error(
-                    Value::Null, -32700, format!("Parse error: {}", e),
-                );
+                let resp =
+                    JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {}", e));
                 write_response(&stdout, &resp);
                 continue;
             }
@@ -251,6 +268,23 @@ async fn main() {
     }
 }
 
+fn pinned_account_error() -> Option<String> {
+    let pinned = std::env::var("TYTUS_PINNED_ACCOUNT_EMAIL").ok()?;
+    let state = state::CliState::load_file_only();
+    let active = state.active_email.clone().or(state.email.clone());
+    let matches = active
+        .as_ref()
+        .is_some_and(|a| a.trim().eq_ignore_ascii_case(pinned.trim()));
+    if matches {
+        return None;
+    }
+    let active_text = active.unwrap_or_else(|| "<none>".into());
+    Some(format!(
+        "Tytus MCP is pinned to {} but active account is {}. Run: tytus account switch {}. Or regenerate config: tytus mcp --account {}",
+        pinned, active_text, pinned, active_text
+    ))
+}
+
 fn write_response(stdout: &io::Stdout, resp: &JsonRpcResponse) {
     let mut handle = stdout.lock();
     let _ = serde_json::to_writer(&mut handle, resp);
@@ -259,19 +293,22 @@ fn write_response(stdout: &io::Stdout, resp: &JsonRpcResponse) {
 }
 
 async fn handle_request(req: JsonRpcRequest) -> Result<Value, String> {
-    match req.method.as_str() {
-        "initialize" => {
-            Ok(serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {}
-                },
-                "serverInfo": {
-                    "name": SERVER_NAME,
-                    "version": SERVER_VERSION
-                }
-            }))
+    if req.method != "notifications/initialized" {
+        if let Some(err) = pinned_account_error() {
+            return Err(err);
         }
+    }
+    match req.method.as_str() {
+        "initialize" => Ok(serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {}
+            },
+            "serverInfo": {
+                "name": SERVER_NAME,
+                "version": SERVER_VERSION
+            }
+        })),
         "notifications/initialized" => {
             // Client acknowledged init — no response needed for notifications
             Ok(Value::Null)
@@ -282,11 +319,13 @@ async fn handle_request(req: JsonRpcRequest) -> Result<Value, String> {
         }
         "tools/call" => {
             let params = req.params.unwrap_or(Value::Null);
-            let tool_name = params.get("name")
+            let tool_name = params
+                .get("name")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing tool name")?
                 .to_string();
-            let arguments = params.get("arguments")
+            let arguments = params
+                .get("arguments")
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
 
@@ -295,5 +334,61 @@ async fn handle_request(req: JsonRpcRequest) -> Result<Value, String> {
         }
         "ping" => Ok(serde_json::json!({})),
         _ => Err(format!("Unknown method: {}", req.method)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_state(active: &str, f: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "tytus-mcp-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "schema_version": 2,
+                "active_email": active,
+                "accounts": [{"email": active}],
+                "email": active,
+                "pods": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("TYTUS_STATE_PATH", &path);
+        f();
+        std::env::remove_var("TYTUS_STATE_PATH");
+        std::env::remove_var("TYTUS_PINNED_ACCOUNT_EMAIL");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pinned_account_matches_active_succeeds_and_mismatch_errors() {
+        with_state("active@example.com", || {
+            std::env::set_var("TYTUS_PINNED_ACCOUNT_EMAIL", "ACTIVE@example.com");
+            assert!(pinned_account_error().is_none());
+            std::env::set_var("TYTUS_PINNED_ACCOUNT_EMAIL", "other@example.com");
+            let err = pinned_account_error().unwrap();
+            assert!(err.contains("pinned to other@example.com"));
+            assert!(err.contains("active account is active@example.com"));
+        });
+    }
+
+    #[test]
+    fn unpinned_uses_active() {
+        with_state("active@example.com", || {
+            std::env::remove_var("TYTUS_PINNED_ACCOUNT_EMAIL");
+            assert!(pinned_account_error().is_none());
+        });
     }
 }

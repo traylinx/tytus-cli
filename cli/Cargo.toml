@@ -40,6 +40,7 @@ crossterm.workspace = true
 # pipeline — we emit raw RGBA buffers and let macOS' `sips` resize them.
 png = "0.17"
 base64.workspace = true
+sha2.workspace = true
 keyring.workspace = true
 thiserror = "2"
 tempfile = "3"

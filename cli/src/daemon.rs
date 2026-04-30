@@ -43,10 +43,20 @@ pub struct Response {
 
 impl Response {
     fn ok(data: serde_json::Value) -> Self {
-        Self { status: "ok".into(), data: Some(data), error: None, code: None }
+        Self {
+            status: "ok".into(),
+            data: Some(data),
+            error: None,
+            code: None,
+        }
     }
     fn err(code: &str, msg: impl Into<String>) -> Self {
-        Self { status: "error".into(), data: None, error: Some(msg.into()), code: Some(code.into()) }
+        Self {
+            status: "error".into(),
+            data: None,
+            error: Some(msg.into()),
+            code: Some(code.into()),
+        }
     }
 }
 
@@ -100,6 +110,54 @@ pub fn pid_path() -> PathBuf {
     PathBuf::from(SOCKET_DIR).join(PID_FILE)
 }
 
+pub fn pid_file_pid() -> Option<i32> {
+    std::fs::read_to_string(pid_path())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+pub fn process_alive(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    (unsafe { libc::kill(pid, 0) == 0 })
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+pub fn pid_is_tytus_daemon(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output();
+    #[cfg(not(target_os = "macos"))]
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let cmd = String::from_utf8_lossy(&output.stdout);
+    cmd.contains("tytus") && cmd.contains("daemon") && cmd.contains("run")
+}
+
+pub fn daemon_pid_is_fresh(max_age: std::time::Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(pid_path()) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    modified.elapsed().is_ok_and(|age| age < max_age)
+}
+
 /// Remove PID files whose recorded PID is no longer a live process.
 /// Targets `daemon.pid`, `tray.pid`, and `tunnel-*.pid` in SOCKET_DIR.
 /// Safe to call at startup — the daemon hasn't written its own pidfile
@@ -118,7 +176,9 @@ fn sweep_stale_pids(dir: &Path) {
         let is_pidfile = name == "daemon.pid"
             || name == "tray.pid"
             || (name.starts_with("tunnel-") && name.ends_with(".pid"));
-        if !is_pidfile { continue; }
+        if !is_pidfile {
+            continue;
+        }
 
         let pid = match std::fs::read_to_string(&path)
             .ok()
@@ -138,7 +198,11 @@ fn sweep_stale_pids(dir: &Path) {
         let alive = unsafe { libc::kill(pid, 0) } == 0
             || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
         if !alive {
-            tracing::info!("sweeping stale pidfile {:?} (pid {} dead)", path.file_name(), pid);
+            tracing::info!(
+                "sweeping stale pidfile {:?} (pid {} dead)",
+                path.file_name(),
+                pid
+            );
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -162,6 +226,14 @@ pub async fn is_daemon_running() -> bool {
 // ── Daemon main loop ────────────────────────────────────────
 
 pub async fn run_daemon() {
+    let maintenance = CliState::state_path()
+        .parent()
+        .map(|p| p.join("account-switch.in-progress"));
+    if maintenance.as_ref().is_some_and(|p| p.exists()) {
+        eprintln!("tytus: daemon start deferred during account switch");
+        return;
+    }
+
     let sock_dir = Path::new(SOCKET_DIR);
     let _ = std::fs::create_dir_all(sock_dir);
     // Security: tighten /tmp/tytus/ to owner-only. See PENTEST finding E5.
@@ -241,7 +313,11 @@ pub async fn run_daemon() {
     // Shutdown signal: watch channel (false = running, true = shutting down)
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    tracing::info!("tytus-daemon started (pid {}), listening on {}", std::process::id(), sock.display());
+    tracing::info!(
+        "tytus-daemon started (pid {}), listening on {}",
+        std::process::id(),
+        sock.display()
+    );
     eprintln!("tytus-daemon running (pid {})", std::process::id());
 
     // Spawn token refresh background task
@@ -280,9 +356,8 @@ pub async fn run_daemon() {
     // Spawn SIGTERM/SIGINT handler
     let signal_tx = shutdown_tx.clone();
     tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ).expect("Failed to register SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to register SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Daemon received SIGINT — shutting down");
@@ -341,7 +416,9 @@ async fn handle_connection(
 
     while let Some(line) = lines.next_line().await? {
         let line = line.trim().to_string();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         let req: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
@@ -360,7 +437,9 @@ async fn handle_connection(
         buf.push(b'\n');
         writer.write_all(&buf).await?;
 
-        if is_shutdown { break; }
+        if is_shutdown {
+            break;
+        }
     }
 
     Ok(())
@@ -408,7 +487,9 @@ async fn dispatch_command(
                 // API call, so don't leave the tray displaying "Sign
                 // In…" when we plainly have credentials.
                 if ds.cli_state.is_logged_in() && ds.daemon_status == DaemonStatus::NeedsLogin {
-                    tracing::info!("Status poll: state.json shows fresh credentials, clearing NeedsLogin");
+                    tracing::info!(
+                        "Status poll: state.json shows fresh credentials, clearing NeedsLogin"
+                    );
                     ds.daemon_status = DaemonStatus::Running;
                 }
             }
@@ -421,34 +502,39 @@ async fn dispatch_command(
             // no droplet identifiers. The CLI already redacts the same way in
             // print_*_status; the daemon must not leak more than the CLI does.
             // See docs/PENTEST-RESULTS-2026-04-12.md finding E4.
-            let pods: Vec<_> = ds.cli_state.pods.iter().map(|p| {
-                serde_json::json!({
-                    "pod_id": p.pod_id,
-                    "agent_type": p.agent_type,
-                    "tunnel_iface": p.tunnel_iface,
-                    "stable_ai_endpoint": p.stable_ai_endpoint,
-                    "stable_user_key": p.stable_user_key,
-                    // Phase 4: edge URL fields. The slug + public_url come
-                    // from /pod/user-key on Provider when EDGE_PATH_ENABLED=1.
-                    // The tray uses these to skip the localhost forwarder
-                    // and open the public URL directly.
-                    "edge_slug": p.edge_slug,
-                    "edge_public_url": p.edge_public_url,
-                    // Phase 2.6: per-pod OpenClaw gateway-token. Lets the
-                    // tray construct `https://<slug>.tytus.../p/NN/?token=…`
-                    // for the web UI — loads at LB speed instead of crawling
-                    // through the WG tunnel. Edge accepts ?token= as
-                    // alternative auth on non-/v1 paths (Bearer still
-                    // required for /v1).
-                    "gateway_token": p.gateway_token,
-                    // Sprint 2026-04-23: per-pod subdomain URL.
-                    // `https://<slug>-p<NN>.tytus.traylinx.com` — each pod
-                    // is its own browser origin so the OpenClaw SPA's
-                    // localStorage doesn't collide across pods. Tray
-                    // prefers this over the legacy /p/NN composition.
-                    "pod_public_url": p.pod_public_url,
+            let pods: Vec<_> = ds
+                .cli_state
+                .pods
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "pod_id": p.pod_id,
+                        "agent_type": p.agent_type,
+                        "tunnel_iface": p.tunnel_iface,
+                        "stable_ai_endpoint": p.stable_ai_endpoint,
+                        "stable_user_key": p.stable_user_key,
+                        // Phase 4: edge URL fields. The slug + public_url come
+                        // from /pod/user-key on Provider when EDGE_PATH_ENABLED=1.
+                        // The tray uses these to skip the localhost forwarder
+                        // and open the public URL directly.
+                        "edge_slug": p.edge_slug,
+                        "edge_public_url": p.edge_public_url,
+                        // Phase 2.6: per-pod OpenClaw gateway-token. Lets the
+                        // tray construct `https://<slug>.tytus.../p/NN/?token=…`
+                        // for the web UI — loads at LB speed instead of crawling
+                        // through the WG tunnel. Edge accepts ?token= as
+                        // alternative auth on non-/v1 paths (Bearer still
+                        // required for /v1).
+                        "gateway_token": p.gateway_token,
+                        // Sprint 2026-04-23: per-pod subdomain URL.
+                        // `https://<slug>-p<NN>.tytus.traylinx.com` — each pod
+                        // is its own browser origin so the OpenClaw SPA's
+                        // localStorage doesn't collide across pods. Tray
+                        // prefers this over the legacy /p/NN composition.
+                        "pod_public_url": p.pod_public_url,
+                    })
                 })
-            }).collect();
+                .collect();
             let last_refresh = ds.last_refresh.map(|t| t.elapsed().as_secs());
 
             Response::ok(serde_json::json!({
@@ -507,10 +593,7 @@ const REFRESH_TICK: std::time::Duration = std::time::Duration::from_secs(1800); 
 /// the daemon is to survive 24/7 across wakeups, Wi-Fi switches, VPN flaps.
 const BACKOFF_STEPS: &[u64] = &[60, 300, 900, 1800, 3600]; // 1m, 5m, 15m, 30m, 1h cap
 
-async fn token_refresh_loop(
-    ctx: std::sync::Arc<DaemonCtx>,
-    mut shutdown: watch::Receiver<bool>,
-) {
+async fn token_refresh_loop(ctx: std::sync::Arc<DaemonCtx>, mut shutdown: watch::Receiver<bool>) {
     // Warm-up: do a refresh 10s after startup so we prove the tokens work
     // (and rotate them) before the user next invokes the CLI. Without this,
     // a freshly-booted machine waits 30 min before the first refresh, which
@@ -612,7 +695,11 @@ async fn refresh_once(ctx: &std::sync::Arc<DaemonCtx>) -> RefreshOutcome {
     // surface an actionable warning instead of silently lying about the
     // user's login state.
     let email_present = ds.cli_state.email.as_ref().is_some_and(|e| !e.is_empty());
-    let rt_present = ds.cli_state.refresh_token.as_ref().is_some_and(|t| !t.is_empty());
+    let rt_present = ds
+        .cli_state
+        .refresh_token
+        .as_ref()
+        .is_some_and(|t| !t.is_empty());
     if email_present && !rt_present {
         if ds.keychain_healthy {
             tracing::warn!("Keychain refresh token unavailable — marking daemon degraded");
@@ -672,10 +759,7 @@ async fn refresh_once(ctx: &std::sync::Arc<DaemonCtx>) -> RefreshOutcome {
 /// consistent with on-disk truth within ~0.5s of any CLI write, without
 /// waiting for the 30-min refresh tick. Never blocks on the keychain
 /// (file-only load).
-async fn state_watcher_loop(
-    ctx: std::sync::Arc<DaemonCtx>,
-    mut shutdown: watch::Receiver<bool>,
-) {
+async fn state_watcher_loop(ctx: std::sync::Arc<DaemonCtx>, mut shutdown: watch::Receiver<bool>) {
     let path = CliState::state_path();
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -777,17 +861,33 @@ async fn self_heal_loop(
 /// Send a command to the daemon and return the parsed response.
 /// Returns None if daemon is not running.
 pub async fn send_command(cmd: &str, args: serde_json::Value) -> Option<Response> {
-    let sock = socket_path();
-    let stream = tokio::net::UnixStream::connect(&sock).await.ok()?;
-    let (reader, mut writer) = stream.into_split();
+    send_command_timeout(cmd, args, std::time::Duration::from_secs(2)).await
+}
 
-    let req = serde_json::json!({"cmd": cmd, "args": args});
-    let mut buf = serde_json::to_vec(&req).ok()?;
-    buf.push(b'\n');
-    writer.write_all(&buf).await.ok()?;
-    writer.shutdown().await.ok()?;
+pub async fn send_command_timeout(
+    cmd: &str,
+    args: serde_json::Value,
+    timeout: std::time::Duration,
+) -> Option<Response> {
+    tokio::time::timeout(timeout, async move {
+        let sock = socket_path();
+        if !sock.exists() && daemon_pid_is_fresh(std::time::Duration::from_secs(30)) {
+            return Some(Response::err("restarting", "daemon restarting, retry"));
+        }
+        let stream = tokio::net::UnixStream::connect(&sock).await.ok()?;
+        let (reader, mut writer) = stream.into_split();
 
-    let mut lines = BufReader::new(reader).lines();
-    let line = lines.next_line().await.ok()??;
-    serde_json::from_str(&line).ok()
+        let req = serde_json::json!({"cmd": cmd, "args": args});
+        let mut buf = serde_json::to_vec(&req).ok()?;
+        buf.push(b'\n');
+        writer.write_all(&buf).await.ok()?;
+        writer.shutdown().await.ok()?;
+
+        let mut lines = BufReader::new(reader).lines();
+        let line = lines.next_line().await.ok()??;
+        serde_json::from_str(&line).ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }

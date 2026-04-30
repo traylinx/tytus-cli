@@ -18,7 +18,8 @@ pub async fn check_tunnel_health(gateway_ip: &str) -> bool {
         tokio::time::timeout(
             Duration::from_secs(5),
             tokio::net::TcpStream::connect(socket_addr),
-        ).await,
+        )
+        .await,
         Ok(Ok(_))
     )
 }

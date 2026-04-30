@@ -1,6 +1,6 @@
+use crate::client::TytusClient;
 use atomek_core::AtomekError;
 use serde::Deserialize;
-use crate::client::TytusClient;
 
 #[derive(Debug, Deserialize)]
 pub struct RevokeResult {
@@ -13,7 +13,8 @@ pub struct RevokeResult {
 /// Backend: POST /pod/revoke { pod_id } — clientId from A2A headers.
 pub async fn revoke_pod(client: &TytusClient, pod_id: &str) -> atomek_core::Result<RevokeResult> {
     let body = serde_json::json!({ "pod_id": pod_id });
-    let resp = client.post("/pod/revoke")
+    let resp = client
+        .post("/pod/revoke")
         .json(&body)
         .send()
         .await
@@ -28,7 +29,8 @@ pub async fn revoke_pod(client: &TytusClient, pod_id: &str) -> atomek_core::Resu
         });
     }
 
-    resp.json().await
+    resp.json()
+        .await
         .map_err(|e| AtomekError::Other(format!("Failed to parse revoke response: {}", e)))
 }
 
@@ -46,9 +48,7 @@ pub async fn revoke_all_pods(client: &TytusClient) -> atomek_core::Result<()> {
         }
         Err(_) => {
             // Fallback: try revoking without pod_id (server revokes first active)
-            let _ = client.post("/pod/revoke")
-                .send()
-                .await;
+            let _ = client.post("/pod/revoke").send().await;
             Ok(())
         }
     }

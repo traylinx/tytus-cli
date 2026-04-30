@@ -1,6 +1,6 @@
+use crate::client::TytusClient;
 use atomek_core::AtomekError;
 use serde::Deserialize;
-use crate::client::TytusClient;
 
 #[derive(Debug, Deserialize)]
 pub struct PodAllocation {
@@ -36,17 +36,24 @@ pub async fn request_pod(client: &TytusClient) -> atomek_core::Result<PodAllocat
     request_pod_with_agent(client, "nemoclaw").await
 }
 
-pub async fn request_pod_with_agent(client: &TytusClient, agent_type: &str) -> atomek_core::Result<PodAllocation> {
+pub async fn request_pod_with_agent(
+    client: &TytusClient,
+    agent_type: &str,
+) -> atomek_core::Result<PodAllocation> {
     // Don't use send_with_retry for POST /pod/request — it's not idempotent.
     // A retry could allocate two pods. Use single-shot instead.
-    let resp = client.post("/pod/request")
+    let resp = client
+        .post("/pod/request")
         .json(&serde_json::json!({ "agent_type": agent_type }))
-        .send().await
+        .send()
+        .await
         .map_err(|e| AtomekError::Network(e.to_string()))?;
 
     let status = resp.status().as_u16();
     if resp.status().is_success() {
-        return resp.json().await
+        return resp
+            .json()
+            .await
             .map_err(|e| AtomekError::Other(format!("Failed to parse allocation: {}", e)));
     }
 
@@ -56,10 +63,12 @@ pub async fn request_pod_with_agent(client: &TytusClient, agent_type: &str) -> a
         let error_key = json["error"].as_str().unwrap_or("");
         match (status, error_key) {
             (403, "plan_limit_reached") => Err(AtomekError::PodLimitReached {
-                limit: json["max_units"].as_u64()
+                limit: json["max_units"]
+                    .as_u64()
                     .or_else(|| json["limit"].as_u64())
                     .unwrap_or(0) as u32,
-                current: json["units_used"].as_u64()
+                current: json["units_used"]
+                    .as_u64()
                     .or_else(|| json["current"].as_u64())
                     .unwrap_or(0) as u32,
             }),
@@ -74,6 +83,9 @@ pub async fn request_pod_with_agent(client: &TytusClient, agent_type: &str) -> a
             }),
         }
     } else {
-        Err(AtomekError::ApiStatus { status, message: body })
+        Err(AtomekError::ApiStatus {
+            status,
+            message: body,
+        })
     }
 }

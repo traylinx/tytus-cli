@@ -641,3 +641,21 @@ tytus <subcommand> --help
 
 The CLI is the source of truth for argument shapes; this document is the
 source of truth for product behavior, names, models, and recipes.
+## Multi-account Path A (2026-04-30)
+
+Tytus now supports multiple stored Traylinx accounts with one active account at a time:
+
+```bash
+tytus account list
+tytus account add
+tytus account switch work@example.com
+tytus account current
+tytus account remove work@example.com --force
+tytus mcp --account work@example.com --format claude
+```
+
+Notes:
+- `tytus login` remains an alias for the browser device-auth flow.
+- `tytus account remove` is local-only: it deletes local state/keychain entries and never calls Provider revoke. Use `tytus logout` to revoke active account pods server-side.
+- Path A is single-active-account. `/tmp/tytus/*`, the daemon socket, tray instance, and tray web port remain singleton resources.
+- MCP configs generated with `--account` set `TYTUS_PINNED_ACCOUNT_EMAIL`; the MCP server refuses tool calls if the long-lived process drifts from the pinned account after a switch.

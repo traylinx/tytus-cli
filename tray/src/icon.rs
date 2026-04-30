@@ -10,8 +10,8 @@
 //! That means we lose auto light/dark inversion, which is a deliberate
 //! trade: health state is more informative than chrome matching.
 
-use tray_icon::Icon;
 use crate::HealthDot;
+use tray_icon::Icon;
 
 /// Bitmap dimensions used for all icon variants.
 const ICON_SIZE: u32 = 22;
@@ -19,17 +19,17 @@ const ICON_SIZE: u32 = 22;
 /// RGBA fill colors for the T glyph, one per health state.
 /// Alpha is 255 for opaque; a subtle stroke is drawn as a darker pixel
 /// around the bar edges so the T stays crisp on light menu backgrounds.
-const CONNECTED_FILL: [u8; 4] = [52, 199, 89, 255];   // macOS system green
-const WARNING_FILL:   [u8; 4] = [255, 204, 0, 255];   // macOS system yellow
-const DOWN_FILL:      [u8; 4] = [255, 59, 48, 255];   // macOS system red
+const CONNECTED_FILL: [u8; 4] = [52, 199, 89, 255]; // macOS system green
+const WARNING_FILL: [u8; 4] = [255, 204, 0, 255]; // macOS system yellow
+const DOWN_FILL: [u8; 4] = [255, 59, 48, 255]; // macOS system red
 /// Build the icon for a given health state. `icon_for(Down)` is also used
 /// as the startup icon before the first poll returns — red means "we
 /// haven't confirmed anything works yet" which is the honest answer.
 pub fn icon_for(state: HealthDot) -> Icon {
     let fill = match state {
         HealthDot::Connected => CONNECTED_FILL,
-        HealthDot::Warning   => WARNING_FILL,
-        HealthDot::Down      => DOWN_FILL,
+        HealthDot::Warning => WARNING_FILL,
+        HealthDot::Down => DOWN_FILL,
     };
     draw_t(fill)
 }

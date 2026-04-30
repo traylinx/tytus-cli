@@ -78,24 +78,31 @@ struct RefreshRequest {
     refresh_token: String,
 }
 
-pub async fn login(http: &HttpClient, email: &str, password: &str) -> atomek_core::Result<LoginResult> {
+pub async fn login(
+    http: &HttpClient,
+    email: &str,
+    password: &str,
+) -> atomek_core::Result<LoginResult> {
     let url = format!("{}/auth/login", AUTH_API_URL);
 
-    let resp = http.send_with_retry(|| {
-        http.post(&url)
-            .header("Api-Key", &api_key())
-            .header("Content-Type", "application/json")
-            .json(&LoginRequest {
-                email: email.to_string(),
-                password: password.to_string(),
-                client_id: CLIENT_ID.to_string(),
-            })
-    }).await;
+    let resp = http
+        .send_with_retry(|| {
+            http.post(&url)
+                .header("Api-Key", &api_key())
+                .header("Content-Type", "application/json")
+                .json(&LoginRequest {
+                    email: email.to_string(),
+                    password: password.to_string(),
+                    client_id: CLIENT_ID.to_string(),
+                })
+        })
+        .await;
 
     match resp {
         Ok(r) => {
-            let body: LoginResponse = r.json().await
-                .map_err(|e| AtomekError::Other(format!("Failed to parse login response: {}", e)))?;
+            let body: LoginResponse = r.json().await.map_err(|e| {
+                AtomekError::Other(format!("Failed to parse login response: {}", e))
+            })?;
             Ok(LoginResult {
                 access_token: body.access_token,
                 refresh_token: body.refresh_token,
@@ -108,22 +115,28 @@ pub async fn login(http: &HttpClient, email: &str, password: &str) -> atomek_cor
     }
 }
 
-pub async fn refresh_token(http: &HttpClient, refresh_tok: &str) -> atomek_core::Result<LoginResult> {
+pub async fn refresh_token(
+    http: &HttpClient,
+    refresh_tok: &str,
+) -> atomek_core::Result<LoginResult> {
     let url = format!("{}/auth/refresh", AUTH_API_URL);
 
-    let resp = http.send_with_retry(|| {
-        http.post(&url)
-            .header("Api-Key", &api_key())
-            .header("Content-Type", "application/json")
-            .json(&RefreshRequest {
-                refresh_token: refresh_tok.to_string(),
-            })
-    }).await;
+    let resp = http
+        .send_with_retry(|| {
+            http.post(&url)
+                .header("Api-Key", &api_key())
+                .header("Content-Type", "application/json")
+                .json(&RefreshRequest {
+                    refresh_token: refresh_tok.to_string(),
+                })
+        })
+        .await;
 
     match resp {
         Ok(r) => {
-            let body: LoginResponse = r.json().await
-                .map_err(|e| AtomekError::Other(format!("Failed to parse refresh response: {}", e)))?;
+            let body: LoginResponse = r.json().await.map_err(|e| {
+                AtomekError::Other(format!("Failed to parse refresh response: {}", e))
+            })?;
             Ok(LoginResult {
                 access_token: body.access_token,
                 refresh_token: body.refresh_token,

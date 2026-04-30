@@ -1,5 +1,5 @@
-pub mod wireguard;
 pub mod monitor;
+pub mod wireguard;
 
 use atomek_core::AtomekError;
 
@@ -7,12 +7,12 @@ use atomek_core::AtomekError;
 #[derive(Debug, Clone)]
 pub struct TunnelConfig {
     pub private_key: String,
-    pub address: String,       // e.g. "10.X.Y.2/24" — peer address inside the tunnel
+    pub address: String, // e.g. "10.X.Y.2/24" — peer address inside the tunnel
     pub dns: Option<String>,
     pub peer_public_key: String,
     pub preshared_key: Option<String>,
-    pub endpoint: String,      // e.g. "<droplet-public-ip>:51800+podnum"
-    pub allowed_ips: String,   // e.g. "10.X.Y.0/24, 10.42.42.1/32" — destinations to route through this tunnel
+    pub endpoint: String,    // e.g. "<droplet-public-ip>:51800+podnum"
+    pub allowed_ips: String, // e.g. "10.X.Y.0/24, 10.42.42.1/32" — destinations to route through this tunnel
     pub persistent_keepalive: Option<u16>,
 }
 

@@ -42,6 +42,10 @@ impl TokenState {
         let exp = self.expires_at_ms?;
         let now = Utc::now().timestamp_millis();
         let diff = (exp - now) / 1000;
-        if diff > 0 { Some(diff) } else { Some(0) }
+        if diff > 0 {
+            Some(diff)
+        } else {
+            Some(0)
+        }
     }
 }

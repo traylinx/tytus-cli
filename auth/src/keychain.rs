@@ -20,7 +20,10 @@ impl KeychainStore {
         entry
             .set_password(token)
             .map_err(|e| KeychainError::Keychain(e.to_string()))?;
-        tracing::info!("Refresh token stored in keychain for {}", email);
+        tracing::info!(
+            "Refresh token stored in keychain for {}",
+            atomek_core::redact_email(email)
+        );
         Ok(())
     }
 
@@ -58,12 +61,20 @@ impl KeychainStore {
         }
     }
 
+    /// Retrieve refresh token if present, without emitting user-facing scary logs on miss.
+    pub fn try_get_refresh_token(email: &str) -> Option<String> {
+        Self::get_refresh_token(email).ok()
+    }
+
     /// Delete refresh token from OS keychain
     pub fn delete_refresh_token(email: &str) -> Result<(), KeychainError> {
         let entry = keyring::Entry::new(SERVICE_NAME, email)
             .map_err(|e| KeychainError::Keychain(e.to_string()))?;
         let _ = entry.delete_credential(); // Ignore error if not found
-        tracing::info!("Refresh token removed from keychain for {}", email);
+        tracing::info!(
+            "Refresh token removed from keychain for {}",
+            atomek_core::redact_email(email)
+        );
         Ok(())
     }
 
@@ -76,6 +87,52 @@ impl KeychainStore {
         entry.get_password().ok()
     }
 
+    pub fn list_indexed_accounts() -> Vec<String> {
+        let entry = match keyring::Entry::new(SERVICE_NAME, "__account_index__") {
+            Ok(e) => e,
+            Err(_) => return Vec::new(),
+        };
+        let raw = match entry.get_password() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let mut emails: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        emails.retain(|e| !e.trim().is_empty());
+        emails.sort();
+        emails.dedup();
+        emails
+    }
+
+    pub fn add_indexed_account(email: &str) -> Result<(), KeychainError> {
+        let canonical = email.trim().to_ascii_lowercase();
+        if canonical.is_empty() {
+            return Ok(());
+        }
+        let mut emails = Self::list_indexed_accounts();
+        if !emails.iter().any(|e| e == &canonical) {
+            emails.push(canonical);
+            emails.sort();
+        }
+        let entry = keyring::Entry::new(SERVICE_NAME, "__account_index__")
+            .map_err(|e| KeychainError::Keychain(e.to_string()))?;
+        entry
+            .set_password(&serde_json::to_string(&emails).unwrap_or_else(|_| "[]".into()))
+            .map_err(|e| KeychainError::Keychain(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn remove_indexed_account(email: &str) -> Result<(), KeychainError> {
+        let canonical = email.trim().to_ascii_lowercase();
+        let mut emails = Self::list_indexed_accounts();
+        emails.retain(|e| e != &canonical);
+        let entry = keyring::Entry::new(SERVICE_NAME, "__account_index__")
+            .map_err(|e| KeychainError::Keychain(e.to_string()))?;
+        entry
+            .set_password(&serde_json::to_string(&emails).unwrap_or_else(|_| "[]".into()))
+            .map_err(|e| KeychainError::Keychain(e.to_string()))?;
+        Ok(())
+    }
+
     /// Store last-used email for auto-login detection
     pub fn store_last_email(email: &str) -> Result<(), KeychainError> {
         let entry = keyring::Entry::new(SERVICE_NAME, "__last_email__")
@@ -85,5 +142,4 @@ impl KeychainStore {
             .map_err(|e| KeychainError::Keychain(e.to_string()))?;
         Ok(())
     }
-
 }

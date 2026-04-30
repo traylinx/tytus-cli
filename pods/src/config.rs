@@ -1,6 +1,6 @@
+use crate::client::TytusClient;
 use atomek_core::AtomekError;
 use zeroize::Zeroize;
-use crate::client::TytusClient;
 
 /// Parsed WireGuard configuration — keys kept in memory only.
 #[derive(Debug)]
@@ -33,7 +33,9 @@ pub async fn download_config(client: &TytusClient) -> atomek_core::Result<WireGu
         let resp = client.get_with_retry("/pod/config/download").await;
         match resp {
             Ok(r) => {
-                let text = r.text().await
+                let text = r
+                    .text()
+                    .await
                     .map_err(|e| AtomekError::Other(format!("Failed to read config: {}", e)))?;
                 if text.contains("[Interface]") {
                     return parse_wireguard_config(&text);
@@ -57,14 +59,19 @@ pub async fn download_config(client: &TytusClient) -> atomek_core::Result<WireGu
 
 /// Download config for a specific pod by pod_id.
 /// Backend: GET /pod/config/download?pod_id=XX
-pub async fn download_config_for_pod(client: &TytusClient, pod_id: &str) -> atomek_core::Result<WireGuardConfig> {
+pub async fn download_config_for_pod(
+    client: &TytusClient,
+    pod_id: &str,
+) -> atomek_core::Result<WireGuardConfig> {
     let path = format!("/pod/config/download?pod_id={}", pod_id);
     let max_attempts = 10;
     for attempt in 1..=max_attempts {
         let resp = client.get_with_retry(&path).await;
         match resp {
             Ok(r) => {
-                let text = r.text().await
+                let text = r
+                    .text()
+                    .await
                     .map_err(|e| AtomekError::Other(format!("Failed to read config: {}", e)))?;
                 if text.contains("[Interface]") {
                     return parse_wireguard_config(&text);
@@ -118,13 +125,17 @@ fn parse_wireguard_config(conf: &str) -> atomek_core::Result<WireGuardConfig> {
     }
 
     Ok(WireGuardConfig {
-        private_key: private_key.ok_or_else(|| AtomekError::Other("Missing PrivateKey in config".into()))?,
+        private_key: private_key
+            .ok_or_else(|| AtomekError::Other("Missing PrivateKey in config".into()))?,
         address: address.ok_or_else(|| AtomekError::Other("Missing Address in config".into()))?,
         dns,
-        public_key: public_key.ok_or_else(|| AtomekError::Other("Missing PublicKey in config".into()))?,
+        public_key: public_key
+            .ok_or_else(|| AtomekError::Other("Missing PublicKey in config".into()))?,
         preshared_key,
-        endpoint: endpoint.ok_or_else(|| AtomekError::Other("Missing Endpoint in config".into()))?,
-        allowed_ips: allowed_ips.ok_or_else(|| AtomekError::Other("Missing AllowedIPs in config".into()))?,
+        endpoint: endpoint
+            .ok_or_else(|| AtomekError::Other("Missing Endpoint in config".into()))?,
+        allowed_ips: allowed_ips
+            .ok_or_else(|| AtomekError::Other("Missing AllowedIPs in config".into()))?,
         persistent_keepalive,
     })
 }

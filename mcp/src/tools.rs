@@ -33,35 +33,45 @@ async fn tool_status() -> ToolResult {
     let state = CliState::load();
 
     if !state.is_logged_in() {
-        return ToolResult::text(serde_json::json!({
-            "logged_in": false,
-            "message": "Not logged in. User needs to run: tytus login"
-        }).to_string());
+        return ToolResult::text(
+            serde_json::json!({
+                "logged_in": false,
+                "message": "Not logged in. User needs to run: tytus login"
+            })
+            .to_string(),
+        );
     }
 
     // Security: surface only stable values to agents. Internal pod IPs,
     // per-pod keys, droplet identifiers, and agent_endpoint are considered
     // debug-only and must be fetched explicitly via `tytus env --raw`.
     // See docs/PENTEST-RESULTS-2026-04-12.md findings E3/H5.
-    let pods: Vec<Value> = state.pods.iter().map(|p| {
-        serde_json::json!({
-            "pod_id": p.pod_id,
-            "agent_type": p.agent_type,
-            "stable_ai_endpoint": p.stable_ai_endpoint,
-            "stable_user_key": p.stable_user_key,
-            "tunnel_active": p.tunnel_iface.is_some(),
-            "tunnel_interface": p.tunnel_iface,
+    let pods: Vec<Value> = state
+        .pods
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "pod_id": p.pod_id,
+                "agent_type": p.agent_type,
+                "stable_ai_endpoint": p.stable_ai_endpoint,
+                "stable_user_key": p.stable_user_key,
+                "tunnel_active": p.tunnel_iface.is_some(),
+                "tunnel_interface": p.tunnel_iface,
+            })
         })
-    }).collect();
+        .collect();
 
-    ToolResult::text(serde_json::json!({
-        "logged_in": true,
-        "email": state.email,
-        "tier": state.tier,
-        "pod_count": state.pods.len(),
-        "pods": pods,
-        "has_active_tunnel": state.pods.iter().any(|p| p.tunnel_iface.is_some()),
-    }).to_string())
+    ToolResult::text(
+        serde_json::json!({
+            "logged_in": true,
+            "email": state.email,
+            "tier": state.tier,
+            "pod_count": state.pods.len(),
+            "pods": pods,
+            "has_active_tunnel": state.pods.iter().any(|p| p.tunnel_iface.is_some()),
+        })
+        .to_string(),
+    )
 }
 
 async fn tool_env(args: &Value) -> ToolResult {
@@ -74,9 +84,11 @@ async fn tool_env(args: &Value) -> ToolResult {
 
     let pod = match state.find_pod(pod_id) {
         Some(p) => p,
-        None => return ToolResult::error(
-            "No pods available. User needs to run: sudo tytus connect".into()
-        ),
+        None => {
+            return ToolResult::error(
+                "No pods available. User needs to run: sudo tytus connect".into(),
+            )
+        }
     };
 
     let mut env = serde_json::Map::new();
@@ -85,7 +97,10 @@ async fn tool_env(args: &Value) -> ToolResult {
         // DEBUG MODE — per-pod, internal, rotatable on every reconnect.
         if let Some(ref ep) = pod.ai_endpoint {
             env.insert("TYTUS_AI_GATEWAY".into(), Value::String(ep.clone()));
-            env.insert("OPENAI_BASE_URL".into(), Value::String(format!("{}/v1", ep)));
+            env.insert(
+                "OPENAI_BASE_URL".into(),
+                Value::String(format!("{}/v1", ep)),
+            );
         }
         if let Some(ref key) = pod.pod_api_key {
             env.insert("TYTUS_API_KEY".into(), Value::String(key.clone()));
@@ -100,7 +115,10 @@ async fn tool_env(args: &Value) -> ToolResult {
         // internal infrastructure topology to AI agents.
         if let Some(ref ep) = pod.stable_ai_endpoint {
             env.insert("TYTUS_AI_GATEWAY".into(), Value::String(ep.clone()));
-            env.insert("OPENAI_BASE_URL".into(), Value::String(format!("{}/v1", ep)));
+            env.insert(
+                "OPENAI_BASE_URL".into(),
+                Value::String(format!("{}/v1", ep)),
+            );
         }
         if let Some(ref key) = pod.stable_user_key {
             env.insert("TYTUS_API_KEY".into(), Value::String(key.clone()));
@@ -112,7 +130,10 @@ async fn tool_env(args: &Value) -> ToolResult {
         env.insert("TYTUS_AGENT_TYPE".into(), Value::String(at.clone()));
     }
     env.insert("TYTUS_POD_ID".into(), Value::String(pod.pod_id.clone()));
-    env.insert("tunnel_active".into(), Value::Bool(pod.tunnel_iface.is_some()));
+    env.insert(
+        "tunnel_active".into(),
+        Value::Bool(pod.tunnel_iface.is_some()),
+    );
 
     if pod.tunnel_iface.is_none() {
         env.insert("warning".into(), Value::String(
@@ -161,7 +182,8 @@ async fn tool_models(args: &Value) -> ToolResult {
         .build()
         .unwrap_or_default();
 
-    match client.get(&url)
+    match client
+        .get(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .send()
         .await
@@ -172,14 +194,18 @@ async fn tool_models(args: &Value) -> ToolResult {
                     // Parse and extract just model IDs for a cleaner response
                     if let Ok(parsed) = serde_json::from_str::<Value>(&body) {
                         if let Some(data) = parsed.get("data").and_then(|d| d.as_array()) {
-                            let ids: Vec<&str> = data.iter()
+                            let ids: Vec<&str> = data
+                                .iter()
                                 .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
                                 .collect();
-                            return ToolResult::text(serde_json::json!({
-                                "model_count": ids.len(),
-                                "models": ids,
-                                "gateway": gateway,
-                            }).to_string());
+                            return ToolResult::text(
+                                serde_json::json!({
+                                    "model_count": ids.len(),
+                                    "models": ids,
+                                    "gateway": gateway,
+                                })
+                                .to_string(),
+                            );
                         }
                     }
                     ToolResult::text(body)
@@ -228,8 +254,14 @@ async fn tool_chat(args: &Value) -> ToolResult {
         Some(m) => m.clone(),
         None => return ToolResult::error("'messages' is required.".into()),
     };
-    let max_tokens = args.get("max_tokens").and_then(|v| v.as_i64()).unwrap_or(1024);
-    let temperature = args.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7);
+    let max_tokens = args
+        .get("max_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1024);
+    let temperature = args
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.7);
 
     let body = serde_json::json!({
         "model": model,
@@ -244,19 +276,18 @@ async fn tool_chat(args: &Value) -> ToolResult {
         .build()
         .unwrap_or_default();
 
-    match client.post(&url)
+    match client
+        .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.text().await {
-                Ok(body) => ToolResult::text(body),
-                Err(e) => ToolResult::error(format!("Failed to read response: {}", e)),
-            }
-        }
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(body) => ToolResult::text(body),
+            Err(e) => ToolResult::error(format!("Failed to read response: {}", e)),
+        },
         Ok(resp) => {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -288,11 +319,14 @@ async fn tool_revoke(args: &Value) -> ToolResult {
     let client = atomek_pods::TytusClient::new(&http, &sk, &auid);
 
     match atomek_pods::revoke_pod(&client, pod_id).await {
-        Ok(_) => ToolResult::text(serde_json::json!({
-            "status": "revoked",
-            "pod_id": pod_id,
-            "message": format!("Pod {} revoked. Units freed.", pod_id)
-        }).to_string()),
+        Ok(_) => ToolResult::text(
+            serde_json::json!({
+                "status": "revoked",
+                "pod_id": pod_id,
+                "message": format!("Pod {} revoked. Units freed.", pod_id)
+            })
+            .to_string(),
+        ),
         Err(e) => ToolResult::error(format!("Revoke failed: {}", e)),
     }
 }
@@ -308,10 +342,17 @@ async fn tool_setup_guide() -> ToolResult {
     step_num += 1;
 
     if !state.is_logged_in() {
-        steps.push(format!("{}. Login (opens browser for one-time device auth):\n   tytus login", step_num));
+        steps.push(format!(
+            "{}. Login (opens browser for one-time device auth):\n   tytus login",
+            step_num
+        ));
         step_num += 1;
     } else {
-        steps.push(format!("{}. Already logged in as {}", step_num, state.email.as_deref().unwrap_or("?")));
+        steps.push(format!(
+            "{}. Already logged in as {}",
+            step_num,
+            state.email.as_deref().unwrap_or("?")
+        ));
         step_num += 1;
     }
 
@@ -332,14 +373,17 @@ async fn tool_setup_guide() -> ToolResult {
 
     steps.push(format!("{}. Use with any OpenAI-compatible tool:\n   export OPENAI_API_KEY=$TYTUS_API_KEY\n   export OPENAI_BASE_URL=$TYTUS_AI_GATEWAY/v1", step_num));
 
-    ToolResult::text(serde_json::json!({
-        "current_state": {
-            "logged_in": state.is_logged_in(),
-            "email": state.email,
-            "tier": state.tier,
-            "pod_count": state.pods.len(),
-            "has_active_tunnel": has_tunnel,
-        },
-        "setup_steps": steps,
-    }).to_string())
+    ToolResult::text(
+        serde_json::json!({
+            "current_state": {
+                "logged_in": state.is_logged_in(),
+                "email": state.email,
+                "tier": state.tier,
+                "pod_count": state.pods.len(),
+                "has_active_tunnel": has_tunnel,
+            },
+            "setup_steps": steps,
+        })
+        .to_string(),
+    )
 }

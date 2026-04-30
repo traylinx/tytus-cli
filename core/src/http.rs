@@ -103,7 +103,8 @@ async fn parse_http_error(status: u16, resp: reqwest::Response) -> AtomekError {
 
     // Try to parse as JSON with "error" field
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-        let message = json["error"].as_str()
+        let message = json["error"]
+            .as_str()
             .or_else(|| json["message"].as_str())
             .unwrap_or(&body)
             .to_string();

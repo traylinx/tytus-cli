@@ -14,6 +14,7 @@ path = "src/main.rs"
 atomek-core = { path = "../core" }
 atomek-auth = { path = "../auth" }
 atomek-pods = { path = "../pods" }
+atomek-cli = { path = "../cli" }
 
 serde.workspace = true
 serde_json.workspace = true

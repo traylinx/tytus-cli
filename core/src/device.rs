@@ -1,4 +1,4 @@
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Generate a stable device fingerprint.
 /// SHA-256 of hostname:username:homedir — same approach as claurst's bridge.
@@ -13,9 +13,7 @@ pub fn device_fingerprint() -> String {
     input.push(':');
 
     // Username
-    if let Ok(user) = std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-    {
+    if let Ok(user) = std::env::var("USER").or_else(|_| std::env::var("USERNAME")) {
         input.push_str(&user);
     }
     input.push(':');
@@ -40,7 +38,9 @@ mod hostname {
             let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut i8, buf.len()) };
             if ret == 0 {
                 let cstr = unsafe { CStr::from_ptr(buf.as_ptr() as *const i8) };
-                Ok(std::ffi::OsString::from(cstr.to_string_lossy().into_owned()))
+                Ok(std::ffi::OsString::from(
+                    cstr.to_string_lossy().into_owned(),
+                ))
             } else {
                 Err(std::io::Error::last_os_error())
             }

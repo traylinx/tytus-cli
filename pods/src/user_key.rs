@@ -1,6 +1,6 @@
+use crate::client::TytusClient;
 use atomek_core::AtomekError;
 use serde::Deserialize;
-use crate::client::TytusClient;
 
 #[derive(Debug, Deserialize)]
 struct UserKeyResponse {
@@ -92,7 +92,10 @@ pub async fn get_user_key_full(client: &TytusClient) -> atomek_core::Result<User
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        return Err(AtomekError::ApiStatus { status, message: body });
+        return Err(AtomekError::ApiStatus {
+            status,
+            message: body,
+        });
     }
 
     let data: UserKeyResponse = resp

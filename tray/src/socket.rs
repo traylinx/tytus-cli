@@ -56,35 +56,58 @@ fn build_pod_info(
     shared_base: Option<&str>,
     api_keys_by_pod: &std::collections::HashMap<String, String>,
 ) -> PodInfo {
-    let pod_id = p.get("pod_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let stored_edge = p.get("edge_public_url")
-        .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    let pod_id = p
+        .get("pod_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let stored_edge = p
+        .get("edge_public_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
     let edge_public_url = stored_edge.or_else(|| shared_base.map(|s| s.to_string()));
-    let stored_token = p.get("gateway_token")
-        .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    let stored_token = p
+        .get("gateway_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
     // Try pod_api_key inline first (state.json path), then fall back
     // to the state-loaded map (daemon-socket path where the key got
     // stripped). Either way derivation is sha256(pod_api_key||pod_id).
-    let pod_api_key: Option<String> = p.get("pod_api_key")
-        .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    let pod_api_key: Option<String> = p
+        .get("pod_api_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .or_else(|| api_keys_by_pod.get(&pod_id).cloned());
-    let derived_token = pod_api_key.as_ref()
+    let derived_token = pod_api_key
+        .as_ref()
         .map(|k| derive_gateway_token(k, &pod_id));
     let gateway_token = stored_token.or(derived_token);
 
-    let pod_public_url = p.get("pod_public_url")
-        .and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    let pod_public_url = p
+        .get("pod_public_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
     PodInfo {
         pod_id,
-        agent_type: p.get("agent_type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        agent_type: p
+            .get("agent_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         tunnel_active: p.get("tunnel_iface").and_then(|v| v.as_str()).is_some(),
-        stable_ai_endpoint: p.get("stable_ai_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        stable_user_key: p.get("stable_user_key").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        stable_ai_endpoint: p
+            .get("stable_ai_endpoint")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        stable_user_key: p
+            .get("stable_user_key")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         edge_public_url,
         gateway_token,
         pod_public_url,
@@ -259,38 +282,67 @@ fn daemon_status() -> Option<DaemonSnap> {
     let data = resp.get("data")?;
     let daemon = data.get("daemon").cloned().unwrap_or_default();
     let auth = data.get("auth").cloned().unwrap_or_default();
-    let pods_json = data.get("pods").and_then(|p| p.as_array()).cloned().unwrap_or_default();
+    let pods_json = data
+        .get("pods")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
     // Daemon strips pod_api_key from its status response — pull it
     // from state.json so gateway_token derivation has something to
     // hash. Also fold state.json's edge URLs into shared_base since
     // the daemon path sometimes carries null edge URLs for pods that
     // state.json DOES have backfilled.
     let api_keys = load_api_keys_from_state();
-    let shared_base = shared_edge_base(&pods_json)
-        .or_else(load_shared_base_from_state);
-    let pods = pods_json.iter()
+    let shared_base = shared_edge_base(&pods_json).or_else(load_shared_base_from_state);
+    let pods = pods_json
+        .iter()
         .map(|p| build_pod_info(p, shared_base.as_deref(), &api_keys))
         .collect();
     Some(DaemonSnap {
         daemon_pid: daemon.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
-        uptime_secs: daemon.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0),
-        logged_in: auth.get("logged_in").and_then(|v| v.as_bool()).unwrap_or(false),
-        token_valid: auth.get("token_valid").and_then(|v| v.as_bool()).unwrap_or(false),
-        email: auth.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        tier: auth.get("tier").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        uptime_secs: daemon
+            .get("uptime_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        logged_in: auth
+            .get("logged_in")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        token_valid: auth
+            .get("token_valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        email: auth
+            .get("email")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        tier: auth
+            .get("tier")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         pods,
         // Missing fields (old daemon talking to a new tray) default
         // optimistic — `keychain_healthy: true` — so an out-of-date
         // daemon doesn't spuriously trip the warning row.
-        keychain_healthy: daemon.get("keychain_healthy").and_then(|v| v.as_bool()).unwrap_or(true),
-        last_refresh_error: daemon.get("last_refresh_error").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        keychain_healthy: daemon
+            .get("keychain_healthy")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        last_refresh_error: daemon
+            .get("last_refresh_error")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         stuck_for_secs: daemon.get("stuck_for_secs").and_then(|v| v.as_u64()),
     })
 }
 
 fn send_command(cmd: &str) -> Option<serde_json::Value> {
     let mut stream = UnixStream::connect(SOCKET_PATH).ok()?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .ok()?;
 
     let req = serde_json::json!({"cmd": cmd});
     let mut buf = serde_json::to_vec(&req).ok()?;
@@ -324,10 +376,19 @@ fn read_state_file() -> Option<FileSnap> {
     let raw = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
 
-    let email = v.get("email").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let tier = v.get("tier").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let email = v
+        .get("email")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let tier = v
+        .get("tier")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let has_email = !email.is_empty();
-    let has_access_token = v.get("access_token")
+    let has_access_token = v
+        .get("access_token")
         .and_then(|x| x.as_str())
         .map(|s| !s.is_empty())
         .unwrap_or(false);
@@ -337,17 +398,29 @@ fn read_state_file() -> Option<FileSnap> {
         _ => false,
     };
 
-    let pods_json = v.get("pods").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let pods_json = v
+        .get("pods")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
     let shared_base = shared_edge_base(&pods_json);
     // state.json has pod_api_key inline; caller already provides it.
     // Still pass a map (likely redundant but harmless) so both code
     // paths share one builder signature.
-    let api_keys = pods_json.iter().filter_map(|p| {
-        let id = p.get("pod_id").and_then(|v| v.as_str())?;
-        let key = p.get("pod_api_key").and_then(|v| v.as_str())?;
-        if id.is_empty() || key.is_empty() { None } else { Some((id.to_string(), key.to_string())) }
-    }).collect::<std::collections::HashMap<_,_>>();
-    let pods = pods_json.iter()
+    let api_keys = pods_json
+        .iter()
+        .filter_map(|p| {
+            let id = p.get("pod_id").and_then(|v| v.as_str())?;
+            let key = p.get("pod_api_key").and_then(|v| v.as_str())?;
+            if id.is_empty() || key.is_empty() {
+                None
+            } else {
+                Some((id.to_string(), key.to_string()))
+            }
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let pods = pods_json
+        .iter()
         .map(|p| build_pod_info(p, shared_base.as_deref(), &api_keys))
         .collect();
 

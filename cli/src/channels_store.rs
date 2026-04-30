@@ -116,11 +116,7 @@ pub fn store_secret(
     Ok(())
 }
 
-pub fn get_secret(
-    pod_id: &str,
-    channel: &str,
-    env_var: &str,
-) -> Result<String, ChannelStoreError> {
+pub fn get_secret(pod_id: &str, channel: &str, env_var: &str) -> Result<String, ChannelStoreError> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &account_key(pod_id, channel, env_var))
         .map_err(|e| ChannelStoreError::Keychain(e.to_string()))?;
     entry
@@ -128,11 +124,7 @@ pub fn get_secret(
         .map_err(|e| ChannelStoreError::Keychain(e.to_string()))
 }
 
-pub fn delete_secret(
-    pod_id: &str,
-    channel: &str,
-    env_var: &str,
-) -> Result<(), ChannelStoreError> {
+pub fn delete_secret(pod_id: &str, channel: &str, env_var: &str) -> Result<(), ChannelStoreError> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &account_key(pod_id, channel, env_var))
         .map_err(|e| ChannelStoreError::Keychain(e.to_string()))?;
     let _ = entry.delete_credential(); // not-found is fine

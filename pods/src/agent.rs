@@ -1,6 +1,6 @@
+use crate::client::TytusClient;
 use atomek_core::AtomekError;
 use serde::Deserialize;
-use crate::client::TytusClient;
 
 /// Strict pod-id validator for any function that interpolates `pod_id`
 /// into a query string. Pod ids on this product are always
@@ -47,51 +47,78 @@ pub struct AgentDeployResult {
     pub ports: Option<AgentPorts>,
 }
 
-pub async fn get_agent_status(client: &TytusClient, pod_id: &str) -> atomek_core::Result<AgentStatus> {
+pub async fn get_agent_status(
+    client: &TytusClient,
+    pod_id: &str,
+) -> atomek_core::Result<AgentStatus> {
     validate_pod_id(pod_id)?;
-    let resp = client.get_with_retry(&format!("/pod/agent/status?pod_id={}", pod_id)).await?;
+    let resp = client
+        .get_with_retry(&format!("/pod/agent/status?pod_id={}", pod_id))
+        .await?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        return Err(AtomekError::ApiStatus { status, message: body });
+        return Err(AtomekError::ApiStatus {
+            status,
+            message: body,
+        });
     }
-    resp.json().await
+    resp.json()
+        .await
         .map_err(|e| AtomekError::Other(format!("Failed to parse agent status: {}", e)))
 }
 
-pub async fn deploy_agent(client: &TytusClient, pod_id: &str, agent_type: &str) -> atomek_core::Result<AgentDeployResult> {
-    let resp = client.post("/pod/agent/deploy")
+pub async fn deploy_agent(
+    client: &TytusClient,
+    pod_id: &str,
+    agent_type: &str,
+) -> atomek_core::Result<AgentDeployResult> {
+    let resp = client
+        .post("/pod/agent/deploy")
         .json(&serde_json::json!({
             "pod_id": pod_id,
             "agent_type": agent_type,
         }))
-        .send().await
+        .send()
+        .await
         .map_err(|e| AtomekError::Network(e.to_string()))?;
 
     let status = resp.status().as_u16();
     if resp.status().is_success() || status == 201 {
-        return resp.json().await
+        return resp
+            .json()
+            .await
             .map_err(|e| AtomekError::Other(format!("Failed to parse deploy result: {}", e)));
     }
 
     let body = resp.text().await.unwrap_or_default();
-    Err(AtomekError::ApiStatus { status, message: body })
+    Err(AtomekError::ApiStatus {
+        status,
+        message: body,
+    })
 }
 
 pub async fn restart_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Result<AgentStatus> {
-    let resp = client.post("/pod/agent/restart")
+    let resp = client
+        .post("/pod/agent/restart")
         .json(&serde_json::json!({ "pod_id": pod_id }))
-        .send().await
+        .send()
+        .await
         .map_err(|e| AtomekError::Network(e.to_string()))?;
 
     let status = resp.status().as_u16();
     if resp.status().is_success() {
-        return resp.json().await
+        return resp
+            .json()
+            .await
             .map_err(|e| AtomekError::Other(format!("Failed to parse restart result: {}", e)));
     }
 
     let body = resp.text().await.unwrap_or_default();
-    Err(AtomekError::ApiStatus { status, message: body })
+    Err(AtomekError::ApiStatus {
+        status,
+        message: body,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,24 +128,36 @@ pub struct ExecResult {
     pub stderr: Option<String>,
 }
 
-pub async fn exec_in_agent(client: &TytusClient, pod_id: &str, command: &str, timeout: u32) -> atomek_core::Result<ExecResult> {
-    let resp = client.post("/pod/agent/exec")
+pub async fn exec_in_agent(
+    client: &TytusClient,
+    pod_id: &str,
+    command: &str,
+    timeout: u32,
+) -> atomek_core::Result<ExecResult> {
+    let resp = client
+        .post("/pod/agent/exec")
         .json(&serde_json::json!({
             "pod_id": pod_id,
             "command": command,
             "timeout": timeout,
         }))
-        .send().await
+        .send()
+        .await
         .map_err(|e| AtomekError::Network(e.to_string()))?;
 
     let status = resp.status().as_u16();
     if resp.status().is_success() {
-        return resp.json().await
+        return resp
+            .json()
+            .await
             .map_err(|e| AtomekError::Other(format!("Failed to parse exec result: {}", e)));
     }
 
     let body = resp.text().await.unwrap_or_default();
-    Err(AtomekError::ApiStatus { status, message: body })
+    Err(AtomekError::ApiStatus {
+        status,
+        message: body,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,7 +166,11 @@ pub struct AgentLogs {
     pub logs: String,
 }
 
-pub async fn agent_logs(client: &TytusClient, pod_id: &str, tail: u32) -> atomek_core::Result<AgentLogs> {
+pub async fn agent_logs(
+    client: &TytusClient,
+    pod_id: &str,
+    tail: u32,
+) -> atomek_core::Result<AgentLogs> {
     validate_pod_id(pod_id)?;
     let tail = tail.clamp(1, 500);
     let path = format!("/pod/agent/logs?pod_id={}&tail={}", pod_id, tail);
@@ -135,9 +178,13 @@ pub async fn agent_logs(client: &TytusClient, pod_id: &str, tail: u32) -> atomek
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        return Err(AtomekError::ApiStatus { status, message: body });
+        return Err(AtomekError::ApiStatus {
+            status,
+            message: body,
+        });
     }
-    resp.json().await
+    resp.json()
+        .await
         .map_err(|e| AtomekError::Other(format!("Failed to parse agent logs: {}", e)))
 }
 
@@ -173,16 +220,22 @@ pub async fn agent_env(
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        return Err(AtomekError::ApiStatus { status, message: body });
+        return Err(AtomekError::ApiStatus {
+            status,
+            message: body,
+        });
     }
-    resp.json().await
+    resp.json()
+        .await
         .map_err(|e| AtomekError::Other(format!("Failed to parse agent env: {}", e)))
 }
 
 pub async fn stop_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Result<()> {
-    let resp = client.post("/pod/agent/stop")
+    let resp = client
+        .post("/pod/agent/stop")
         .json(&serde_json::json!({ "pod_id": pod_id }))
-        .send().await
+        .send()
+        .await
         .map_err(|e| AtomekError::Network(e.to_string()))?;
 
     if resp.status().is_success() {
@@ -191,7 +244,10 @@ pub async fn stop_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Resu
 
     let status = resp.status().as_u16();
     let body = resp.text().await.unwrap_or_default();
-    Err(AtomekError::ApiStatus { status, message: body })
+    Err(AtomekError::ApiStatus {
+        status,
+        message: body,
+    })
 }
 
 #[cfg(test)]

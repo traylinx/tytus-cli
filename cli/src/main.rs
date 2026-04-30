@@ -1,3 +1,4 @@
+mod account;
 mod channels;
 mod channels_store;
 mod cmd_transfer;
@@ -10,6 +11,7 @@ mod wizard;
 // `tunnel_reap` lives in the `atomek_cli` lib target so integration tests
 // can exercise it directly. Re-export the module path here so the rest of
 // main.rs can reference it as `tunnel_reap::...` unchanged.
+use atomek_cli::tunnel_pidfile;
 use atomek_cli::tunnel_reap;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -50,6 +52,7 @@ Pod & connection:
 
 Identity & integrations:
   login        Login to Traylinx (browser device-auth)
+  account      List/add/switch/remove stored Traylinx accounts
   logout       Logout and revoke all pods
   link         Wire Tytus into a project (drops CLAUDE.md / .mcp.json)
   mcp          Print MCP server config for your AI CLI
@@ -101,7 +104,10 @@ enum AutostartAction {
 
 impl AgentType {
     fn as_str(&self) -> &str {
-        match self { AgentType::Nemoclaw => "nemoclaw", AgentType::Hermes => "hermes" }
+        match self {
+            AgentType::Nemoclaw => "nemoclaw",
+            AgentType::Hermes => "hermes",
+        }
     }
 }
 
@@ -113,6 +119,29 @@ enum DaemonAction {
     Stop,
     /// Check daemon status
     Status,
+}
+
+#[derive(Subcommand, Debug)]
+enum AccountAction {
+    /// List stored accounts and token availability
+    List,
+    /// Add a new Traylinx account via browser device-auth
+    Add,
+    /// Switch the active account
+    Switch {
+        /// Account email to make active
+        email: String,
+    },
+    /// Print the current active account email
+    Current,
+    /// Remove an account locally. Does NOT revoke pods server-side.
+    Remove {
+        /// Account email to remove
+        email: String,
+        /// Required when removing the active account or an account with local pods
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -233,6 +262,11 @@ enum Commands {
     Configure,
     /// Login to Traylinx (opens browser for device auth)
     Login,
+    /// Manage stored Traylinx accounts
+    Account {
+        #[command(subcommand)]
+        action: AccountAction,
+    },
     /// Show current status: plan, pods, tunnels
     Status,
     /// Activate the WireGuard tunnel. With no flags, uses your default pod
@@ -267,8 +301,12 @@ enum Commands {
         /// Pod ID to revoke
         pod: String,
     },
-    /// Logout and revoke all pods
-    Logout,
+    /// Logout and revoke pods for the active account
+    Logout {
+        /// Remove all locally stored accounts too
+        #[arg(long)]
+        all: bool,
+    },
     /// Print connection info for use in other tools
     Env {
         /// Pod ID (defaults to first connected pod)
@@ -336,6 +374,9 @@ enum Commands {
         /// Output format: claude, kilocode, opencode, archon, json
         #[arg(short, long, default_value = "claude")]
         format: String,
+        /// Pin generated MCP config to a stored account email
+        #[arg(long)]
+        account: Option<String>,
     },
     /// Restart the agent container (applies config changes)
     Restart {
@@ -653,7 +694,8 @@ async fn main() {
         Some(Commands::Test) => cmd_test(&http, cli.json).await,
         Some(Commands::Chat { model }) => cmd_chat(&http, &model, cli.json).await,
         Some(Commands::Configure) => cmd_configure(&http, cli.json).await,
-        Some(Commands::Login) => cmd_login(&http, cli.json).await,
+        Some(Commands::Login) => cmd_account_add(&http, cli.json).await,
+        Some(Commands::Account { action }) => cmd_account(&http, action, cli.json).await,
         Some(Commands::Status) => cmd_status(&http, cli.json).await,
         Some(Commands::Connect { pod, agent }) => {
             // `--agent X` is a shim for `tytus agent install X` + tunnel-up
@@ -664,7 +706,8 @@ async fn main() {
             // pod on the next invocation and the user's new agent would
             // never get a tunnel.
             if let Some(a) = agent {
-                let new_pod = cmd_agent_install(&http, a.as_str(), pod.clone(), false, cli.json).await;
+                let new_pod =
+                    cmd_agent_install(&http, a.as_str(), pod.clone(), false, cli.json).await;
                 cmd_connect(&http, new_pod.or(pod), cli.json).await;
             } else {
                 cmd_connect(&http, pod, cli.json).await;
@@ -673,24 +716,45 @@ async fn main() {
         Some(Commands::Agent { action }) => cmd_agent(&http, action, cli.json).await,
         Some(Commands::Disconnect { pod }) => cmd_disconnect(pod, cli.json).await,
         Some(Commands::Revoke { pod }) => cmd_revoke(&http, &pod, cli.json).await,
-        Some(Commands::Logout) => cmd_logout(&http, cli.json).await,
-        Some(Commands::Env { pod, export, raw, tunnel }) => cmd_env(pod, export, raw, tunnel, cli.json, &http).await,
-        Some(Commands::LlmDocs) => { print!("{}", LLM_DOCS); }
+        Some(Commands::Logout { all }) => cmd_logout(&http, cli.json, all).await,
+        Some(Commands::Env {
+            pod,
+            export,
+            raw,
+            tunnel,
+        }) => cmd_env(pod, export, raw, tunnel, cli.json, &http).await,
+        Some(Commands::LlmDocs) => {
+            print!("{}", LLM_DOCS);
+        }
         Some(Commands::Capabilities { pod }) => cmd_capabilities(&http, pod, cli.json).await,
-        Some(Commands::BootstrapPrompt) => { print!("{}", BOOTSTRAP_PROMPT); }
+        Some(Commands::BootstrapPrompt) => {
+            print!("{}", BOOTSTRAP_PROMPT);
+        }
         Some(Commands::TunnelDown { pid }) => cmd_tunnel_down(pid),
         Some(Commands::Link { dir, only }) => cmd_link(&dir, only, cli.json),
-        Some(Commands::Mcp { format }) => cmd_mcp(&format, cli.json),
+        Some(Commands::Mcp { format, account }) => cmd_mcp(&format, account, cli.json),
         Some(Commands::Restart { pod }) => cmd_restart(&http, pod, cli.json).await,
         Some(Commands::Logs { pod, lines }) => cmd_logs(&http, pod, lines, cli.json).await,
-        Some(Commands::Exec { command, pod, timeout }) => cmd_exec(&http, command, pod, timeout, cli.json).await,
+        Some(Commands::Exec {
+            command,
+            pod,
+            timeout,
+        }) => cmd_exec(&http, command, pod, timeout, cli.json).await,
         Some(Commands::Lope { args }) => cmd_lope_passthrough("lope", args, cli.json).await,
         Some(Commands::Bridge { args }) => cmd_lope_passthrough("bridge", args, cli.json).await,
         Some(Commands::Channels { action }) => cmd_channels(&http, action, cli.json).await,
         Some(Commands::Autostart { action }) => cmd_autostart(action, cli.json),
-        Some(Commands::Ui { pod, port, no_open, stop }) => {
-            if stop { cmd_ui_stop(pod, cli.json).await; }
-            else    { cmd_ui(&http, pod, port, no_open, cli.json).await; }
+        Some(Commands::Ui {
+            pod,
+            port,
+            no_open,
+            stop,
+        }) => {
+            if stop {
+                cmd_ui_stop(pod, cli.json).await;
+            } else {
+                cmd_ui(&http, pod, port, no_open, cli.json).await;
+            }
         }
         Some(Commands::Doctor { pod }) => match pod {
             Some(p) => cmd_doctor_pod(&http, p, cli.json).await,
@@ -700,18 +764,24 @@ async fn main() {
         Some(Commands::Tray { action }) => cmd_tray(action, cli.json),
         // Hidden subcommand: called by elevated helper to activate tunnel from a temp config file
         Some(Commands::TunnelUp { config_file }) => cmd_tunnel_up(&config_file, cli.json).await,
-        Some(Commands::Push { local, pod, to, quiet }) => {
-            cmd_transfer::cmd_push(&http, local, pod, to, quiet, cli.json).await
-        }
-        Some(Commands::Pull { remote, pod, to, quiet }) => {
-            cmd_transfer::cmd_pull(&http, remote, pod, to, quiet, cli.json).await
-        }
-        Some(Commands::Ls { path, pod }) => {
-            cmd_transfer::cmd_ls(&http, path, pod, cli.json).await
-        }
-        Some(Commands::Rm { remote, pod, recursive }) => {
-            cmd_transfer::cmd_rm(&http, remote, pod, recursive, cli.json).await
-        }
+        Some(Commands::Push {
+            local,
+            pod,
+            to,
+            quiet,
+        }) => cmd_transfer::cmd_push(&http, local, pod, to, quiet, cli.json).await,
+        Some(Commands::Pull {
+            remote,
+            pod,
+            to,
+            quiet,
+        }) => cmd_transfer::cmd_pull(&http, remote, pod, to, quiet, cli.json).await,
+        Some(Commands::Ls { path, pod }) => cmd_transfer::cmd_ls(&http, path, pod, cli.json).await,
+        Some(Commands::Rm {
+            remote,
+            pod,
+            recursive,
+        }) => cmd_transfer::cmd_rm(&http, remote, pod, recursive, cli.json).await,
         Some(Commands::Transfers { tail, pod }) => {
             cmd_transfer::cmd_transfers(tail, pod, cli.json).await
         }
@@ -831,16 +901,23 @@ fn cmd_help_topic(topic: Option<&str>, json: bool) {
     ];
 
     if json {
-        let arr: Vec<_> = topics.iter().map(|(k, t, b)| {
-            serde_json::json!({"topic": k, "title": t, "body": b})
-        }).collect();
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!(arr)).unwrap_or_default());
+        let arr: Vec<_> = topics
+            .iter()
+            .map(|(k, t, b)| serde_json::json!({"topic": k, "title": t, "body": b}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!(arr)).unwrap_or_default()
+        );
         return;
     }
 
     if let Some(name) = topic {
         let lower = name.to_lowercase();
-        if let Some((_, title, body)) = topics.iter().find(|(k, _, _)| k.eq_ignore_ascii_case(&lower)) {
+        if let Some((_, title, body)) = topics
+            .iter()
+            .find(|(k, _, _)| k.eq_ignore_ascii_case(&lower))
+        {
             wizard::print_header(title);
             println!("{}", body);
             println!();
@@ -875,16 +952,22 @@ async fn cmd_daemon(action: DaemonAction, json: bool) {
         DaemonAction::Stop => {
             match daemon::send_command("shutdown", serde_json::Value::Null).await {
                 Some(resp) if resp.status == "ok" => {
-                    if json { println!(r#"{{"daemon":"stopped"}}"#); }
-                    else { println!("Daemon stopped."); }
+                    if json {
+                        println!(r#"{{"daemon":"stopped"}}"#);
+                    } else {
+                        println!("Daemon stopped.");
+                    }
                 }
                 Some(resp) => {
                     eprintln!("Daemon error: {}", resp.error.unwrap_or_default());
                     std::process::exit(1);
                 }
                 None => {
-                    if json { println!(r#"{{"daemon":"not_running"}}"#); }
-                    else { println!("Daemon is not running."); }
+                    if json {
+                        println!(r#"{{"daemon":"not_running"}}"#);
+                    } else {
+                        println!("Daemon is not running.");
+                    }
                 }
             }
         }
@@ -892,17 +975,43 @@ async fn cmd_daemon(action: DaemonAction, json: bool) {
             match daemon::send_command("status", serde_json::Value::Null).await {
                 Some(resp) if resp.status == "ok" => {
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&resp.data).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&resp.data).unwrap_or_default()
+                        );
                     } else if let Some(data) = &resp.data {
-                        let pid = data.pointer("/daemon/pid").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let uptime = data.pointer("/daemon/uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let status = data.pointer("/daemon/status").and_then(|v| v.as_str()).unwrap_or("?");
-                        let token = data.pointer("/auth/token_valid").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let email = data.pointer("/auth/email").and_then(|v| v.as_str()).unwrap_or("?");
+                        let pid = data
+                            .pointer("/daemon/pid")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let uptime = data
+                            .pointer("/daemon/uptime_secs")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let status = data
+                            .pointer("/daemon/status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let token = data
+                            .pointer("/auth/token_valid")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let email = data
+                            .pointer("/auth/email")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
                         println!("Daemon:  ● running (pid {}, uptime {}s)", pid, uptime);
                         println!("Status:  {}", status);
-                        println!("Auth:    {} ({})", if token { "● valid" } else { "○ expired" }, email);
-                        let pods = data.pointer("/pods").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                        println!(
+                            "Auth:    {} ({})",
+                            if token { "● valid" } else { "○ expired" },
+                            email
+                        );
+                        let pods = data
+                            .pointer("/pods")
+                            .and_then(|v| v.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
                         println!("Pods:    {}", pods);
                     }
                 }
@@ -910,8 +1019,11 @@ async fn cmd_daemon(action: DaemonAction, json: bool) {
                     eprintln!("Daemon error: {}", resp.error.unwrap_or_default());
                 }
                 None => {
-                    if json { println!(r#"{{"daemon":"not_running"}}"#); }
-                    else { println!("Daemon is not running. Start with: tytus daemon run"); }
+                    if json {
+                        println!(r#"{{"daemon":"not_running"}}"#);
+                    } else {
+                        println!("Daemon is not running. Start with: tytus daemon run");
+                    }
                 }
             }
         }
@@ -919,11 +1031,394 @@ async fn cmd_daemon(action: DaemonAction, json: bool) {
 }
 
 fn shell_escape(s: &str) -> String {
-    if s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/' || c == '.') {
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/' || c == '.')
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
+}
+
+// ── Account management ──────────────────────────────────────
+
+async fn cmd_account(http: &atomek_core::HttpClient, action: AccountAction, json: bool) {
+    match action {
+        AccountAction::List => cmd_account_list(json),
+        AccountAction::Add => cmd_account_add(http, json).await,
+        AccountAction::Switch { email } => cmd_account_switch(&email, json).await,
+        AccountAction::Current => cmd_account_current(json),
+        AccountAction::Remove { email, force } => cmd_account_remove(&email, force, json).await,
+    }
+}
+
+fn cmd_account_list(json: bool) {
+    let state = CliState::load_file_only();
+    let output = account::list_accounts(&state);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).unwrap_or_default()
+        );
+    } else {
+        print!("{}", account::render_human_list(&output));
+    }
+}
+
+fn cmd_account_current(json: bool) {
+    let state = CliState::load_file_only();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "active_email": state.active_email })
+        );
+    } else if let Some(email) = state.active_email.or(state.email) {
+        println!("{}", email);
+    } else {
+        eprintln!("No active account. Run: tytus account add");
+        std::process::exit(1);
+    }
+}
+
+async fn cmd_account_add(http: &atomek_core::HttpClient, json: bool) {
+    if !wizard::is_interactive() {
+        let msg = "Cannot open browser for login in non-interactive context. Run 'tytus account add' from a terminal.";
+        append_autostart_log(&format!("cmd_account_add BLOCKED: {}", msg));
+        eprintln!("tytus: {}", msg);
+        std::process::exit(1);
+    }
+
+    let session = match atomek_auth::create_device_session(http).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to start login: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if !json {
+        println!("Opening browser for authentication...");
+        println!("If it doesn't open, visit: {}", session.verification_uri);
+        println!("Code: {}", session.user_code);
+    }
+    let _ = open::that(&session.verification_uri);
+
+    let result = match atomek_auth::poll_for_authorization(http, &session.device_id, |s| {
+        if !json && !s.contains("pending") {
+            eprintln!("{}", s);
+        }
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Login failed: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let email = result.user.email.clone();
+    {
+        let _lock = match state::StateMutationLock::acquire() {
+            Ok(lock) => lock,
+            Err(e) => {
+                eprintln!("Failed to acquire state lock: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let existing_state = CliState::load();
+        if existing_state
+            .accounts
+            .iter()
+            .any(|a| account::canonical_email(&a.email) == account::canonical_email(&email))
+        {
+            eprintln!(
+                "Account {} is already stored. Use: tytus account switch {}",
+                email, email
+            );
+            std::process::exit(1);
+        }
+    }
+
+    let mut new_state = CliState {
+        email: Some(email.clone()),
+        refresh_token: Some(result.refresh_token.clone()),
+        ..Default::default()
+    };
+    let email_clone = new_state.email.clone();
+    update_tokens(&mut new_state, &result, &email_clone);
+    let _ = atomek_auth::KeychainStore::store_refresh_token(&email, &result.refresh_token);
+    let _ = atomek_auth::KeychainStore::add_indexed_account(&email);
+
+    sync_tytus(&mut new_state, http).await;
+    let default_msg = ensure_default_pod(&mut new_state, http).await;
+    let Some(profile) = account::profile_from_state(&new_state) else {
+        eprintln!("Login did not return an account email");
+        std::process::exit(1);
+    };
+
+    let had_active = {
+        let _lock = match state::StateMutationLock::acquire() {
+            Ok(lock) => lock,
+            Err(e) => {
+                eprintln!("Failed to acquire state lock: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let mut existing_state = CliState::load();
+        if existing_state
+            .accounts
+            .iter()
+            .any(|a| account::canonical_email(&a.email) == account::canonical_email(&email))
+        {
+            eprintln!(
+                "Account {} was added by another process. Use: tytus account switch {}",
+                email, email
+            );
+            std::process::exit(1);
+        }
+        let had_active = existing_state.active_email.is_some() || existing_state.email.is_some();
+        account::upsert_profile(&mut existing_state, profile);
+        if !had_active {
+            existing_state.active_email = Some(email.clone());
+            existing_state.sync_active_snapshot();
+            let _ = atomek_auth::KeychainStore::store_last_email(&email);
+        }
+        if let Err(e) = existing_state.save_critical() {
+            eprintln!("Failed to save account: {}", e);
+            std::process::exit(1);
+        }
+        had_active
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"status":"account_added","email":email,"active":!had_active})
+        );
+    } else {
+        println!("✓ Added account {}", email);
+        if had_active {
+            println!(
+                "  Active account unchanged. Switch with: tytus account switch {}",
+                email
+            );
+        } else {
+            println!("  Active account: {}", email);
+        }
+        if let Some(msg) = default_msg {
+            println!("{}", msg);
+        }
+    }
+}
+
+async fn cmd_account_switch(email: &str, json: bool) {
+    let target = account::canonical_email(email);
+    let _lock = match state::StateMutationLock::acquire() {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("Failed to acquire state lock: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let mut state = CliState::load();
+    state.sync_account_from_snapshot();
+    let Some(account_email) = state
+        .accounts
+        .iter()
+        .find(|a| account::canonical_email(&a.email) == target)
+        .map(|a| a.email.clone())
+    else {
+        eprintln!("Unknown account '{}'. Run: tytus account list", email);
+        std::process::exit(1);
+    };
+    if atomek_auth::KeychainStore::try_get_refresh_token(&account_email).is_none() {
+        eprintln!(
+            "Account {} has no refresh token. Run: tytus account add",
+            account_email
+        );
+        std::process::exit(1);
+    }
+
+    if let Some(current_email) = state.email.clone() {
+        let mut owned_pods: Vec<String> = tunnel_reap::list_owned_pod_pidfiles(&current_email)
+            .into_iter()
+            .map(|(pod, _)| pod)
+            .collect();
+        for pod in &state.pods {
+            if pod.tunnel_iface.is_some() && !owned_pods.iter().any(|p| p == &pod.pod_id) {
+                owned_pods.push(pod.pod_id.clone());
+            }
+        }
+        for pod in owned_pods {
+            let _ = tunnel_reap::reap_tunnel_for_pod_owned(&pod, &current_email);
+            if let Some(entry) = state.pods.iter_mut().find(|p| p.pod_id == pod) {
+                entry.tunnel_iface = None;
+            }
+        }
+        state.sync_account_from_snapshot();
+    }
+
+    let state_dir = CliState::state_path().parent().map(|p| p.to_path_buf());
+    let sentinel = state_dir
+        .as_ref()
+        .map(|d| d.join("account-switch.in-progress"));
+    if let Some(path) = &sentinel {
+        let _ = std::fs::write(path, format!("{}\n", account_email));
+    }
+    let daemon_was_running = stop_daemon_for_account_switch().await;
+
+    state.active_email = Some(account_email.clone());
+    if let Some(profile) = state.accounts.iter_mut().find(|a| a.email == account_email) {
+        profile.last_active_at = Some(chrono::Utc::now());
+    }
+    state.sync_active_snapshot();
+    if let Err(e) = state.save_critical() {
+        if let Some(path) = &sentinel {
+            let _ = std::fs::remove_file(path);
+        }
+        eprintln!("Failed to switch account: {}", e);
+        std::process::exit(1);
+    }
+    let _ = atomek_auth::KeychainStore::store_last_email(&account_email);
+    if let Some(path) = &sentinel {
+        let _ = std::fs::remove_file(path);
+    }
+    if daemon_was_running {
+        start_daemon_detached();
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"status":"switched","active_email":account_email})
+        );
+    } else {
+        println!("✓ Active account: {}", account_email);
+    }
+}
+
+async fn cmd_account_remove(email: &str, force: bool, json: bool) {
+    let target = account::canonical_email(email);
+    let _lock = match state::StateMutationLock::acquire() {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("Failed to acquire state lock: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let mut state = CliState::load();
+    state.sync_account_from_snapshot();
+    let Some(account_email) = state
+        .accounts
+        .iter()
+        .find(|a| account::canonical_email(&a.email) == target)
+        .map(|a| a.email.clone())
+    else {
+        eprintln!("Unknown account '{}'. Run: tytus account list", email);
+        std::process::exit(1);
+    };
+    let active = state.active_email.as_deref() == Some(account_email.as_str());
+    let pod_count = state
+        .accounts
+        .iter()
+        .find(|a| a.email == account_email)
+        .map(|a| a.pods.len())
+        .unwrap_or(0);
+    if !force && active {
+        eprintln!(
+            "Account {} is active. Switch first or pass --force.",
+            account_email
+        );
+        std::process::exit(1);
+    }
+    if !force && pod_count > 0 {
+        eprintln!(
+            "ERROR: account has {} pods listed in local state\n  account remove is LOCAL-ONLY — it does not call Provider.\n  To free units server-side first: tytus account switch {} && tytus revoke <pod_id>\n  Or revoke + delete: tytus account switch {} && tytus logout\n  To delete locally and orphan pods server-side: tytus account remove {} --force",
+            pod_count, account_email, account_email, account_email
+        );
+        std::process::exit(1);
+    }
+
+    let daemon_was_running = if active {
+        cmd_disconnect(None, json).await;
+        stop_daemon_for_account_switch().await
+    } else {
+        false
+    };
+    let _removed = account::remove_profile(&mut state, &account_email);
+    let _ = atomek_auth::KeychainStore::delete_refresh_token(&account_email);
+    let _ = atomek_auth::KeychainStore::remove_indexed_account(&account_email);
+    if active {
+        state.active_email = None;
+        state.sync_active_snapshot();
+    }
+    if let Err(e) = state.save_critical() {
+        eprintln!("Failed to save account removal: {}", e);
+        std::process::exit(1);
+    }
+    if daemon_was_running {
+        // Intentionally do not restart: no active account remains.
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"status":"removed","email":account_email})
+        );
+    } else {
+        println!("✓ Removed account {} locally", account_email);
+    }
+}
+
+async fn stop_daemon_for_account_switch() -> bool {
+    let pid = daemon::pid_file_pid();
+    let was_running = daemon::is_daemon_running().await
+        || pid.is_some_and(|p| daemon::process_alive(p) && daemon::pid_is_tytus_daemon(p));
+    if !was_running {
+        return false;
+    }
+
+    let _ = daemon::send_command_timeout(
+        "shutdown",
+        serde_json::Value::Null,
+        std::time::Duration::from_secs(2),
+    )
+    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if !daemon::is_daemon_running().await {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    if let Some(pid) = pid {
+        if daemon::process_alive(pid) && daemon::pid_is_tytus_daemon(pid) {
+            let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline && daemon::process_alive(pid) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            if daemon::process_alive(pid) && daemon::pid_is_tytus_daemon(pid) {
+                let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(daemon::socket_path());
+    let _ = std::fs::remove_file(daemon::pid_path());
+    was_running
+}
+
+fn start_daemon_detached() {
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("tytus"));
+    let _ = std::process::Command::new(exe)
+        .args(["daemon", "run"])
+        .env("TYTUS_HEADLESS", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 // ── Login ────────────────────────────────────────────────────
@@ -940,15 +1435,20 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
                 sync_tytus(&mut state, http).await;
                 let default_msg = ensure_default_pod(&mut state, http).await;
                 state.save();
-                if json { print_json_status(&state); }
-                else {
+                if json {
+                    print_json_status(&state);
+                } else {
                     println!("✓ Logged in as {}", state.email.as_deref().unwrap_or("?"));
-                    if let Some(msg) = default_msg { println!("{}", msg); }
+                    if let Some(msg) = default_msg {
+                        println!("{}", msg);
+                    }
                 }
                 return;
             }
             Err(_) => {
-                if !json { eprintln!("Stored token expired. Starting fresh login..."); }
+                if !json {
+                    eprintln!("Stored token expired. Starting fresh login...");
+                }
             }
         }
     }
@@ -963,7 +1463,10 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
 
     let session = match atomek_auth::create_device_session(http).await {
         Ok(s) => s,
-        Err(e) => { eprintln!("Failed to start login: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("Failed to start login: {}", e);
+            std::process::exit(1);
+        }
     };
 
     if !json {
@@ -974,10 +1477,17 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
     let _ = open::that(&session.verification_uri);
 
     let result = match atomek_auth::poll_for_authorization(http, &session.device_id, |s| {
-        if !json && !s.contains("pending") { eprintln!("{}", s); }
-    }).await {
+        if !json && !s.contains("pending") {
+            eprintln!("{}", s);
+        }
+    })
+    .await
+    {
         Ok(r) => r,
-        Err(e) => { eprintln!("Login failed: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("Login failed: {}", e);
+            std::process::exit(1);
+        }
     };
 
     state.email = Some(result.user.email.clone());
@@ -986,7 +1496,8 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
     update_tokens(&mut state, &result, &email_clone);
 
     // Store in keychain too (for cross-tool compatibility)
-    let _ = atomek_auth::KeychainStore::store_refresh_token(&result.user.email, &result.refresh_token);
+    let _ =
+        atomek_auth::KeychainStore::store_refresh_token(&result.user.email, &result.refresh_token);
     let _ = atomek_auth::KeychainStore::store_last_email(&result.user.email);
 
     sync_tytus(&mut state, http).await;
@@ -1000,7 +1511,9 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
         if let Some(ref tier) = state.tier {
             println!("  Plan: {}", tier);
         }
-        if let Some(msg) = default_msg { println!("{}", msg); }
+        if let Some(msg) = default_msg {
+            println!("{}", msg);
+        }
     }
 }
 
@@ -1014,7 +1527,10 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
 ///
 /// Called on every login (fresh browser flow AND RT auto-refresh) per
 /// SPRINT-AIL-DEFAULT-POD phase A6.
-async fn ensure_default_pod(state: &mut CliState, http: &atomek_core::HttpClient) -> Option<String> {
+async fn ensure_default_pod(
+    state: &mut CliState,
+    http: &atomek_core::HttpClient,
+) -> Option<String> {
     let (sk, auid) = match (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
         (Some(s), Some(a)) => (s.clone(), a.clone()),
         _ => return None, // no subscription / Wannolot Pass yet
@@ -1034,7 +1550,9 @@ async fn ensure_default_pod(state: &mut CliState, http: &atomek_core::HttpClient
             // and made the tray think the tunnel was down even when
             // boringtun was alive and routing traffic. Reported
             // 2026-04-19 ("tunnel_iface null in state but tunnel works").
-            let preserved_iface = state.pods.iter()
+            let preserved_iface = state
+                .pods
+                .iter()
                 .find(|p| p.pod_id == alloc.pod_id)
                 .and_then(|p| p.tunnel_iface.clone());
             state.pods.retain(|p| p.pod_id != alloc.pod_id);
@@ -1061,7 +1579,10 @@ async fn ensure_default_pod(state: &mut CliState, http: &atomek_core::HttpClient
             // on its own). A6 scope is allocation only.
             Some(format!(
                 "✓ Default pod ready at {}",
-                alloc.stable_ai_endpoint.as_deref().unwrap_or("http://10.42.42.1:18080")
+                alloc
+                    .stable_ai_endpoint
+                    .as_deref()
+                    .unwrap_or("http://10.42.42.1:18080")
             ))
         }
         Err(atomek_core::AtomekError::NoCapacity { .. }) => {
@@ -1070,7 +1591,10 @@ async fn ensure_default_pod(state: &mut CliState, http: &atomek_core::HttpClient
         Err(e) => {
             // Don't fail login on a default-pod blip; the user can retry via
             // `tytus connect` once the backend recovers.
-            Some(format!("⚠ Default pod not provisioned: {}. Retry with: tytus connect", e))
+            Some(format!(
+                "⚠ Default pod not provisioned: {}. Retry with: tytus connect",
+                e
+            ))
         }
     }
 }
@@ -1081,14 +1605,20 @@ async fn cmd_status(http: &atomek_core::HttpClient, json: bool) {
     let mut state = CliState::load();
 
     if !state.is_logged_in() {
-        if json { println!(r#"{{"logged_in":false}}"#); }
-        else { println!("Not logged in. Run: tytus login"); }
+        if json {
+            println!(r#"{{"logged_in":false}}"#);
+        } else {
+            println!("Not logged in. Run: tytus login");
+        }
         return;
     }
 
     if let Err(e) = ensure_token(&mut state, http).await {
-        if json { println!(r#"{{"logged_in":true,"token_error":"{}"}}"#, e); }
-        else { eprintln!("Token refresh failed: {}. Run: tytus login", e); }
+        if json {
+            println!(r#"{{"logged_in":true,"token_error":"{}"}}"#, e);
+        } else {
+            eprintln!("Token refresh failed: {}. Run: tytus login", e);
+        }
         return;
     }
     sync_tytus(&mut state, http).await;
@@ -1097,8 +1627,11 @@ async fn cmd_status(http: &atomek_core::HttpClient, json: bool) {
     reap_dead_tunnels(&mut state);
     state.save();
 
-    if json { print_json_status(&state); }
-    else { print_human_status(&state); }
+    if json {
+        print_json_status(&state);
+    } else {
+        print_human_status(&state);
+    }
 }
 
 // ── Connect ──────────────────────────────────────────────────
@@ -1115,9 +1648,14 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
                 .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
                 .unwrap_or_else(|| format!("{}ms", ms))
         });
+        let redacted_email = state
+            .email
+            .as_deref()
+            .map(atomek_core::redact_email)
+            .unwrap_or_else(|| "none".to_string());
         append_autostart_log(&format!(
             "cmd_connect START: email={}, has_rt={}, has_at={}, expires_at={}, pods={}, pod_id={:?}",
-            state.email.as_deref().unwrap_or("none"),
+            redacted_email,
             state.refresh_token.is_some(),
             state.access_token.is_some(),
             expires_desc.as_deref().unwrap_or("none"),
@@ -1182,28 +1720,42 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
 
     if let Some(ref pid) = pod_id {
         target_pod_id = pid.clone();
-        if !json { eprintln!("Connecting to pod {}...", pid); }
-    } else if let Some(default_pod) = state.pods.iter().find(|p| p.agent_type.as_deref() == Some("none")) {
+        if !json {
+            eprintln!("Connecting to pod {}...", pid);
+        }
+    } else if let Some(default_pod) = state
+        .pods
+        .iter()
+        .find(|p| p.agent_type.as_deref() == Some("none"))
+    {
         // Prefer the user's default pod (agent-less, AIL-only) as the
         // tunnel target — it's universal and free, matches the spirit of
         // SPRINT §6 B2. Fall through to the existing-pod reuse if there
         // isn't one yet.
         target_pod_id = default_pod.pod_id.clone();
-        if !json { eprintln!("Connecting to default pod {}...", target_pod_id); }
+        if !json {
+            eprintln!("Connecting to default pod {}...", target_pod_id);
+        }
     } else if let Some(existing) = state.pods.first() {
         // No default pod yet, but the user has agent-bearing pods — reuse
         // the first one to keep the IP stable.
         target_pod_id = existing.pod_id.clone();
-        if !json { eprintln!("Reconnecting to pod {}...", target_pod_id); }
+        if !json {
+            eprintln!("Reconnecting to pod {}...", target_pod_id);
+        }
     } else {
         // No pods at all — allocate a default pod (free, 0 units) so a
         // user who logged in without provisioning (e.g. early-access path)
         // still gets working AIL access.
-        if !json { eprintln!("Allocating default pod..."); }
+        if !json {
+            eprintln!("Allocating default pod...");
+        }
         match atomek_pods::request_default_pod(&client).await {
             Ok(a) => {
                 target_pod_id = a.pod_id.clone();
-                let preserved_iface = state.pods.iter()
+                let preserved_iface = state
+                    .pods
+                    .iter()
                     .find(|p| p.pod_id == a.pod_id)
                     .and_then(|p| p.tunnel_iface.clone());
                 state.pods.retain(|p| p.pod_id != a.pod_id);
@@ -1224,7 +1776,9 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
                     pod_public_url: a.pod_public_url.clone(),
                 });
                 state.save();
-                if !json { eprintln!("✓ Default pod {} allocated", a.pod_id); }
+                if !json {
+                    eprintln!("✓ Default pod {} allocated", a.pod_id);
+                }
             }
             Err(e) => {
                 state.save();
@@ -1235,7 +1789,9 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
     }
 
     // Download WireGuard config
-    if !json { eprintln!("Downloading tunnel config..."); }
+    if !json {
+        eprintln!("Downloading tunnel config...");
+    }
     let wg_config = match atomek_pods::download_config_for_pod(&client, &target_pod_id).await {
         Ok(c) => c,
         Err(e) => {
@@ -1246,15 +1802,35 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
     };
 
     // Fill in endpoints from WG config if not already set by allocation
-    let parts: Vec<&str> = wg_config.address.split('/').next().unwrap_or("").split('.').collect();
+    let parts: Vec<&str> = wg_config
+        .address
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .collect();
     let ai_endpoint = if parts.len() == 4 {
-        Some(format!("http://{}.{}.{}.1:18080", parts[0], parts[1], parts[2]))
-    } else { None };
+        Some(format!(
+            "http://{}.{}.{}.1:18080",
+            parts[0], parts[1], parts[2]
+        ))
+    } else {
+        None
+    };
 
     if let Some(pod) = state.pods.iter_mut().find(|p| p.pod_id == target_pod_id) {
-        if pod.ai_endpoint.is_none() { pod.ai_endpoint = ai_endpoint.clone(); }
+        if pod.ai_endpoint.is_none() {
+            pod.ai_endpoint = ai_endpoint.clone();
+        }
         if pod.droplet_ip.is_none() {
-            pod.droplet_ip = Some(wg_config.endpoint.split(':').next().unwrap_or("").to_string());
+            pod.droplet_ip = Some(
+                wg_config
+                    .endpoint
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+            );
         }
         if pod.agent_endpoint.is_none() {
             if let (Some(ref ep), Some(ref at)) = (&pod.ai_endpoint, &pod.agent_type) {
@@ -1266,7 +1842,9 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
     state.save();
 
     // ── Phase 2: Tunnel activation (needs root for TUN device) ──
-    if !json { eprintln!("Activating WireGuard tunnel..."); }
+    if !json {
+        eprintln!("Activating WireGuard tunnel...");
+    }
 
     let is_root = unsafe { libc::geteuid() == 0 };
 
@@ -1306,7 +1884,13 @@ async fn activate_tunnel_inline(
             let pid_dir = secure_tytus_tmp_dir();
             let pid_f = pid_dir.join(format!("tunnel-{}.pid", target_pod_id));
             let iface_f = pid_dir.join(format!("tunnel-{}.iface", target_pod_id));
-            let _ = std::fs::write(&pid_f, format!("{}", std::process::id()));
+            let _ = tunnel_pidfile::write(
+                &pid_f,
+                std::process::id() as i32,
+                state.email.as_deref().unwrap_or(""),
+                target_pod_id,
+                Some(&iface),
+            );
             secure_chmod_600(&pid_f);
             let _ = std::fs::write(&iface_f, &iface);
             secure_chmod_600(&iface_f);
@@ -1321,7 +1905,9 @@ async fn activate_tunnel_inline(
                 println!("{}", serde_json::to_string_pretty(&pod).unwrap_or_default());
             } else {
                 eprintln!("✓ Tunnel active on {}", iface);
-                if !wizard::is_interactive() { append_autostart_log(&format!("cmd_connect OK: tunnel active on {}", iface)); }
+                if !wizard::is_interactive() {
+                    append_autostart_log(&format!("cmd_connect OK: tunnel active on {}", iface));
+                }
                 // SECURITY: Only print stable endpoint, never internal IPs or raw keys
                 if let Some(pod) = state.pods.iter().find(|p| p.pod_id == target_pod_id) {
                     if let Some(ref ep) = pod.stable_ai_endpoint {
@@ -1330,7 +1916,10 @@ async fn activate_tunnel_inline(
                         println!("ENDPOINT={}", ep);
                     }
                 }
-                eprintln!("Tunnel daemon running (pid {}). Stop with: tytus disconnect", std::process::id());
+                eprintln!(
+                    "Tunnel daemon running (pid {}). Stop with: tytus disconnect",
+                    std::process::id()
+                );
             }
 
             // Block until signal — this process IS the daemon
@@ -1374,13 +1963,20 @@ async fn activate_tunnel_elevated(
     //   3. Pidfile exists but points at a different pid (stale). We
     //      skip this case — the caller's disconnect path handles it.
     let existing_alive = {
-        let pidfile_pid = std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.pid", target_pod_id))
-            .ok()
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .filter(|&pid| pid > 1 && unsafe {
-                if libc::kill(pid, 0) == 0 { true }
-                else { std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
-            });
+        let pidfile_pid =
+            std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.pid", target_pod_id))
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .filter(|&pid| {
+                    pid > 1
+                        && unsafe {
+                            if libc::kill(pid, 0) == 0 {
+                                true
+                            } else {
+                                std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+                            }
+                        }
+                });
         let orphan_pods = tunnel_reap::list_orphan_tunnel_pods();
         pidfile_pid.is_some() || orphan_pods.iter().any(|p| p == target_pod_id)
     };
@@ -1397,14 +1993,17 @@ async fn activate_tunnel_elevated(
         let gateway_reachable = probe_stable_gateway();
         if !gateway_reachable {
             if !json {
-                eprintln!("✓ Tunnel for pod {} exists but gateway unreachable — reaping dead tunnel...", target_pod_id);
+                eprintln!(
+                    "✓ Tunnel for pod {} exists but gateway unreachable — reaping dead tunnel...",
+                    target_pod_id
+                );
             }
             // Fire-and-forget disconnect so the kill path runs
             // through the same sudoers entry as a normal
             // `tytus disconnect`. Sleep briefly so the pidfile is
             // cleaned up before we try to re-bind.
             let _ = std::process::Command::new("tytus")
-                .args(["disconnect", "--pod", &target_pod_id])
+                .args(["disconnect", "--pod", target_pod_id])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
@@ -1412,14 +2011,23 @@ async fn activate_tunnel_elevated(
             // Fall through to the normal activation path below.
         } else {
             if json {
-                println!("{}", serde_json::json!({
-                    "pod_id": target_pod_id,
-                    "status": "tunnel_already_up",
-                    "action": "no-op",
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "pod_id": target_pod_id,
+                        "status": "tunnel_already_up",
+                        "action": "no-op",
+                    })
+                );
             } else {
-                eprintln!("✓ Tunnel for pod {} is already up — skipping duplicate activation", target_pod_id);
-                eprintln!("  To replace: `tytus disconnect --pod {}` first, then reconnect.", target_pod_id);
+                eprintln!(
+                    "✓ Tunnel for pod {} is already up — skipping duplicate activation",
+                    target_pod_id
+                );
+                eprintln!(
+                    "  To replace: `tytus disconnect --pod {}` first, then reconnect.",
+                    target_pod_id
+                );
             }
             return;
         }
@@ -1436,6 +2044,7 @@ async fn activate_tunnel_elevated(
         "allowed_ips": wg_config.allowed_ips,
         "persistent_keepalive": wg_config.persistent_keepalive,
         "pod_id": target_pod_id,
+        "email": state.email.as_deref().unwrap_or(""),
     });
 
     // CRITICAL: the sudoers entry allows
@@ -1498,13 +2107,19 @@ async fn activate_tunnel_elevated(
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
 
         for line in reader.lines() {
-            if std::time::Instant::now() > deadline { break; }
+            if std::time::Instant::now() > deadline {
+                break;
+            }
             match line {
                 Ok(l) if l.starts_with("TUNNEL_READY") => {
                     // Parse: TUNNEL_READY iface=utunX pid=12345
                     for part in l.split_whitespace() {
-                        if let Some(v) = part.strip_prefix("iface=") { iface_name = Some(v.to_string()); }
-                        if let Some(v) = part.strip_prefix("pid=") { tunnel_pid = v.parse::<u32>().ok(); }
+                        if let Some(v) = part.strip_prefix("iface=") {
+                            iface_name = Some(v.to_string());
+                        }
+                        if let Some(v) = part.strip_prefix("pid=") {
+                            tunnel_pid = v.parse::<u32>().ok();
+                        }
                     }
                     break;
                 }
@@ -1528,7 +2143,12 @@ async fn activate_tunnel_elevated(
             println!("{}", serde_json::to_string_pretty(&pod).unwrap_or_default());
         } else {
             eprintln!("✓ Tunnel active on {}", iface);
-            if !wizard::is_interactive() { append_autostart_log(&format!("cmd_connect OK: tunnel active on {} (elevated)", iface)); }
+            if !wizard::is_interactive() {
+                append_autostart_log(&format!(
+                    "cmd_connect OK: tunnel active on {} (elevated)",
+                    iface
+                ));
+            }
             // SECURITY: Only print stable endpoint, never internal IPs or raw keys
             if let Some(pod) = state.pods.iter().find(|p| p.pod_id == target_pod_id) {
                 if let Some(ref ep) = pod.stable_ai_endpoint {
@@ -1538,7 +2158,10 @@ async fn activate_tunnel_elevated(
                 }
             }
             if let Some(pid) = tunnel_pid {
-                eprintln!("Tunnel daemon running (pid {}). Stop with: tytus disconnect", pid);
+                eprintln!(
+                    "Tunnel daemon running (pid {}). Stop with: tytus disconnect",
+                    pid
+                );
             }
         }
     } else {
@@ -1680,10 +2303,13 @@ fn try_spawn_elevated(
             json_flag,
         );
         match std::process::Command::new("osascript")
-            .args(["-e", &format!(
-                "do shell script \"{}\" with administrator privileges",
-                cmd.replace('\\', "\\\\").replace('"', "\\\"")
-            )])
+            .args([
+                "-e",
+                &format!(
+                    "do shell script \"{}\" with administrator privileges",
+                    cmd.replace('\\', "\\\\").replace('"', "\\\"")
+                ),
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1691,7 +2317,10 @@ fn try_spawn_elevated(
         {
             Ok(child) => return Ok(child),
             Err(e) => {
-                tracing::warn!("osascript spawn failed: {} — falling back to interactive sudo", e);
+                tracing::warn!(
+                    "osascript spawn failed: {} — falling back to interactive sudo",
+                    e
+                );
             }
         }
     }
@@ -1826,7 +2455,13 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
             // disconnect said "nothing to reap" yet utun5 kept routing
             // + a root boringtun process kept running.
             let pid_file = pid_dir.join(format!("tunnel-{}.pid", pod_id));
-            let _ = std::fs::write(&pid_file, format!("{}", std::process::id()));
+            let _ = tunnel_pidfile::write(
+                &pid_file,
+                std::process::id() as i32,
+                v.get("email").and_then(|x| x.as_str()).unwrap_or(""),
+                &pod_id,
+                Some(&iface),
+            );
             {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&pid_file, std::fs::Permissions::from_mode(0o644));
@@ -1839,7 +2474,8 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
             let _ = std::fs::write(&iface_file, &iface);
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&iface_file, std::fs::Permissions::from_mode(0o644));
+                let _ =
+                    std::fs::set_permissions(&iface_file, std::fs::Permissions::from_mode(0o644));
             }
 
             // Signal to parent that tunnel is ready (print to stdout for capture)
@@ -1881,9 +2517,9 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
             // macOS sends SIGTERM on system sleep, shutdown, launchd stop, and
             // when sudo's session expires. This was the root cause of silent
             // tunnel deaths during the headless-auth sprint testing.
-            let mut sigterm = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            ).expect("Failed to register SIGTERM handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
 
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
@@ -1916,7 +2552,10 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
         }
         Err(e) => {
             eprintln!("Tunnel failed: {}", e);
-            append_log(&log_file_path, &format!("FATAL tunnel-up pod={} failed to connect: {}", pod_id, e));
+            append_log(
+                &log_file_path,
+                &format!("FATAL tunnel-up pod={} failed to connect: {}", pod_id, e),
+            );
             std::process::exit(1);
         }
     }
@@ -1974,7 +2613,9 @@ pub(crate) fn secure_chmod_600(path: &std::path::Path) {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     #[cfg(not(unix))]
-    { let _ = path; }
+    {
+        let _ = path;
+    }
 }
 
 // ── Tunnel down (validated SIGTERM, replaces direct sudo kill) ──
@@ -2028,7 +2669,10 @@ fn cmd_tunnel_down(pid: i32) {
     }
 
     if !matched {
-        eprintln!("tunnel-down: PID {} is not a registered tytus tunnel daemon", pid);
+        eprintln!(
+            "tunnel-down: PID {} is not a registered tytus tunnel daemon",
+            pid
+        );
         std::process::exit(1);
     }
 
@@ -2036,8 +2680,13 @@ fn cmd_tunnel_down(pid: i32) {
     let alive = unsafe { libc::kill(pid, 0) } == 0;
     if !alive {
         // Stale PID file — clean it up and exit success
-        if let Some(p) = matched_path { let _ = std::fs::remove_file(p); }
-        eprintln!("tunnel-down: PID {} already exited (stale pidfile cleaned)", pid);
+        if let Some(p) = matched_path {
+            let _ = std::fs::remove_file(p);
+        }
+        eprintln!(
+            "tunnel-down: PID {} already exited (stale pidfile cleaned)",
+            pid
+        );
         std::process::exit(0);
     }
 
@@ -2073,7 +2722,10 @@ async fn cmd_agent(http: &atomek_core::HttpClient, action: AgentAction, json: bo
         AgentAction::Uninstall { pod } => cmd_agent_uninstall(http, &pod, json).await,
         AgentAction::List => cmd_agent_list(http, json).await,
         AgentAction::Catalog { refresh } => cmd_agent_catalog(http, refresh, json).await,
-        AgentAction::Env { pod, reveal_secrets } => cmd_agent_env(http, pod, reveal_secrets, json).await,
+        AgentAction::Env {
+            pod,
+            reveal_secrets,
+        } => cmd_agent_env(http, pod, reveal_secrets, json).await,
     }
 }
 
@@ -2099,45 +2751,53 @@ async fn cmd_agent_env(
     // explicit --pod wins, otherwise pick the first connected pod.
     let resolved = match pod_id {
         Some(p) => p,
-        None => {
-            match atomek_pods::status::get_pod_status(&client).await {
-                Ok(s) => match s.pods.first() {
-                    Some(p) => p.pod_id.clone(),
-                    None => {
-                        eprintln!("No pods. Run: tytus connect");
-                        std::process::exit(1);
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Failed to list pods: {}", e);
+        None => match atomek_pods::status::get_pod_status(&client).await {
+            Ok(s) => match s.pods.first() {
+                Some(p) => p.pod_id.clone(),
+                None => {
+                    eprintln!("No pods. Run: tytus connect");
                     std::process::exit(1);
                 }
+            },
+            Err(e) => {
+                eprintln!("Failed to list pods: {}", e);
+                std::process::exit(1);
             }
-        }
+        },
     };
 
     match atomek_pods::agent::agent_env(&client, &resolved, reveal_secrets).await {
         Ok(env) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                    "pod_num": env.pod_num,
-                    "agent_type": env.agent_type,
-                    "reveal_secrets": env.reveal_secrets,
-                    "vars": env.vars.iter().map(|v| serde_json::json!({
-                        "key": v.key,
-                        "value": v.value,
-                        "source": v.source.clone().unwrap_or_else(|| "unknown".to_string()),
-                    })).collect::<Vec<_>>(),
-                })).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "pod_num": env.pod_num,
+                        "agent_type": env.agent_type,
+                        "reveal_secrets": env.reveal_secrets,
+                        "vars": env.vars.iter().map(|v| serde_json::json!({
+                            "key": v.key,
+                            "value": v.value,
+                            "source": v.source.clone().unwrap_or_else(|| "unknown".to_string()),
+                        })).collect::<Vec<_>>(),
+                    }))
+                    .unwrap()
+                );
                 return;
             }
             let revealed = env.reveal_secrets.unwrap_or(false);
             println!(
                 "Pod {} — {} — {} variable(s){}",
-                env.pod_num.map(|n| format!("{:02}", n)).unwrap_or_else(|| resolved.clone()),
+                env.pod_num
+                    .map(|n| format!("{:02}", n))
+                    .unwrap_or_else(|| resolved.clone()),
                 env.agent_type.unwrap_or_else(|| "unknown".to_string()),
                 env.vars.len(),
-                if revealed { " (secrets revealed)" } else { " (secrets redacted; pass --reveal-secrets on Operator tier to see them)" },
+                if revealed {
+                    " (secrets revealed)"
+                } else {
+                    " (secrets redacted; pass --reveal-secrets on Operator tier to see them)"
+                },
             );
             for v in &env.vars {
                 let src = v.source.as_deref().unwrap_or("unknown");
@@ -2198,7 +2858,9 @@ async fn cmd_agent_install(
     match pod_id {
         None => {
             // Allocate new pod + deploy agent atomically via /pod/request.
-            if !json { eprintln!("Allocating pod with {}...", name); }
+            if !json {
+                eprintln!("Allocating pod with {}...", name);
+            }
             match atomek_pods::request_pod_with_agent(&client, name).await {
                 Ok(a) => {
                     let returned_pod_id = a.pod_id.clone();
@@ -2207,7 +2869,9 @@ async fn cmd_agent_install(
                     // Scalesys stable-reuse returns a slot that had a
                     // live tunnel). See ensure_default_pod for the same
                     // pattern + rationale.
-                    let preserved_iface = state.pods.iter()
+                    let preserved_iface = state
+                        .pods
+                        .iter()
                         .find(|p| p.pod_id == a.pod_id)
                         .and_then(|p| p.tunnel_iface.clone());
                     state.pods.retain(|p| p.pod_id != a.pod_id);
@@ -2229,10 +2893,13 @@ async fn cmd_agent_install(
                     });
                     state.save();
                     if json {
-                        println!("{}", serde_json::json!({
-                            "pod_id": a.pod_id, "agent_type": name,
-                            "stable_ai_endpoint": a.stable_ai_endpoint,
-                        }));
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "pod_id": a.pod_id, "agent_type": name,
+                                "stable_ai_endpoint": a.stable_ai_endpoint,
+                            })
+                        );
                     } else {
                         println!("✓ {} installed on pod {}", name, a.pod_id);
                         println!("  Activate: tytus connect --pod {}", a.pod_id);
@@ -2270,7 +2937,9 @@ async fn cmd_agent_install(
                 std::process::exit(1);
             }
 
-            if !json { eprintln!("Installing {} on pod {}...", name, pid); }
+            if !json {
+                eprintln!("Installing {} on pod {}...", name, pid);
+            }
             match atomek_pods::deploy_agent(&client, &pid, name).await {
                 Ok(_) => {
                     if let Some(p) = state.pods.iter_mut().find(|p| p.pod_id == pid) {
@@ -2349,7 +3018,9 @@ async fn configure_hermes_for_zero_auth(
         Ok(r) if r.exit_code == 0 => {
             let key = r.stdout.as_deref().unwrap_or("").trim().to_string();
             if key.is_empty() {
-                if !json { eprintln!("  (hermes zero-config: API_SERVER_KEY file empty — is this an older image?)"); }
+                if !json {
+                    eprintln!("  (hermes zero-config: API_SERVER_KEY file empty — is this an older image?)");
+                }
                 return Err("api_server_key file empty".into());
             }
             let mut state = CliState::load();
@@ -2364,11 +3035,15 @@ async fn configure_hermes_for_zero_auth(
         }
         Ok(r) => {
             let err = r.stderr.as_deref().unwrap_or("").trim().to_string();
-            if !json { eprintln!("  (hermes zero-config: exec exit {}: {})", r.exit_code, err); }
+            if !json {
+                eprintln!("  (hermes zero-config: exec exit {}: {})", r.exit_code, err);
+            }
             Err(format!("exit {}: {}", r.exit_code, err))
         }
         Err(e) => {
-            if !json { eprintln!("  (hermes zero-config: exec failed: {})", e); }
+            if !json {
+                eprintln!("  (hermes zero-config: exec failed: {})", e);
+            }
             Err(e.to_string())
         }
     }
@@ -2420,15 +3095,20 @@ async fn configure_nemoclaw_for_zero_auth(
         serde_json::Value::String(format!("http://localhost:{}", fwd_port)),
         serde_json::Value::String(format!("http://127.0.0.1:{}", fwd_port)),
     ];
-    if let Some(u) = pod_public_url.as_deref() { origins.push(serde_json::Value::String(u.to_string())); }
-    if let Some(u) = edge_public_url.as_deref() { origins.push(serde_json::Value::String(u.to_string())); }
+    if let Some(u) = pod_public_url.as_deref() {
+        origins.push(serde_json::Value::String(u.to_string()));
+    }
+    if let Some(u) = edge_public_url.as_deref() {
+        origins.push(serde_json::Value::String(u.to_string()));
+    }
     let overlay_json = serde_json::json!({
         "gateway": {
             "controlUi": {
                 "allowedOrigins": origins
             }
         }
-    }).to_string();
+    })
+    .to_string();
     // Base64 the overlay to sidestep every shell-quoting pitfall (single
     // quotes inside shell commands, heredoc delimiter choice, JSON with
     // embedded backslashes). The node side decodes once and writes the
@@ -2455,7 +3135,9 @@ async fn configure_nemoclaw_for_zero_auth(
                 }
             }
             if let Err(e) = atomek_pods::restart_agent(client, pod_id).await {
-                if !json { eprintln!("  (zero-config: restart failed: {})", e); }
+                if !json {
+                    eprintln!("  (zero-config: restart failed: {})", e);
+                }
                 return Err(e.to_string());
             }
             if !json {
@@ -2474,7 +3156,9 @@ async fn configure_nemoclaw_for_zero_auth(
             Err(format!("exit {}: {}", r.exit_code, err))
         }
         Err(e) => {
-            if !json { eprintln!("  (zero-config: exec failed: {})", e); }
+            if !json {
+                eprintln!("  (zero-config: exec failed: {})", e);
+            }
             Err(e.to_string())
         }
     }
@@ -2493,7 +3177,9 @@ async fn cmd_agent_uninstall(http: &atomek_core::HttpClient, pod_id: &str, json:
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
-    if !json { eprintln!("Stopping agent on pod {}...", pod_id); }
+    if !json {
+        eprintln!("Stopping agent on pod {}...", pod_id);
+    }
     match atomek_pods::stop_agent(&client, pod_id).await {
         Ok(()) => {
             if let Some(p) = state.pods.iter_mut().find(|p| p.pod_id == pod_id) {
@@ -2504,7 +3190,10 @@ async fn cmd_agent_uninstall(http: &atomek_core::HttpClient, pod_id: &str, json:
             }
             state.save();
             if json {
-                println!("{}", serde_json::json!({"pod_id": pod_id, "agent_type": serde_json::Value::Null}));
+                println!(
+                    "{}",
+                    serde_json::json!({"pod_id": pod_id, "agent_type": serde_json::Value::Null})
+                );
             } else {
                 println!("✓ Agent stopped on pod {}. Pod slot retained.", pod_id);
                 println!("  To fully free units: tytus revoke {}", pod_id);
@@ -2531,15 +3220,22 @@ async fn cmd_agent_list(http: &atomek_core::HttpClient, json: bool) {
     state.save();
 
     if json {
-        let pods: Vec<_> = state.pods.iter().map(|p| {
-            serde_json::json!({
-                "pod_id": p.pod_id,
-                "agent_type": p.agent_type,
-                "tunnel_iface": p.tunnel_iface,
-                "stable_ai_endpoint": p.stable_ai_endpoint,
+        let pods: Vec<_> = state
+            .pods
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "pod_id": p.pod_id,
+                    "agent_type": p.agent_type,
+                    "tunnel_iface": p.tunnel_iface,
+                    "stable_ai_endpoint": p.stable_ai_endpoint,
+                })
             })
-        }).collect();
-        println!("{}", serde_json::to_string_pretty(&pods).unwrap_or_default());
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&pods).unwrap_or_default()
+        );
         return;
     }
 
@@ -2551,7 +3247,10 @@ async fn cmd_agent_list(http: &atomek_core::HttpClient, json: bool) {
     for p in &state.pods {
         let agent = p.agent_type.as_deref().unwrap_or("-");
         let tunnel = p.tunnel_iface.as_deref().unwrap_or("down");
-        let endpoint = p.stable_ai_endpoint.as_deref().unwrap_or("http://10.42.42.1:18080");
+        let endpoint = p
+            .stable_ai_endpoint
+            .as_deref()
+            .unwrap_or("http://10.42.42.1:18080");
         // Display the public brand name; keep the internal identifier
         // consistent in --json output (elsewhere) for scripting.
         let label = match agent {
@@ -2577,8 +3276,12 @@ async fn cmd_agent_catalog(http: &atomek_core::HttpClient, refresh: bool, json: 
                 let tagline = a.tagline.as_deref().unwrap_or("");
                 let min_plan = a.min_plan.as_deref().unwrap_or("any");
                 println!("  {} — {} unit(s), min plan: {}", a.name, a.units, min_plan);
-                if !tagline.is_empty() { println!("    {}", tagline); }
-                if let Some(ref desc) = a.description { println!("    {}", desc); }
+                if !tagline.is_empty() {
+                    println!("    {}", tagline);
+                }
+                if let Some(ref desc) = a.description {
+                    println!("    {}", desc);
+                }
                 println!("    Install: tytus agent install {}", a.id);
                 println!();
             }
@@ -2620,7 +3323,11 @@ async fn cmd_revoke(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
     let reap_outcome = tunnel_reap::reap_tunnel_for_pod(pod_id);
     match &reap_outcome {
         tunnel_reap::ReapOutcome::Reaped { pid } => {
-            tracing::info!("revoke: reaped tunnel daemon pid={} for pod {}", pid, pod_id);
+            tracing::info!(
+                "revoke: reaped tunnel daemon pid={} for pod {}",
+                pid,
+                pod_id
+            );
         }
         tunnel_reap::ReapOutcome::StalePidfile { pid } => {
             tracing::info!(
@@ -2630,7 +3337,10 @@ async fn cmd_revoke(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
             );
         }
         tunnel_reap::ReapOutcome::NoPidfile => {
-            tracing::debug!("revoke: no tunnel pidfile for pod {} — nothing to reap", pod_id);
+            tracing::debug!(
+                "revoke: no tunnel pidfile for pod {} — nothing to reap",
+                pod_id
+            );
         }
         tunnel_reap::ReapOutcome::ReapFailed { pid, reason } => {
             tracing::warn!(
@@ -2652,9 +3362,7 @@ async fn cmd_revoke(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
                     tunnel_reap::ReapOutcome::Reaped { pid } => ("reaped", Some(*pid)),
                     tunnel_reap::ReapOutcome::StalePidfile { pid } => ("stale", Some(*pid)),
                     tunnel_reap::ReapOutcome::NoPidfile => ("none", None),
-                    tunnel_reap::ReapOutcome::ReapFailed { pid, .. } => {
-                        ("failed", Some(*pid))
-                    }
+                    tunnel_reap::ReapOutcome::ReapFailed { pid, .. } => ("failed", Some(*pid)),
                 };
                 let payload = serde_json::json!({
                     "status": "revoked",
@@ -2711,8 +3419,14 @@ async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
     if let Some(ref filter) = pod_id {
         candidates.push(filter.clone());
     } else {
-        for (pod_num, _path) in tunnel_reap::list_pod_pidfiles() {
-            candidates.push(pod_num);
+        if let Some(active_email) = state.email.as_deref() {
+            for (pod_num, _path) in tunnel_reap::list_owned_pod_pidfiles(active_email) {
+                candidates.push(pod_num);
+            }
+        } else {
+            for (pod_num, _path) in tunnel_reap::list_pod_pidfiles() {
+                candidates.push(pod_num);
+            }
         }
         for pod in &state.pods {
             if !candidates.iter().any(|c| c == &pod.pod_id) {
@@ -2751,7 +3465,11 @@ async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
     let mut json_entries: Vec<serde_json::Value> = Vec::new();
 
     for pod_num in &candidates {
-        let outcome = tunnel_reap::reap_tunnel_for_pod(pod_num);
+        let outcome = if let Some(active_email) = state.email.as_deref() {
+            tunnel_reap::reap_tunnel_for_pod_owned(pod_num, active_email)
+        } else {
+            tunnel_reap::reap_tunnel_for_pod(pod_num)
+        };
         let msg = tunnel_reap::disconnect_message(pod_num, &outcome);
         if !json {
             println!("{}", msg);
@@ -2851,30 +3569,45 @@ async fn cmd_restart(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
     let target_pod_id = pod_id.unwrap_or_else(|| {
-        state.pods.first().map(|p| p.pod_id.clone()).unwrap_or_else(|| {
-            wizard::print_fail("No workspace yet. Run: tytus connect");
-            std::process::exit(1);
-        })
+        state
+            .pods
+            .first()
+            .map(|p| p.pod_id.clone())
+            .unwrap_or_else(|| {
+                wizard::print_fail("No workspace yet. Run: tytus connect");
+                std::process::exit(1);
+            })
     });
 
-    if !json { wizard::print_info(&format!("Restarting agent on pod {}...", target_pod_id)); }
+    if !json {
+        wizard::print_info(&format!("Restarting agent on pod {}...", target_pod_id));
+    }
     let pb = wizard::spinner("Restarting container");
 
     match atomek_pods::restart_agent(&client, &target_pod_id).await {
         Ok(status) => {
             wizard::finish_ok(&pb, "Agent restarted");
             if json {
-                println!("{}", serde_json::json!({
-                    "pod_id": target_pod_id,
-                    "agent_type": status.agent_type,
-                    "container_status": status.container_status,
-                    "healthy": status.healthy,
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "pod_id": target_pod_id,
+                        "agent_type": status.agent_type,
+                        "container_status": status.container_status,
+                        "healthy": status.healthy,
+                    })
+                );
             } else {
-                wizard::print_info(&format!("Container: {}", status.container_status.as_deref().unwrap_or("?")));
+                wizard::print_info(&format!(
+                    "Container: {}",
+                    status.container_status.as_deref().unwrap_or("?")
+                ));
                 if let Some(healthy) = status.healthy {
-                    if healthy { wizard::print_ok("Agent is healthy"); }
-                    else { wizard::print_warn("Agent not yet healthy (may still be starting)"); }
+                    if healthy {
+                        wizard::print_ok("Agent is healthy");
+                    } else {
+                        wizard::print_warn("Agent not yet healthy (may still be starting)");
+                    }
                 }
                 wizard::print_hint("Config file changes are now applied.");
             }
@@ -2900,20 +3633,27 @@ async fn cmd_logs(http: &atomek_core::HttpClient, pod_id: Option<String>, lines:
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
     let target_pod_id = pod_id.unwrap_or_else(|| {
-        state.pods.first().map(|p| p.pod_id.clone()).unwrap_or_else(|| {
-            wizard::print_fail("No workspace yet. Run: tytus connect");
-            std::process::exit(1);
-        })
+        state
+            .pods
+            .first()
+            .map(|p| p.pod_id.clone())
+            .unwrap_or_else(|| {
+                wizard::print_fail("No workspace yet. Run: tytus connect");
+                std::process::exit(1);
+            })
     });
 
     match atomek_pods::agent_logs(&client, &target_pod_id, lines).await {
         Ok(result) => {
             if json {
-                println!("{}", serde_json::json!({
-                    "pod_id": target_pod_id,
-                    "pod_num": result.pod_num,
-                    "logs": result.logs,
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "pod_id": target_pod_id,
+                        "pod_num": result.pod_num,
+                        "logs": result.logs,
+                    })
+                );
             } else {
                 // Stream one line at a time so the tray's per-pod SSE relay
                 // surfaces each line as its own `log` event in the Logs tab.
@@ -2932,7 +3672,13 @@ async fn cmd_logs(http: &atomek_core::HttpClient, pod_id: Option<String>, lines:
     }
 }
 
-async fn cmd_exec(http: &atomek_core::HttpClient, command: Vec<String>, pod_id: Option<String>, timeout: u32, json: bool) {
+async fn cmd_exec(
+    http: &atomek_core::HttpClient,
+    command: Vec<String>,
+    pod_id: Option<String>,
+    timeout: u32,
+    json: bool,
+) {
     let mut state = CliState::load();
 
     if !state.is_logged_in() {
@@ -2948,29 +3694,42 @@ async fn cmd_exec(http: &atomek_core::HttpClient, command: Vec<String>, pod_id: 
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
     let target_pod_id = pod_id.unwrap_or_else(|| {
-        state.pods.first().map(|p| p.pod_id.clone()).unwrap_or_else(|| {
-            eprintln!("No workspace yet. Run: tytus connect");
-            std::process::exit(1);
-        })
+        state
+            .pods
+            .first()
+            .map(|p| p.pod_id.clone())
+            .unwrap_or_else(|| {
+                eprintln!("No workspace yet. Run: tytus connect");
+                std::process::exit(1);
+            })
     });
 
     let cmd_str = command.join(" ");
-    if !json { eprintln!("Running on pod {}...", target_pod_id); }
+    if !json {
+        eprintln!("Running on pod {}...", target_pod_id);
+    }
 
     match atomek_pods::exec_in_agent(&client, &target_pod_id, &cmd_str, timeout.min(120)).await {
         Ok(result) => {
             if json {
-                println!("{}", serde_json::json!({
-                    "exit_code": result.exit_code,
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "exit_code": result.exit_code,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                    })
+                );
             } else {
                 if let Some(ref stdout) = result.stdout {
-                    if !stdout.is_empty() { print!("{}", stdout); }
+                    if !stdout.is_empty() {
+                        print!("{}", stdout);
+                    }
                 }
                 if let Some(ref stderr) = result.stderr {
-                    if !stderr.is_empty() { eprint!("{}", stderr); }
+                    if !stderr.is_empty() {
+                        eprint!("{}", stderr);
+                    }
                 }
                 if result.exit_code != 0 {
                     std::process::exit(result.exit_code as i32);
@@ -3104,7 +3863,10 @@ fn cmd_channels_list(pod_id: &str, json: bool) {
 
     if channels.is_empty() {
         println!("No channels configured for pod {}.", pod_id);
-        println!("Run `tytus channels add --pod {} --type telegram --token ...` to add one.", pod_id);
+        println!(
+            "Run `tytus channels add --pod {} --type telegram --token ...` to add one.",
+            pod_id
+        );
         return;
     }
     println!("Channels configured for pod {}:", pod_id);
@@ -3144,10 +3906,18 @@ async fn cmd_channels_add(
     // 2. Collect values for each credential the spec requires.
     // Map CLI flag → supplied value.
     let mut cli_values: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
-    if let Some(v) = token { cli_values.insert("token", v); }
-    if let Some(v) = app_token { cli_values.insert("app-token", v); }
-    if let Some(v) = user_token { cli_values.insert("user-token", v); }
-    if let Some(v) = channel_secret_flag { cli_values.insert("channel-secret", v); }
+    if let Some(v) = token {
+        cli_values.insert("token", v);
+    }
+    if let Some(v) = app_token {
+        cli_values.insert("app-token", v);
+    }
+    if let Some(v) = user_token {
+        cli_values.insert("user-token", v);
+    }
+    if let Some(v) = channel_secret_flag {
+        cli_values.insert("channel-secret", v);
+    }
 
     let mut collected: Vec<(String, String)> = Vec::new();
     for cred in spec.credentials {
@@ -3301,8 +4071,8 @@ async fn cmd_channels_remove(
 ///   - No `WARN keychain get_refresh_token timed out` log noise
 ///     bleeding into the user's terminal while they're being
 ///     prompted for a bot token
-/// If the access token has expired, we fall back to `load()` (which
-/// DOES touch keychain) so the normal refresh path still works.
+///     If the access token has expired, we fall back to `load()` (which
+///     DOES touch keychain) so the normal refresh path still works.
 fn load_for_channel_op() -> CliState {
     let file_state = CliState::load_file_only();
     if file_state.has_valid_token() {
@@ -3323,8 +4093,8 @@ async fn push_channels_to_pod(
 ) -> Result<(), String> {
     let payload = channels_store::render_pod_payload(manifest, pod_id)
         .map_err(|e| format!("rendering pod payload: {}", e))?;
-    let payload_str = serde_json::to_string(&payload)
-        .map_err(|e| format!("serializing pod payload: {}", e))?;
+    let payload_str =
+        serde_json::to_string(&payload).map_err(|e| format!("serializing pod payload: {}", e))?;
 
     // Base64-encode the payload to survive shell quoting. base64 is
     // available on every Linux pod image we ship (busybox or coreutils).
@@ -3343,7 +4113,9 @@ async fn push_channels_to_pod(
     if state.email.as_deref().unwrap_or("").is_empty() {
         return Err("not logged in".to_string());
     }
-    ensure_token(&mut state, http).await.map_err(|e| format!("token refresh: {}", e))?;
+    ensure_token(&mut state, http)
+        .await
+        .map_err(|e| format!("token refresh: {}", e))?;
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
@@ -3366,12 +4138,11 @@ async fn push_channels_to_pod(
 /// Uses the existing Provider `/pod/agent/deploy` endpoint which calls
 /// DAM's deploy (stops existing container + re-reads channels.json + starts
 /// new container).
-async fn redeploy_agent(
-    http: &atomek_core::HttpClient,
-    pod_id: &str,
-) -> Result<(), String> {
+async fn redeploy_agent(http: &atomek_core::HttpClient, pod_id: &str) -> Result<(), String> {
     let mut state = load_for_channel_op();
-    ensure_token(&mut state, http).await.map_err(|e| format!("token refresh: {}", e))?;
+    ensure_token(&mut state, http)
+        .await
+        .map_err(|e| format!("token refresh: {}", e))?;
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
@@ -3391,7 +4162,7 @@ async fn redeploy_agent(
 
 // ── Logout ───────────────────────────────────────────────────
 
-async fn cmd_logout(http: &atomek_core::HttpClient, json: bool) {
+async fn cmd_logout(http: &atomek_core::HttpClient, json: bool, all: bool) {
     let mut state = CliState::load();
 
     // A3: kill every live UI forwarder before we revoke pods. Otherwise
@@ -3402,6 +4173,7 @@ async fn cmd_logout(http: &atomek_core::HttpClient, json: bool) {
         stop_ui_forwarder(&pod);
     }
 
+    let active_email = state.email.clone();
     if state.is_logged_in() {
         if let (Some(ref sk), Some(ref auid)) = (&state.secret_key, &state.agent_user_id) {
             let client = atomek_pods::TytusClient::new(http, sk, auid);
@@ -3409,33 +4181,71 @@ async fn cmd_logout(http: &atomek_core::HttpClient, json: bool) {
                 tracing::warn!("Revoke failed: {}", e);
             }
         }
-        if let Some(ref email) = state.email {
+        if let Some(ref email) = active_email {
             let _ = atomek_auth::KeychainStore::delete_refresh_token(email);
+            let _ = atomek_auth::KeychainStore::remove_indexed_account(email);
         }
     }
 
-    state.clear();
+    if all {
+        for account in &state.accounts {
+            let _ = atomek_auth::KeychainStore::delete_refresh_token(&account.email);
+            let _ = atomek_auth::KeychainStore::remove_indexed_account(&account.email);
+        }
+        state.clear();
+    } else if let Some(email) = active_email {
+        let _ = account::remove_profile(&mut state, &email);
+        state.active_email = None;
+        state.email = None;
+        state.refresh_token = None;
+        state.access_token = None;
+        state.expires_at_ms = None;
+        state.secret_key = None;
+        state.agent_user_id = None;
+        state.organization_id = None;
+        state.tier = None;
+        state.pods.clear();
+        state.save();
+    } else {
+        state.save();
+    }
 
-    if json { println!(r#"{{"status":"logged_out"}}"#); }
-    else { println!("✓ Logged out"); }
+    if json {
+        println!(r#"{{"status":"logged_out"}}"#);
+    } else {
+        println!("✓ Logged out");
+    }
 }
 
 // ── Env (export connection info) ─────────────────────────────
 
-async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, tunnel: bool, json: bool, http: &atomek_core::HttpClient) {
+async fn cmd_env(
+    pod_id: Option<String>,
+    export: bool,
+    raw: bool,
+    tunnel: bool,
+    json: bool,
+    http: &atomek_core::HttpClient,
+) {
     let mut state = CliState::load();
 
     let pod_idx = if let Some(ref pid) = pod_id {
         state.pods.iter().position(|p| p.pod_id == *pid)
     } else {
         // First connected pod, or first pod
-        state.pods.iter().position(|p| p.tunnel_iface.is_some())
+        state
+            .pods
+            .iter()
+            .position(|p| p.tunnel_iface.is_some())
             .or(if state.pods.is_empty() { None } else { Some(0) })
     };
 
     let Some(idx) = pod_idx else {
-        if json { println!(r#"{{"error":"no_pods"}}"#); }
-        else { eprintln!("No pods. Run: tytus connect"); }
+        if json {
+            println!(r#"{{"error":"no_pods"}}"#);
+        } else {
+            eprintln!("No pods. Run: tytus connect");
+        }
         std::process::exit(1);
     };
 
@@ -3447,7 +4257,8 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, tunnel: bool, 
             || state.pods[idx].edge_public_url.is_none()
             || state.pods[idx].pod_public_url.is_none();
         if needs_refresh {
-            if let (Some(st), Some(aid)) = (state.secret_key.as_ref(), state.agent_user_id.as_ref()) {
+            if let (Some(st), Some(aid)) = (state.secret_key.as_ref(), state.agent_user_id.as_ref())
+            {
                 let client = atomek_pods::TytusClient::new(http, st, aid);
                 if let Ok(uk) = atomek_pods::get_user_key_full(&client).await {
                     let pod_id_for_template = state.pods[idx].pod_id.clone();
@@ -3455,9 +4266,15 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, tunnel: bool, 
                     if let Some(p) = state.pods.get_mut(idx) {
                         p.stable_ai_endpoint = Some(uk.endpoint);
                         p.stable_user_key = Some(uk.key);
-                        if let Some(s) = uk.slug { p.edge_slug = Some(s); }
-                        if let Some(u) = uk.public_url { p.edge_public_url = Some(u); }
-                        if let Some(u) = composed { p.pod_public_url = Some(u); }
+                        if let Some(s) = uk.slug {
+                            p.edge_slug = Some(s);
+                        }
+                        if let Some(u) = uk.public_url {
+                            p.edge_public_url = Some(u);
+                        }
+                        if let Some(u) = composed {
+                            p.pod_public_url = Some(u);
+                        }
                     }
                     state.save();
                 }
@@ -3505,7 +4322,9 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, tunnel: bool, 
         //
         // The public edge URL does NOT need the tunnel. One user, one URL,
         // works from any network that can reach the public internet.
-        let wg_endpoint = pod.stable_ai_endpoint.as_deref()
+        let wg_endpoint = pod
+            .stable_ai_endpoint
+            .as_deref()
             .unwrap_or("http://10.42.42.1:18080")
             .to_string();
         let endpoint = if tunnel {
@@ -3520,7 +4339,9 @@ async fn cmd_env(pod_id: Option<String>, export: bool, raw: bool, tunnel: bool, 
         } else {
             wg_endpoint.clone()
         };
-        let key = pod.stable_user_key.as_deref()
+        let key = pod
+            .stable_user_key
+            .as_deref()
             .or(pod.pod_api_key.as_deref())
             .unwrap_or("");
         println!("{}AIL_URL={}/v1", prefix, endpoint);
@@ -3551,12 +4372,18 @@ async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>
     let pod_idx = if let Some(ref pid) = pod_id {
         state.pods.iter().position(|p| p.pod_id == *pid)
     } else {
-        state.pods.iter().position(|p| p.tunnel_iface.is_some())
+        state
+            .pods
+            .iter()
+            .position(|p| p.tunnel_iface.is_some())
             .or(if state.pods.is_empty() { None } else { Some(0) })
     };
     let Some(idx) = pod_idx else {
-        if json { println!(r#"{{"error":"no_pods"}}"#); }
-        else { eprintln!("No pods. Run: tytus connect"); }
+        if json {
+            println!(r#"{{"error":"no_pods"}}"#);
+        } else {
+            eprintln!("No pods. Run: tytus connect");
+        }
         std::process::exit(1);
     };
 
@@ -3575,9 +4402,15 @@ async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>
                 if let Some(p) = state.pods.get_mut(idx) {
                     p.stable_ai_endpoint = Some(uk.endpoint);
                     p.stable_user_key = Some(uk.key);
-                    if let Some(s) = uk.slug { p.edge_slug = Some(s); }
-                    if let Some(u) = uk.public_url { p.edge_public_url = Some(u); }
-                    if let Some(u) = composed { p.pod_public_url = Some(u); }
+                    if let Some(s) = uk.slug {
+                        p.edge_slug = Some(s);
+                    }
+                    if let Some(u) = uk.public_url {
+                        p.edge_public_url = Some(u);
+                    }
+                    if let Some(u) = composed {
+                        p.pod_public_url = Some(u);
+                    }
                 }
                 state.save();
             }
@@ -3591,7 +4424,9 @@ async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>
     // URL works from any network, no tunnel required, so `tytus
     // capabilities` is usable in CI/sandbox contexts where the user
     // hasn't brought the tunnel up.
-    let wg_endpoint = pod.stable_ai_endpoint.as_deref()
+    let wg_endpoint = pod
+        .stable_ai_endpoint
+        .as_deref()
         .unwrap_or("http://10.42.42.1:18080")
         .to_string();
     let endpoint = if let Some(ref pod_url) = pod.pod_public_url {
@@ -3601,13 +4436,21 @@ async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>
     } else {
         wg_endpoint
     };
-    let key = pod.stable_user_key.as_deref()
+    let key = pod
+        .stable_user_key
+        .as_deref()
         .or(pod.pod_api_key.as_deref())
         .unwrap_or("");
 
     if key.is_empty() {
-        if json { println!(r#"{{"error":"no_api_key"}}"#); }
-        else { eprintln!("No API key cached for pod {}. Run: tytus env --pod {}", pod.pod_id, pod.pod_id); }
+        if json {
+            println!(r#"{{"error":"no_api_key"}}"#);
+        } else {
+            eprintln!(
+                "No API key cached for pod {}. Run: tytus env --pod {}",
+                pod.pod_id, pod.pod_id
+            );
+        }
         std::process::exit(1);
     }
 
@@ -3618,20 +4461,28 @@ async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>
     {
         Ok(c) => c,
         Err(e) => {
-            if json { println!(r#"{{"error":"http_client_build: {}"}}"#, e); }
-            else { eprintln!("Failed to build HTTP client: {}", e); }
+            if json {
+                println!(r#"{{"error":"http_client_build: {}"}}"#, e);
+            } else {
+                eprintln!("Failed to build HTTP client: {}", e);
+            }
             std::process::exit(1);
         }
     };
 
-    let resp = match client.get(&url)
+    let resp = match client
+        .get(&url)
         .header("Authorization", format!("Bearer {}", key))
-        .send().await
+        .send()
+        .await
     {
         Ok(r) => r,
         Err(e) => {
-            if json { println!(r#"{{"error":"network: {}"}}"#, e); }
-            else { eprintln!("Network error reaching {}: {}", url, e); }
+            if json {
+                println!(r#"{{"error":"network: {}"}}"#, e);
+            } else {
+                eprintln!("Network error reaching {}: {}", url, e);
+            }
             std::process::exit(1);
         }
     };
@@ -3641,7 +4492,11 @@ async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>
 
     if !status.is_success() {
         if json {
-            println!(r#"{{"error":"http_{}","body":{}}}"#, status.as_u16(), serde_json::to_string(&body_text).unwrap_or_else(|_| "\"\"".into()));
+            println!(
+                r#"{{"error":"http_{}","body":{}}}"#,
+                status.as_u16(),
+                serde_json::to_string(&body_text).unwrap_or_else(|_| "\"\"".into())
+            );
         } else {
             eprintln!("Gateway returned HTTP {} from {}:", status, url);
             eprintln!("{}", body_text);
@@ -3678,7 +4533,12 @@ async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>
 /// Extracted from `cmd_capabilities` so unit tests can pin the output
 /// shape without standing up a live gateway. Tolerates missing / partial
 /// fields so future switchailocal shape additions don't crash the CLI.
-fn render_capabilities_tree(pod_id: &str, agent: &str, tier: &str, v: &serde_json::Value) -> String {
+fn render_capabilities_tree(
+    pod_id: &str,
+    agent: &str,
+    tier: &str,
+    v: &serde_json::Value,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!("Pod {} ({}, {} plan)\n", pod_id, agent, tier));
 
@@ -3691,7 +4551,8 @@ fn render_capabilities_tree(pod_id: &str, agent: &str, tier: &str, v: &serde_jso
 
     // Compute the width of the longest ID so the second column aligns
     // cleanly without pulling in a table-printer dependency.
-    let id_width = data.iter()
+    let id_width = data
+        .iter()
         .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
         .map(|s| s.chars().count())
         .max()
@@ -3700,7 +4561,10 @@ fn render_capabilities_tree(pod_id: &str, agent: &str, tier: &str, v: &serde_jso
     for model in data {
         let id = model.get("id").and_then(|i| i.as_str()).unwrap_or("?");
         let owned = model.get("owned_by").and_then(|o| o.as_str()).unwrap_or("");
-        let display = model.get("display_name").and_then(|d| d.as_str()).unwrap_or("");
+        let display = model
+            .get("display_name")
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
         let ctx = model.get("context_length").and_then(|c| c.as_i64());
 
         // Right side: "<owner> <display>" plus context-window tag when
@@ -3713,9 +4577,14 @@ fn render_capabilities_tree(pod_id: &str, agent: &str, tier: &str, v: &serde_jso
         }
         if let Some(n) = ctx {
             if n > 0 {
-                if !right.is_empty() { right.push_str(", "); }
-                if n >= 1000 { right.push_str(&format!("{}k ctx", n / 1000)); }
-                else { right.push_str(&format!("{} ctx", n)); }
+                if !right.is_empty() {
+                    right.push_str(", ");
+                }
+                if n >= 1000 {
+                    right.push_str(&format!("{}k ctx", n / 1000));
+                } else {
+                    right.push_str(&format!("{} ctx", n));
+                }
             }
         }
 
@@ -3727,9 +4596,17 @@ fn render_capabilities_tree(pod_id: &str, agent: &str, tier: &str, v: &serde_jso
         if let Some(nt) = model.get("native_tools").and_then(|n| n.as_array()) {
             for tool in nt {
                 let ttype = tool.get("type").and_then(|t| t.as_str()).unwrap_or("?");
-                let tdesc = tool.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                let tdesc = tool
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
                 if tdesc.is_empty() {
-                    out.push_str(&format!("  {:<width$}    ↳ native: {}\n", "", ttype, width = id_width));
+                    out.push_str(&format!(
+                        "  {:<width$}    ↳ native: {}\n",
+                        "",
+                        ttype,
+                        width = id_width
+                    ));
                 } else {
                     // Truncate long descriptions to keep the tree compact.
                     // Agents who need the full text should use `--json`.
@@ -3739,7 +4616,13 @@ fn render_capabilities_tree(pod_id: &str, agent: &str, tier: &str, v: &serde_jso
                     } else {
                         tdesc.to_string()
                     };
-                    out.push_str(&format!("  {:<width$}    ↳ native: {} — {}\n", "", ttype, short, width = id_width));
+                    out.push_str(&format!(
+                        "  {:<width$}    ↳ native: {} — {}\n",
+                        "",
+                        ttype,
+                        short,
+                        width = id_width
+                    ));
                 }
             }
         }
@@ -3780,14 +4663,38 @@ mod capabilities_tests {
             ]
         });
         let out = render_capabilities_tree("02", "nemoclaw", "operator", &body);
-        assert!(out.contains("Pod 02 (nemoclaw, operator plan)"), "header missing:\n{}", out);
-        assert!(out.contains("ail-compound"), "ail-compound row missing:\n{}", out);
-        assert!(out.contains("200k ctx"), "context-window tag missing:\n{}", out);
-        assert!(out.contains("↳ native: web_search"), "native_tools subtree missing:\n{}", out);
-        assert!(out.contains("MiniMax native web search"), "description missing:\n{}", out);
+        assert!(
+            out.contains("Pod 02 (nemoclaw, operator plan)"),
+            "header missing:\n{}",
+            out
+        );
+        assert!(
+            out.contains("ail-compound"),
+            "ail-compound row missing:\n{}",
+            out
+        );
+        assert!(
+            out.contains("200k ctx"),
+            "context-window tag missing:\n{}",
+            out
+        );
+        assert!(
+            out.contains("↳ native: web_search"),
+            "native_tools subtree missing:\n{}",
+            out
+        );
+        assert!(
+            out.contains("MiniMax native web search"),
+            "description missing:\n{}",
+            out
+        );
         // Model without native_tools should NOT emit a native-tools subtree.
-        assert!(!out.lines().any(|l| l.contains("ail-image") && l.contains("↳ native")),
-                "ail-image should not have native subtree:\n{}", out);
+        assert!(
+            !out.lines()
+                .any(|l| l.contains("ail-image") && l.contains("↳ native")),
+            "ail-image should not have native subtree:\n{}",
+            out
+        );
     }
 
     /// Pin the empty-data behavior: a gateway that returns `{data: []}`
@@ -3796,7 +4703,11 @@ mod capabilities_tests {
     fn renders_empty_catalog_friendly() {
         let body = json!({"object": "list", "data": []});
         let out = render_capabilities_tree("02", "nemoclaw", "operator", &body);
-        assert!(out.contains("empty model list"), "empty-catalog message missing:\n{}", out);
+        assert!(
+            out.contains("empty model list"),
+            "empty-catalog message missing:\n{}",
+            out
+        );
     }
 
     /// Pin that long descriptions truncate so the tree stays scannable.
@@ -3813,25 +4724,35 @@ mod capabilities_tests {
         });
         let out = render_capabilities_tree("02", "nemoclaw", "operator", &body);
         assert!(out.contains("…"), "truncation ellipsis missing:\n{}", out);
-        assert!(!out.contains(&long), "full long description should not appear:\n{}", out);
+        assert!(
+            !out.contains(&long),
+            "full long description should not appear:\n{}",
+            out
+        );
     }
 }
 
 // ── Infect (drop integration files) ─────────────────────────
 
 fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
-    let base = std::path::Path::new(dir).canonicalize().unwrap_or_else(|_| {
-        eprintln!("Directory not found: {}", dir);
-        std::process::exit(1);
-    });
+    let base = std::path::Path::new(dir)
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            eprintln!("Directory not found: {}", dir);
+            std::process::exit(1);
+        });
 
     let tytus_bin = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("tytus-mcp").display().to_string()))
+        .and_then(|p| {
+            p.parent()
+                .map(|d| d.join("tytus-mcp").display().to_string())
+        })
         .unwrap_or_else(|| "tytus-mcp".into());
 
     let should_inject = |name: &str| -> bool {
-        only.as_ref().is_none_or(|list| list.iter().any(|s| s == name))
+        only.as_ref()
+            .is_none_or(|list| list.iter().any(|s| s == name))
     };
 
     let mut injected = Vec::new();
@@ -3844,7 +4765,10 @@ fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
         if claude_md.exists() {
             let existing = std::fs::read_to_string(&claude_md).unwrap_or_default();
             if !existing.contains("## Tytus Private AI Pod") {
-                let _ = std::fs::write(&claude_md, format!("{}\n\n{}", existing.trim(), tytus_block));
+                let _ = std::fs::write(
+                    &claude_md,
+                    format!("{}\n\n{}", existing.trim(), tytus_block),
+                );
                 injected.push("CLAUDE.md (appended)");
             } else {
                 injected.push("CLAUDE.md (already present)");
@@ -3881,10 +4805,16 @@ fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
             // Merge into existing .mcp.json
             let existing = std::fs::read_to_string(&mcp_json).unwrap_or_default();
             if let Ok(mut existing_val) = serde_json::from_str::<serde_json::Value>(&existing) {
-                if let Some(servers) = existing_val.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
+                if let Some(servers) = existing_val
+                    .get_mut("mcpServers")
+                    .and_then(|s| s.as_object_mut())
+                {
                     if !servers.contains_key("tytus") {
                         servers.insert("tytus".into(), mcp_config["mcpServers"]["tytus"].clone());
-                        let _ = std::fs::write(&mcp_json, serde_json::to_string_pretty(&existing_val).unwrap());
+                        let _ = std::fs::write(
+                            &mcp_json,
+                            serde_json::to_string_pretty(&existing_val).unwrap(),
+                        );
                         injected.push(".mcp.json (merged)");
                     } else {
                         injected.push(".mcp.json (tytus already present)");
@@ -3892,7 +4822,10 @@ fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
                 }
             }
         } else {
-            let _ = std::fs::write(&mcp_json, serde_json::to_string_pretty(&mcp_config).unwrap());
+            let _ = std::fs::write(
+                &mcp_json,
+                serde_json::to_string_pretty(&mcp_config).unwrap(),
+            );
             injected.push(".mcp.json (created)");
         }
     }
@@ -3904,7 +4837,10 @@ fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
         if agents_md.exists() {
             let existing = std::fs::read_to_string(&agents_md).unwrap_or_default();
             if !existing.contains("## Tytus Private AI Pod") {
-                let _ = std::fs::write(&agents_md, format!("{}\n\n{}", existing.trim(), tytus_block));
+                let _ = std::fs::write(
+                    &agents_md,
+                    format!("{}\n\n{}", existing.trim(), tytus_block),
+                );
                 injected.push("AGENTS.md (appended)");
             } else {
                 injected.push("AGENTS.md (already present)");
@@ -3932,7 +4868,10 @@ fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
                 }
             }
         });
-        let _ = std::fs::write(&kilo_mcp, serde_json::to_string_pretty(&mcp_config).unwrap());
+        let _ = std::fs::write(
+            &kilo_mcp,
+            serde_json::to_string_pretty(&mcp_config).unwrap(),
+        );
         injected.push(".kilo/mcp.json");
     }
 
@@ -3952,11 +4891,14 @@ fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
     }
 
     if json {
-        println!("{}", serde_json::json!({
-            "status": "linked",
-            "directory": base.display().to_string(),
-            "files": injected,
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "linked",
+                "directory": base.display().to_string(),
+                "files": injected,
+            })
+        );
     } else {
         println!("Tytus linked into {}", base.display());
         for file in &injected {
@@ -3969,8 +4911,32 @@ fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
 
 // ── MCP config printer ─────────────────────────────────────
 
-fn cmd_mcp(format: &str, json: bool) {
+fn cmd_mcp(format: &str, account: Option<String>, json: bool) {
     let tytus_mcp = which_tytus_mcp();
+    let pinned_email = account.map(|email| {
+        let target = account::canonical_email(&email);
+        let state = CliState::load_file_only();
+        let Some(stored) = state
+            .accounts
+            .iter()
+            .find(|a| account::canonical_email(&a.email) == target)
+            .map(|a| a.email.clone())
+        else {
+            eprintln!("Unknown account '{}'. Run: tytus account list", email);
+            std::process::exit(1);
+        };
+        if atomek_auth::KeychainStore::try_get_refresh_token(&stored).is_none() {
+            eprintln!(
+                "Account {} has no refresh token. Run: tytus account add",
+                stored
+            );
+            std::process::exit(1);
+        }
+        stored
+    });
+    let pinned_env = pinned_email
+        .as_ref()
+        .map(|email| serde_json::json!({"TYTUS_PINNED_ACCOUNT_EMAIL": email}));
 
     match format {
         "claude" => {
@@ -3979,6 +4945,7 @@ fn cmd_mcp(format: &str, json: bool) {
                     "tytus": {
                         "command": tytus_mcp,
                         "args": [],
+                        "env": pinned_env.clone().unwrap_or_else(|| serde_json::json!({})),
                         "alwaysAllow": [
                             "tytus_docs",
                             "tytus_status",
@@ -4001,7 +4968,8 @@ fn cmd_mcp(format: &str, json: bool) {
                 "mcpServers": {
                     "tytus": {
                         "command": tytus_mcp,
-                        "args": []
+                        "args": [],
+                        "env": pinned_env.clone().unwrap_or_else(|| serde_json::json!({}))
                     }
                 }
             });
@@ -4016,7 +4984,8 @@ fn cmd_mcp(format: &str, json: bool) {
             let config = serde_json::json!({
                 "tytus": {
                     "command": tytus_mcp,
-                    "args": []
+                    "args": [],
+                    "env": pinned_env.clone().unwrap_or_else(|| serde_json::json!({}))
                 }
             });
             if json {
@@ -4032,6 +5001,7 @@ fn cmd_mcp(format: &str, json: bool) {
                 "transport": "stdio",
                 "command": tytus_mcp,
                 "args": [],
+                "env": pinned_env.clone().unwrap_or_else(|| serde_json::json!({})),
                 "tools": [
                     "tytus_status",
                     "tytus_env",
@@ -4048,10 +5018,7 @@ fn cmd_mcp(format: &str, json: bool) {
 
 fn which_tytus_mcp() -> String {
     // Check common locations
-    for path in &[
-        "/usr/local/bin/tytus-mcp",
-        "/opt/homebrew/bin/tytus-mcp",
-    ] {
+    for path in &["/usr/local/bin/tytus-mcp", "/opt/homebrew/bin/tytus-mcp"] {
         if std::path::Path::new(path).exists() {
             return path.to_string();
         }
@@ -4059,7 +5026,10 @@ fn which_tytus_mcp() -> String {
     // Fallback: same dir as tytus binary
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("tytus-mcp").display().to_string()))
+        .and_then(|p| {
+            p.parent()
+                .map(|d| d.join("tytus-mcp").display().to_string())
+        })
         .unwrap_or_else(|| "tytus-mcp".into())
 }
 
@@ -4116,8 +5086,16 @@ async fn show_dashboard(http: &atomek_core::HttpClient, _state: &CliState, _json
     let email = state.email.as_deref().unwrap_or("?");
     let tier = state.tier.as_deref().unwrap_or("free");
 
-    println!("  {} Signed in as {}", wizard::icon_ok(), console::style(email).bold());
-    println!("  {} Plan: {}", wizard::icon_info(), console::style(tier).cyan().bold());
+    println!(
+        "  {} Signed in as {}",
+        wizard::icon_ok(),
+        console::style(email).bold()
+    );
+    println!(
+        "  {} Plan: {}",
+        wizard::icon_info(),
+        console::style(tier).cyan().bold()
+    );
     println!();
 
     if state.pods.is_empty() {
@@ -4138,7 +5116,12 @@ async fn show_dashboard(http: &atomek_core::HttpClient, _state: &CliState, _json
         };
         // Pod-NN identifier kept as-is (verdict footnote — short form is
         // load-bearing in narrow output; "Workspace 02" wraps too long).
-        println!("  Pod {} [{}]  {}", console::style(&pod.pod_id).bold(), agent, status_label);
+        println!(
+            "  Pod {} [{}]  {}",
+            console::style(&pod.pod_id).bold(),
+            agent,
+            status_label
+        );
         if let Some(ref ep) = pod.ai_endpoint {
             println!("    AI URL:    {}", console::style(ep).cyan());
         }
@@ -4189,7 +5172,10 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
             wizard::print_fail("Session expired — let's sign in again.");
             state.clear();
         } else {
-            wizard::print_ok(&format!("Already signed in as {}", state.email.as_deref().unwrap_or("?")));
+            wizard::print_ok(&format!(
+                "Already signed in as {}",
+                state.email.as_deref().unwrap_or("?")
+            ));
         }
     } else {
         println!();
@@ -4220,7 +5206,10 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
             _ => "nemoclaw", // backend identifier; public brand is OpenClaw
         }
     } else {
-        let first_agent = state.pods[0].agent_type.clone().unwrap_or_else(|| "nemoclaw".to_string());
+        let first_agent = state.pods[0]
+            .agent_type
+            .clone()
+            .unwrap_or_else(|| "nemoclaw".to_string());
         let display = match first_agent.as_str() {
             "nemoclaw" => "OpenClaw",
             "hermes" => "Hermes",
@@ -4285,18 +5274,27 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
 
     if let Some(pod) = state.pods.first() {
         if let (Some(ref ep), Some(ref key)) = (&pod.ai_endpoint, &pod.pod_api_key) {
-            wizard::print_box("Your Connection Info", &[
-                &format!("API URL: {}", ep),
-                &format!("API Key: {}...{}", &key[..10.min(key.len())], &key[key.len().saturating_sub(4)..]),
-                "",
-                "Compatible with any OpenAI SDK.",
-            ]);
+            wizard::print_box(
+                "Your Connection Info",
+                &[
+                    &format!("API URL: {}", ep),
+                    &format!(
+                        "API Key: {}...{}",
+                        &key[..10.min(key.len())],
+                        &key[key.len().saturating_sub(4)..]
+                    ),
+                    "",
+                    "Compatible with any OpenAI SDK.",
+                ],
+            );
         }
     }
 
     println!();
     wizard::print_header("What's next?");
-    wizard::print_info("Open Tytus.app for the visual interface, or run `tytus chat` to start chatting.");
+    wizard::print_info(
+        "Open Tytus.app for the visual interface, or run `tytus chat` to start chatting.",
+    );
     println!();
     wizard::print_hint("tytus chat           — Try chatting with your AI");
     wizard::print_hint("tytus test           — Run a quick health check");
@@ -4320,18 +5318,26 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
     }
 
     if let Err(e) = ensure_token(&mut state, http).await {
-        if json { println!(r#"{{"ok":false,"error":"token_refresh_failed: {}"}}"#, e); }
-        else { wizard::print_fail(&format!("Token refresh failed: {}. Run: tytus login", e)); }
+        if json {
+            println!(r#"{{"ok":false,"error":"token_refresh_failed: {}"}}"#, e);
+        } else {
+            wizard::print_fail(&format!("Token refresh failed: {}. Run: tytus login", e));
+        }
         std::process::exit(1);
     }
     sync_tytus(&mut state, http).await;
 
-    if !json { wizard::print_header("Running Tytus health test"); }
+    if !json {
+        wizard::print_header("Running Tytus health test");
+    }
 
     // Check 1: logged in
     let pb = wizard::spinner("Checking authentication");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    wizard::finish_ok(&pb, &format!("Signed in as {}", state.email.as_deref().unwrap_or("?")));
+    wizard::finish_ok(
+        &pb,
+        &format!("Signed in as {}", state.email.as_deref().unwrap_or("?")),
+    );
 
     // Check 2: has pod
     let pb = wizard::spinner("Checking pod allocation");
@@ -4352,7 +5358,13 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
         wizard::print_hint("Run: tytus connect");
         std::process::exit(1);
     }
-    wizard::finish_ok(&pb, &format!("Tunnel active on {}", pod.tunnel_iface.as_deref().unwrap_or("?")));
+    wizard::finish_ok(
+        &pb,
+        &format!(
+            "Tunnel active on {}",
+            pod.tunnel_iface.as_deref().unwrap_or("?")
+        ),
+    );
 
     // Check 4: gateway reachable
     let pb = wizard::spinner("Testing AI gateway");
@@ -4382,14 +5394,20 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
 }
 
 /// Helper: send a chat completion and return the assistant's response text.
-async fn test_chat_completion(endpoint: &str, key: &str, model: &str, prompt: &str) -> Result<String, String> {
+async fn test_chat_completion(
+    endpoint: &str,
+    key: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<String, String> {
     let url = format!("{}/v1/chat/completions", endpoint);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let resp = client.post(&url)
+    let resp = client
+        .post(&url)
         .header("Authorization", format!("Bearer {}", key))
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
@@ -4397,7 +5415,8 @@ async fn test_chat_completion(endpoint: &str, key: &str, model: &str, prompt: &s
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 30,
         }))
-        .send().await
+        .send()
+        .await
         .map_err(|e| format!("network error: {}", e))?;
 
     if !resp.status().is_success() {
@@ -4407,8 +5426,12 @@ async fn test_chat_completion(endpoint: &str, key: &str, model: &str, prompt: &s
     let body: serde_json::Value = resp.json().await.map_err(|e| format!("bad JSON: {}", e))?;
 
     // Extract the content from choices[0].message.content OR reasoning_content (MiniMax style)
-    let content = body["choices"][0]["message"]["content"].as_str().unwrap_or("");
-    let reasoning = body["choices"][0]["message"]["reasoning_content"].as_str().unwrap_or("");
+    let content = body["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+    let reasoning = body["choices"][0]["message"]["reasoning_content"]
+        .as_str()
+        .unwrap_or("");
 
     let text = if !content.is_empty() {
         content.to_string()
@@ -4457,7 +5480,9 @@ async fn cmd_chat(http: &atomek_core::HttpClient, model: &str, json: bool) {
 
     wizard::print_logo();
     wizard::print_header(&format!("Chat — {} (pod {})", model, pod.pod_id));
-    wizard::print_info("Type your message and press Enter. Type /quit to exit, /help for commands.");
+    wizard::print_info(
+        "Type your message and press Enter. Type /quit to exit, /help for commands.",
+    );
     println!();
 
     let mut history: Vec<serde_json::Value> = Vec::new();
@@ -4469,7 +5494,9 @@ async fn cmd_chat(http: &atomek_core::HttpClient, model: &str, json: bool) {
         };
 
         let trimmed = input.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
 
         match trimmed {
             "/quit" | "/exit" | "/q" => break,
@@ -4496,7 +5523,8 @@ async fn cmd_chat(http: &atomek_core::HttpClient, model: &str, json: bool) {
             .build()
             .unwrap();
 
-        let resp = client.post(&url)
+        let resp = client
+            .post(&url)
             .header("Authorization", format!("Bearer {}", key))
             .header("Content-Type", "application/json")
             .json(&serde_json::json!({
@@ -4504,7 +5532,8 @@ async fn cmd_chat(http: &atomek_core::HttpClient, model: &str, json: bool) {
                 "messages": history,
                 "max_tokens": 500,
             }))
-            .send().await;
+            .send()
+            .await;
 
         match resp {
             Ok(r) if r.status().is_success() => {
@@ -4515,9 +5544,17 @@ async fn cmd_chat(http: &atomek_core::HttpClient, model: &str, json: bool) {
                         continue;
                     }
                 };
-                let content = body["choices"][0]["message"]["content"].as_str().unwrap_or("");
-                let reasoning = body["choices"][0]["message"]["reasoning_content"].as_str().unwrap_or("");
-                let reply = if !content.is_empty() { content } else { reasoning };
+                let content = body["choices"][0]["message"]["content"]
+                    .as_str()
+                    .unwrap_or("");
+                let reasoning = body["choices"][0]["message"]["reasoning_content"]
+                    .as_str()
+                    .unwrap_or("");
+                let reply = if !content.is_empty() {
+                    content
+                } else {
+                    reasoning
+                };
                 pb.finish_and_clear();
                 println!("{} {}", console::style("ai:").green().bold(), reply);
                 println!();
@@ -4564,7 +5601,11 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
     };
 
     wizard::print_header("Configure your agent");
-    wizard::print_info(&format!("Pod: {} — Agent: {}", pod.pod_id, pod.agent_type.as_deref().unwrap_or("?")));
+    wizard::print_info(&format!(
+        "Pod: {} — Agent: {}",
+        pod.pod_id,
+        pod.agent_type.as_deref().unwrap_or("?")
+    ));
     println!();
 
     let options = vec![
@@ -4580,7 +5621,14 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
             let pb = wizard::spinner("Checking agent...");
             let (sk, auid) = get_credentials(&mut state, http).await;
             let client = atomek_pods::TytusClient::new(http, &sk, &auid);
-            match atomek_pods::exec_in_agent(&client, &pod.pod_id, "openclaw --version 2>&1 || echo 'not installed'", 10).await {
+            match atomek_pods::exec_in_agent(
+                &client,
+                &pod.pod_id,
+                "openclaw --version 2>&1 || echo 'not installed'",
+                10,
+            )
+            .await
+            {
                 Ok(result) => {
                     let out = result.stdout.unwrap_or_default();
                     wizard::finish_ok(&pb, "Agent responded");
@@ -4597,7 +5645,9 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
         }
         Ok("Restart agent") => {
             if wizard::confirm("Restart the agent container?", true).unwrap_or(false) {
-                wizard::print_info("Restart via DAM — use `tytus exec` for custom commands or contact support.");
+                wizard::print_info(
+                    "Restart via DAM — use `tytus exec` for custom commands or contact support.",
+                );
             }
         }
         Ok("Advanced: run custom command") => {
@@ -4608,10 +5658,14 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
                 match atomek_pods::exec_in_agent(&client, &pod.pod_id, &cmd, 30).await {
                     Ok(result) => {
                         if let Some(out) = result.stdout {
-                            if !out.is_empty() { println!("{}", out); }
+                            if !out.is_empty() {
+                                println!("{}", out);
+                            }
                         }
                         if let Some(err) = result.stderr {
-                            if !err.is_empty() { eprintln!("{}", err); }
+                            if !err.is_empty() {
+                                eprintln!("{}", err);
+                            }
                         }
                     }
                     Err(e) => wizard::print_fail(&e.to_string()),
@@ -4653,9 +5707,9 @@ async fn cmd_lope_passthrough(kind: &str, args: Vec<String>, _json: bool) {
     let exe = std::env::current_exe().ok();
     let sdk_root = exe
         .as_ref()
-        .and_then(|p| p.parent())   // target/release
-        .and_then(|p| p.parent())   // target
-        .and_then(|p| p.parent())   // workspace root
+        .and_then(|p| p.parent()) // target/release
+        .and_then(|p| p.parent()) // target
+        .and_then(|p| p.parent()) // workspace root
         .map(|p| p.to_path_buf())
         .or_else(|| {
             // Fallback: look in the known dev path.
@@ -4685,7 +5739,9 @@ async fn cmd_lope_passthrough(kind: &str, args: Vec<String>, _json: bool) {
         Ok(s) => std::process::exit(s.code().unwrap_or(1)),
         Err(e) => {
             eprintln!("Failed to invoke python3 -m tytus_sdk: {}", e);
-            eprintln!("Ensure Python 3.9+ is installed with: pip install websockets cryptography httpx");
+            eprintln!(
+                "Ensure Python 3.9+ is installed with: pip install websockets cryptography httpx"
+            );
             std::process::exit(1);
         }
     }
@@ -4829,10 +5885,15 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                     );
                 } else {
                     println!("✓ LaunchAgent installed at {}", plist_path.display());
-                    println!("✓ Token-refresh daemon installed at {}", daemon_plist_path.display());
+                    println!(
+                        "✓ Token-refresh daemon installed at {}",
+                        daemon_plist_path.display()
+                    );
                     println!("  Auto-start on every login: enabled");
                     println!("  Background token refresh: enabled (KeepAlive)");
-                    println!("  Your stable endpoint http://10.42.42.1:18080 + sk-tytus-user-* will");
+                    println!(
+                        "  Your stable endpoint http://10.42.42.1:18080 + sk-tytus-user-* will"
+                    );
                     println!("  keep working across reboots — no more expired-token prompts.");
                 }
             }
@@ -4884,13 +5945,34 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                     );
                 } else {
                     println!("Auto-start status:");
-                    println!("  plist:          {} {}", plist_path.display(), if installed { "[installed]" } else { "[missing]" });
+                    println!(
+                        "  plist:          {} {}",
+                        plist_path.display(),
+                        if installed {
+                            "[installed]"
+                        } else {
+                            "[missing]"
+                        }
+                    );
                     println!("  loaded:         {}", if loaded { "yes" } else { "no" });
-                    println!("  daemon plist:   {} {}", daemon_plist_path.display(), if daemon_installed { "[installed]" } else { "[missing]" });
-                    println!("  daemon loaded:  {}", if daemon_loaded { "yes" } else { "no" });
+                    println!(
+                        "  daemon plist:   {} {}",
+                        daemon_plist_path.display(),
+                        if daemon_installed {
+                            "[installed]"
+                        } else {
+                            "[missing]"
+                        }
+                    );
+                    println!(
+                        "  daemon loaded:  {}",
+                        if daemon_loaded { "yes" } else { "no" }
+                    );
                     if !installed || !daemon_installed {
                         println!();
-                        println!("To enable auto-start + background refresh: tytus autostart install");
+                        println!(
+                            "To enable auto-start + background refresh: tytus autostart install"
+                        );
                     }
                 }
             }
@@ -4941,16 +6023,22 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                 let ok = r.map(|o| o.status.success()).unwrap_or(false);
                 let ok_daemon = rd.map(|o| o.status.success()).unwrap_or(false);
                 if json {
-                    println!("{}", serde_json::json!({
-                        "action":"install",
-                        "unit_path":unit_path.to_string_lossy(),
-                        "daemon_unit_path":daemon_unit_path.to_string_lossy(),
-                        "enabled":ok,
-                        "daemon_enabled":ok_daemon
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "action":"install",
+                            "unit_path":unit_path.to_string_lossy(),
+                            "daemon_unit_path":daemon_unit_path.to_string_lossy(),
+                            "enabled":ok,
+                            "daemon_enabled":ok_daemon
+                        })
+                    );
                 } else {
                     println!("✓ systemd --user unit installed at {}", unit_path.display());
-                    println!("✓ token-refresh daemon installed at {}", daemon_unit_path.display());
+                    println!(
+                        "✓ token-refresh daemon installed at {}",
+                        daemon_unit_path.display()
+                    );
                     println!("  Auto-start on every login + 24/7 background refresh: enabled");
                 }
             }
@@ -4964,11 +6052,14 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                 let _ = std::fs::remove_file(&unit_path);
                 let _ = std::fs::remove_file(&daemon_unit_path);
                 if json {
-                    println!("{}", serde_json::json!({
-                        "action":"uninstall",
-                        "unit_path":unit_path.to_string_lossy(),
-                        "daemon_unit_path":daemon_unit_path.to_string_lossy()
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "action":"uninstall",
+                            "unit_path":unit_path.to_string_lossy(),
+                            "daemon_unit_path":daemon_unit_path.to_string_lossy()
+                        })
+                    );
                 } else {
                     println!("✓ systemd --user units removed. Auto-start and daemon disabled.");
                 }
@@ -4987,19 +6078,41 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                     .map(|o| o.status.success())
                     .unwrap_or(false);
                 if json {
-                    println!("{}", serde_json::json!({
-                        "action":"status",
-                        "installed":installed,
-                        "enabled":active,
-                        "daemon_installed":daemon_installed,
-                        "daemon_enabled":daemon_active
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "action":"status",
+                            "installed":installed,
+                            "enabled":active,
+                            "daemon_installed":daemon_installed,
+                            "daemon_enabled":daemon_active
+                        })
+                    );
                 } else {
                     println!("Auto-start status:");
-                    println!("  unit:           {} {}", unit_path.display(), if installed { "[installed]" } else { "[missing]" });
+                    println!(
+                        "  unit:           {} {}",
+                        unit_path.display(),
+                        if installed {
+                            "[installed]"
+                        } else {
+                            "[missing]"
+                        }
+                    );
                     println!("  enabled:        {}", if active { "yes" } else { "no" });
-                    println!("  daemon unit:    {} {}", daemon_unit_path.display(), if daemon_installed { "[installed]" } else { "[missing]" });
-                    println!("  daemon enabled: {}", if daemon_active { "yes" } else { "no" });
+                    println!(
+                        "  daemon unit:    {} {}",
+                        daemon_unit_path.display(),
+                        if daemon_installed {
+                            "[installed]"
+                        } else {
+                            "[missing]"
+                        }
+                    );
+                    println!(
+                        "  daemon enabled: {}",
+                        if daemon_active { "yes" } else { "no" }
+                    );
                 }
             }
         }
@@ -5071,10 +6184,8 @@ fn cmd_tray(action: TrayAction, json: bool) {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &bundle_exe,
-                    std::fs::Permissions::from_mode(0o755),
-                );
+                let _ =
+                    std::fs::set_permissions(&bundle_exe, std::fs::Permissions::from_mode(0o755));
             }
 
             // Info.plist — LSUIElement=true keeps the T out of the Dock
@@ -5208,8 +6319,14 @@ fn cmd_tray(action: TrayAction, json: bool) {
                     })
                 );
             } else {
-                println!("✓ /Applications/Tytus.app installed ({})", bundle_exe.display());
-                println!("✓ Launch-at-login agent installed ({})", tray_plist_path.display());
+                println!(
+                    "✓ /Applications/Tytus.app installed ({})",
+                    bundle_exe.display()
+                );
+                println!(
+                    "✓ Launch-at-login agent installed ({})",
+                    tray_plist_path.display()
+                );
                 println!("✓ Tytus is now running in your menu bar");
                 println!();
                 println!("You can now:");
@@ -5266,9 +6383,26 @@ fn cmd_tray(action: TrayAction, json: bool) {
                 );
             } else {
                 println!("Tray status:");
-                println!("  /Applications/Tytus.app: {}", if app_installed { "[installed]" } else { "[missing]" });
-                println!("  launch at login:        {}", if plist_installed && loaded { "yes" } else { "no" });
-                println!("  running:                {}", if running { "yes" } else { "no" });
+                println!(
+                    "  /Applications/Tytus.app: {}",
+                    if app_installed {
+                        "[installed]"
+                    } else {
+                        "[missing]"
+                    }
+                );
+                println!(
+                    "  launch at login:        {}",
+                    if plist_installed && loaded {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
+                println!(
+                    "  running:                {}",
+                    if running { "yes" } else { "no" }
+                );
                 if !app_installed {
                     println!();
                     println!("To install: tytus tray install");
@@ -5312,13 +6446,11 @@ fn generate_app_icon(resources_dir: &std::path::Path) -> Result<(), String> {
     // Draw the master image (1024×1024 RGBA).
     let master = render_app_icon_rgba(1024);
     let iconset_dir = resources_dir.join("Tytus.iconset");
-    std::fs::create_dir_all(&iconset_dir)
-        .map_err(|e| format!("create iconset dir: {}", e))?;
+    std::fs::create_dir_all(&iconset_dir).map_err(|e| format!("create iconset dir: {}", e))?;
 
     // Encode master PNG.
     let master_path = iconset_dir.join("icon_512x512@2x.png");
-    write_png(&master_path, &master, 1024, 1024)
-        .map_err(|e| format!("write master png: {}", e))?;
+    write_png(&master_path, &master, 1024, 1024).map_err(|e| format!("write master png: {}", e))?;
 
     // Apple's iconset requires these sizes (name → pixels):
     //   icon_16x16.png            16
@@ -5332,22 +6464,27 @@ fn generate_app_icon(resources_dir: &std::path::Path) -> Result<(), String> {
     //   icon_512x512.png         512
     //   icon_512x512@2x.png     1024  (already written)
     let sizes: &[(&str, u32)] = &[
-        ("icon_16x16.png",      16),
-        ("icon_16x16@2x.png",   32),
-        ("icon_32x32.png",      32),
-        ("icon_32x32@2x.png",   64),
-        ("icon_128x128.png",   128),
-        ("icon_128x128@2x.png",256),
-        ("icon_256x256.png",   256),
-        ("icon_256x256@2x.png",512),
-        ("icon_512x512.png",   512),
+        ("icon_16x16.png", 16),
+        ("icon_16x16@2x.png", 32),
+        ("icon_32x32.png", 32),
+        ("icon_32x32@2x.png", 64),
+        ("icon_128x128.png", 128),
+        ("icon_128x128@2x.png", 256),
+        ("icon_256x256.png", 256),
+        ("icon_256x256@2x.png", 512),
+        ("icon_512x512.png", 512),
     ];
     for (name, px) in sizes {
         let out = iconset_dir.join(name);
         let status = Command::new("sips")
-            .args(["-z", &px.to_string(), &px.to_string(),
-                   master_path.to_str().unwrap_or_default(),
-                   "--out", out.to_str().unwrap_or_default()])
+            .args([
+                "-z",
+                &px.to_string(),
+                &px.to_string(),
+                master_path.to_str().unwrap_or_default(),
+                "--out",
+                out.to_str().unwrap_or_default(),
+            ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -5361,9 +6498,13 @@ fn generate_app_icon(resources_dir: &std::path::Path) -> Result<(), String> {
     // we just produced and emits a single .icns file.
     let icns_path = resources_dir.join("icon.icns");
     let status = Command::new("iconutil")
-        .args(["-c", "icns",
-               iconset_dir.to_str().unwrap_or_default(),
-               "-o", icns_path.to_str().unwrap_or_default()])
+        .args([
+            "-c",
+            "icns",
+            iconset_dir.to_str().unwrap_or_default(),
+            "-o",
+            icns_path.to_str().unwrap_or_default(),
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -5390,9 +6531,11 @@ fn write_png(
     let mut encoder = png::Encoder::new(w, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header()
+    let mut writer = encoder
+        .write_header()
         .map_err(|e| std::io::Error::other(format!("png header: {}", e)))?;
-    writer.write_image_data(rgba)
+    writer
+        .write_image_data(rgba)
         .map_err(|e| std::io::Error::other(format!("png data: {}", e)))?;
     Ok(())
 }
@@ -5407,9 +6550,9 @@ fn write_png(
 fn render_app_icon_rgba(size: u32) -> Vec<u8> {
     let s = size as i32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
-    let bg = [24u8, 128, 128, 255];      // Traylinx teal
-    let bg_edge = [16u8, 96, 96, 255];    // subtle darker edge for depth
-    let fg = [255u8, 255, 255, 255];      // white T
+    let bg = [24u8, 128, 128, 255]; // Traylinx teal
+    let bg_edge = [16u8, 96, 96, 255]; // subtle darker edge for depth
+    let fg = [255u8, 255, 255, 255]; // white T
 
     // Continuous-corner squircle approximation: a superellipse with n≈5.
     // For each pixel, test (|dx|^n + |dy|^n) < r^n where r is half-size
@@ -5433,9 +6576,14 @@ fn render_app_icon_rgba(size: u32) -> Vec<u8> {
                 let mix = |a: u8, b: u8| -> u8 {
                     (a as f32 * (1.0 - t * 0.25) + b as f32 * (t * 0.25)) as u8
                 };
-                let px = [mix(bg[0], bg_edge[0]), mix(bg[1], bg_edge[1]), mix(bg[2], bg_edge[2]), 255];
+                let px = [
+                    mix(bg[0], bg_edge[0]),
+                    mix(bg[1], bg_edge[1]),
+                    mix(bg[2], bg_edge[2]),
+                    255,
+                ];
                 let i = ((y * s + x) * 4) as usize;
-                rgba[i..i+4].copy_from_slice(&px);
+                rgba[i..i + 4].copy_from_slice(&px);
             }
         }
     }
@@ -5456,7 +6604,7 @@ fn render_app_icon_rgba(size: u32) -> Vec<u8> {
         for x in (icx - cb_half_w)..(icx + cb_half_w) {
             let i = ((y * s + x) * 4) as usize;
             if i + 4 <= rgba.len() {
-                rgba[i..i+4].copy_from_slice(&fg);
+                rgba[i..i + 4].copy_from_slice(&fg);
             }
         }
     }
@@ -5464,7 +6612,7 @@ fn render_app_icon_rgba(size: u32) -> Vec<u8> {
         for x in (icx - stem_half_w)..(icx + stem_half_w) {
             let i = ((y * s + x) * 4) as usize;
             if i + 4 <= rgba.len() {
-                rgba[i..i+4].copy_from_slice(&fg);
+                rgba[i..i + 4].copy_from_slice(&fg);
             }
         }
     }
@@ -5480,13 +6628,17 @@ fn find_tray_binary(home: &str) -> Option<std::path::PathBuf> {
         std::path::PathBuf::from("/opt/homebrew/bin/tytus-tray"),
     ];
     for c in &candidates {
-        if c.exists() { return Some(c.clone()); }
+        if c.exists() {
+            return Some(c.clone());
+        }
     }
     // Sibling of the running tytus binary (common during dev).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let sibling = dir.join("tytus-tray");
-            if sibling.exists() { return Some(sibling); }
+            if sibling.exists() {
+                return Some(sibling);
+            }
         }
     }
     // PATH lookup as last resort.
@@ -5494,10 +6646,18 @@ fn find_tray_binary(home: &str) -> Option<std::path::PathBuf> {
         .arg("tytus-tray")
         .output()
         .ok()
-        .and_then(|o| if o.status.success() {
-            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !p.is_empty() { Some(std::path::PathBuf::from(p)) } else { None }
-        } else { None })
+        .and_then(|o| {
+            if o.status.success() {
+                let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !p.is_empty() {
+                    Some(std::path::PathBuf::from(p))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -5535,7 +6695,11 @@ async fn cmd_ui(
     // tunnel iface, agent endpoint, upstream port — is in state.json
     // directly. If the tunnel has actually dropped, the upstream probe
     // (A1) cleans the forwarder up within ~15s.
-    let has_email = state.email.as_deref().map(|e| !e.is_empty()).unwrap_or(false);
+    let has_email = state
+        .email
+        .as_deref()
+        .map(|e| !e.is_empty())
+        .unwrap_or(false);
     if !has_email || state.pods.is_empty() {
         eprintln!("Not logged in or no pods configured. Run: tytus login && tytus connect");
         std::process::exit(1);
@@ -5579,25 +6743,38 @@ async fn cmd_ui(
     // tunnel and reconnect targeting the requested pod. The user already
     // said "open pod N" by running `tytus ui --pod N`, so reinterpret the
     // intent as "get me into pod N whatever that takes".
-    let pod_subnet_prefix = pod.ai_endpoint.as_deref()
+    let pod_subnet_prefix = pod
+        .ai_endpoint
+        .as_deref()
         .and_then(|s| s.strip_prefix("http://"))
         .and_then(|s| s.split(':').next())
         .and_then(|host| {
             let parts: Vec<&str> = host.split('.').collect();
-            if parts.len() == 4 { Some(format!("{}.{}.{}.", parts[0], parts[1], parts[2])) }
-            else { None }
+            if parts.len() == 4 {
+                Some(format!("{}.{}.{}.", parts[0], parts[1], parts[2]))
+            } else {
+                None
+            }
         });
-    let tunnel_reaches_this_pod = pod_subnet_prefix.as_ref().map(|prefix| {
-        let out = std::process::Command::new("ifconfig").output();
-        match out {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).lines().any(|l| l.contains(prefix)),
-            Err(_) => false,
-        }
-    }).unwrap_or(false);
+    let tunnel_reaches_this_pod = pod_subnet_prefix
+        .as_ref()
+        .map(|prefix| {
+            let out = std::process::Command::new("ifconfig").output();
+            match out {
+                Ok(o) => String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.contains(prefix)),
+                Err(_) => false,
+            }
+        })
+        .unwrap_or(false);
 
     if !tunnel_reaches_this_pod {
         if !json {
-            println!("→ Tunnel isn't routing to pod {} yet — switching now.", pod.pod_id);
+            println!(
+                "→ Tunnel isn't routing to pod {} yet — switching now.",
+                pod.pod_id
+            );
             println!("  (each WireGuard tunnel serves one pod; cross-pod traffic is firewalled)");
         }
         // Tear down whatever is up, then bring up a tunnel for the target
@@ -5612,7 +6789,12 @@ async fn cmd_ui(
     // sees post-connect agent_endpoint / ai_endpoint / tunnel_iface.
     let pod = {
         let fresh = CliState::load();
-        fresh.pods.iter().find(|p| p.pod_id == pod.pod_id).cloned().unwrap_or(pod)
+        fresh
+            .pods
+            .iter()
+            .find(|p| p.pod_id == pod.pod_id)
+            .cloned()
+            .unwrap_or(pod)
     };
 
     // Resolve upstream: agent_endpoint is "10.X.Y.1:3000" (nemoclaw) or
@@ -5620,24 +6802,22 @@ async fn cmd_ui(
     // Strip any http:// prefix — copy_bidirectional wants a raw host:port.
     let upstream = match pod.agent_endpoint.clone() {
         Some(ep) => ep.strip_prefix("http://").unwrap_or(&ep).to_string(),
-        None => {
-            match pod.ai_endpoint.as_deref() {
-                Some(ai) => {
-                    let default_port = agent_ui_port(pod.agent_type.as_deref().unwrap_or("nemoclaw"));
-                    ai.strip_prefix("http://")
-                        .and_then(|s| s.split(':').next())
-                        .map(|host| format!("{}:{}", host, default_port))
-                        .unwrap_or_else(|| {
-                            eprintln!("Could not derive agent endpoint from state");
-                            std::process::exit(1);
-                        })
-                }
-                None => {
-                    eprintln!("Pod has no agent_endpoint in state. Try: tytus connect");
-                    std::process::exit(1);
-                }
+        None => match pod.ai_endpoint.as_deref() {
+            Some(ai) => {
+                let default_port = agent_ui_port(pod.agent_type.as_deref().unwrap_or("nemoclaw"));
+                ai.strip_prefix("http://")
+                    .and_then(|s| s.split(':').next())
+                    .map(|host| format!("{}:{}", host, default_port))
+                    .unwrap_or_else(|| {
+                        eprintln!("Could not derive agent endpoint from state");
+                        std::process::exit(1);
+                    })
             }
-        }
+            None => {
+                eprintln!("Pod has no agent_endpoint in state. Try: tytus connect");
+                std::process::exit(1);
+            }
+        },
     };
 
     // Reuse an existing forwarder for this same pod if one is already
@@ -5656,15 +6836,21 @@ async fn cmd_ui(
             if pid_alive && port_alive {
                 let existing_url = format!("http://localhost:{}/", port);
                 if json {
-                    println!("{}", serde_json::json!({
-                        "local_url": existing_url,
-                        "upstream": upstream,
-                        "pod_id": pod.pod_id,
-                        "status": "reused",
-                        "forwarder_pid": pid,
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "local_url": existing_url,
+                            "upstream": upstream,
+                            "pod_id": pod.pod_id,
+                            "status": "reused",
+                            "forwarder_pid": pid,
+                        })
+                    );
                 } else {
-                    println!("→ Forwarder for pod {} is already running (pid {}) on {}", pod.pod_id, pid, existing_url);
+                    println!(
+                        "→ Forwarder for pod {} is already running (pid {}) on {}",
+                        pod.pod_id, pid, existing_url
+                    );
                     println!("  Reusing it — close the other Terminal window to stop it.");
                 }
                 if !no_open {
@@ -5719,11 +6905,16 @@ async fn cmd_ui(
         // being e.g. localhost:49213 instead of localhost:18702.
         match TcpListener::bind(("127.0.0.1", 0)).await {
             Ok(l) => {
-                if let Ok(addr) = l.local_addr() { local_port = addr.port(); }
+                if let Ok(addr) = l.local_addr() {
+                    local_port = addr.port();
+                }
                 listener = Some(l);
             }
             Err(e) => {
-                eprintln!("Could not bind any localhost port (preferred: {:?}): {}", candidates, e);
+                eprintln!(
+                    "Could not bind any localhost port (preferred: {:?}): {}",
+                    candidates, e
+                );
                 std::process::exit(1);
             }
         }
@@ -5799,13 +6990,17 @@ async fn cmd_ui(
             let probe = tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 TcpStream::connect(&upstream_probe),
-            ).await;
+            )
+            .await;
             let healthy = matches!(probe, Ok(Ok(_)));
             if healthy != last_healthy {
                 if healthy {
                     eprintln!("[tytus ui] upstream {} reachable again", upstream_probe);
                 } else {
-                    eprintln!("[tytus ui] upstream {} transient probe fail — forwarder staying up", upstream_probe);
+                    eprintln!(
+                        "[tytus ui] upstream {} transient probe fail — forwarder staying up",
+                        upstream_probe
+                    );
                 }
                 last_healthy = healthy;
             }
@@ -5840,17 +7035,25 @@ async fn cmd_ui(
     // success we persist the token back so the next start is instant.
     let mut gateway_token = {
         let fresh = CliState::load();
-        fresh.pods.iter()
+        fresh
+            .pods
+            .iter()
             .find(|p| p.pod_id == pod.pod_id)
             .and_then(|p| p.gateway_token.clone())
     };
-    if gateway_token.as_deref().map(|t| t.is_empty()).unwrap_or(true) {
+    if gateway_token
+        .as_deref()
+        .map(|t| t.is_empty())
+        .unwrap_or(true)
+    {
         if let Some(t) = fetch_gateway_token_via_provider(http, &pod.pod_id).await {
             if !t.is_empty() {
                 gateway_token = Some(t.clone());
                 let mut st = CliState::load();
                 for p in st.pods.iter_mut() {
-                    if p.pod_id == pod.pod_id { p.gateway_token = Some(t.clone()); }
+                    if p.pod_id == pod.pod_id {
+                        p.gateway_token = Some(t.clone());
+                    }
                 }
                 st.save();
             }
@@ -5902,8 +7105,13 @@ async fn cmd_ui(
                             &pod_id,
                             local_port_for_accept,
                             stable_user_key.as_deref(),
-                        ).await {
-                            eprintln!("[tytus ui] connection error (upstream {}): {}", upstream_addr, e);
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "[tytus ui] connection error (upstream {}): {}",
+                                upstream_addr, e
+                            );
                         }
                     });
                 }
@@ -5959,13 +7167,20 @@ async fn ensure_controlui_overlay(
     // Skip for non-OpenClaw agents: Hermes has no browser UI, no
     // allowedOrigins gate, and doesn't care about Origin headers —
     // silent-pairing locality logic is OpenClaw-specific.
-    let agent_type = st.pods.iter().find(|p| p.pod_id == pod_id)
-        .and_then(|p| p.agent_type.clone()).unwrap_or_default();
+    let agent_type = st
+        .pods
+        .iter()
+        .find(|p| p.pod_id == pod_id)
+        .and_then(|p| p.agent_type.clone())
+        .unwrap_or_default();
     if agent_type == "hermes" || agent_type == "none" {
         return Ok(());
     }
     let secret = st.secret_key.as_deref().ok_or("no secret_key in state")?;
-    let uid = st.agent_user_id.as_deref().ok_or("no agent_user_id in state")?;
+    let uid = st
+        .agent_user_id
+        .as_deref()
+        .ok_or("no agent_user_id in state")?;
     // Pull public-URL fields from the same PodEntry so the overlay always
     // reflects the current assignment. Per-pod-subdomain sprint (2026-04-23)
     // made pod_public_url the canonical browser origin; edge_public_url is
@@ -5995,11 +7210,17 @@ async fn ensure_controlui_overlay(
     let probe = atomek_pods::exec_in_agent(&client, pod_id, probe_cmd, 10)
         .await
         .map_err(|e| e.to_string())?;
-    let origins: Vec<String> = serde_json::from_str(probe.stdout.as_deref().unwrap_or("[]"))
-        .unwrap_or_default();
+    let origins: Vec<String> =
+        serde_json::from_str(probe.stdout.as_deref().unwrap_or("[]")).unwrap_or_default();
     let has = |needle: &str| origins.iter().any(|o| o == needle);
-    let public_ok = pod_public_url.as_deref().map_or(true, |u| has(u));
-    let edge_ok = edge_public_url.as_deref().map_or(true, |u| has(u));
+    let public_ok = match pod_public_url.as_deref() {
+        Some(u) => has(u),
+        None => true,
+    };
+    let edge_ok = match edge_public_url.as_deref() {
+        Some(u) => has(u),
+        None => true,
+    };
     if has(&wanted) && has(&wanted2) && public_ok && edge_ok {
         return Ok(());
     }
@@ -6012,15 +7233,20 @@ async fn ensure_controlui_overlay(
         serde_json::Value::String(wanted.clone()),
         serde_json::Value::String(wanted2.clone()),
     ];
-    if let Some(u) = pod_public_url.as_deref() { origin_list.push(serde_json::Value::String(u.to_string())); }
-    if let Some(u) = edge_public_url.as_deref() { origin_list.push(serde_json::Value::String(u.to_string())); }
+    if let Some(u) = pod_public_url.as_deref() {
+        origin_list.push(serde_json::Value::String(u.to_string()));
+    }
+    if let Some(u) = edge_public_url.as_deref() {
+        origin_list.push(serde_json::Value::String(u.to_string()));
+    }
     let overlay = serde_json::json!({
         "gateway": {
             "controlUi": {
                 "allowedOrigins": origin_list
             }
         }
-    }).to_string();
+    })
+    .to_string();
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(overlay.as_bytes());
     let write_cmd = format!(
@@ -6056,7 +7282,9 @@ async fn fetch_gateway_token_via_provider(
     let st = CliState::load();
     let secret = st.secret_key.as_deref()?;
     let user_id = st.agent_user_id.as_deref()?;
-    let agent_type = st.pods.iter()
+    let agent_type = st
+        .pods
+        .iter()
         .find(|p| p.pod_id == pod_id)
         .and_then(|p| p.agent_type.clone())
         .unwrap_or_else(|| "nemoclaw".into());
@@ -6070,9 +7298,15 @@ async fn fetch_gateway_token_via_provider(
          process.stdout.write((c.gateway&&c.gateway.auth&&c.gateway.auth.token)||'');}\
          catch(e){process.exit(0);}})\""
     };
-    let res = atomek_pods::exec_in_agent(&client, pod_id, script, 10).await.ok()?;
+    let res = atomek_pods::exec_in_agent(&client, pod_id, script, 10)
+        .await
+        .ok()?;
     let token = res.stdout.unwrap_or_default().trim().to_string();
-    if token.is_empty() { None } else { Some(token) }
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
 }
 
 /// Send SIGTERM to the UI forwarder for one pod (if running). Best-effort:
@@ -6081,13 +7315,22 @@ async fn fetch_gateway_token_via_provider(
 /// lifecycle bound to the tunnel's / session's.
 fn stop_ui_forwarder(pod_id: &str) {
     let path = format!("/tmp/tytus/ui-{}.port", pod_id);
-    let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => return };
-    let v: serde_json::Value = match serde_json::from_str(&raw) { Ok(v) => v, Err(_) => {
-        let _ = std::fs::remove_file(&path); return;
-    }};
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+    };
     let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as i32;
     if pid > 0 && unsafe { libc::kill(pid, 0) } == 0 {
-        unsafe { libc::kill(pid, libc::SIGTERM); }
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
     }
     // Let cmd_ui clean its own marker on SIGTERM exit. Give it 250 ms;
     // if still there, remove to keep the tray from reusing a zombie.
@@ -6104,7 +7347,10 @@ fn list_ui_forwarder_pods() -> Vec<String> {
         for entry in rd.flatten() {
             let n = entry.file_name();
             let name = n.to_string_lossy();
-            if let Some(pod) = name.strip_prefix("ui-").and_then(|s| s.strip_suffix(".port")) {
+            if let Some(pod) = name
+                .strip_prefix("ui-")
+                .and_then(|s| s.strip_suffix(".port"))
+            {
                 pods.push(pod.to_string());
             }
         }
@@ -6138,6 +7384,7 @@ fn list_ui_forwarder_pods() -> Vec<String> {
 /// Error handling: on any io error, the client connection is dropped.
 /// Cache write failures are swallowed silently — we'd rather serve a
 /// correct but uncached response than fail the request.
+#[allow(clippy::too_many_arguments)] // Forwarder owns socket + request context; grouping would obscure call-site mapping.
 async fn handle_forwarder_connection(
     mut client: tokio::net::TcpStream,
     upstream_addr: String,
@@ -6163,13 +7410,13 @@ async fn handle_forwarder_connection(
         if buf.len() >= 16 * 1024 {
             return Ok(()); // headers too large, drop the connection
         }
-        let n = match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.read(&mut tmp),
-        ).await {
-            Ok(Ok(n)) if n > 0 => n,
-            _ => return Ok(()), // timeout or EOF before head complete
-        };
+        let n =
+            match tokio::time::timeout(std::time::Duration::from_secs(10), client.read(&mut tmp))
+                .await
+            {
+                Ok(Ok(n)) if n > 0 => n,
+                _ => return Ok(()), // timeout or EOF before head complete
+            };
         buf.extend_from_slice(&tmp[..n]);
     };
 
@@ -6224,7 +7471,11 @@ async fn handle_forwarder_connection(
     } else {
         (upstream_addr.clone(), true)
     };
-    let forwarder_token = if should_inject_auth { gateway_token.as_deref() } else { None };
+    let forwarder_token = if should_inject_auth {
+        gateway_token.as_deref()
+    } else {
+        None
+    };
 
     if agent_type != "hermes"
         && method.eq_ignore_ascii_case("GET")
@@ -6316,15 +7567,15 @@ async fn handle_forwarder_connection(
     let mut client_abandoned = false;
     loop {
         let n = upstream.read(&mut chunk).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         response.extend_from_slice(&chunk[..n]);
-        if !client_abandoned {
-            if client.write_all(&chunk[..n]).await.is_err() {
-                // Client closed mid-stream. Keep reading upstream so
-                // the cache file can still be complete for the next
-                // request — no wasted work.
-                client_abandoned = true;
-            }
+        if !client_abandoned && client.write_all(&chunk[..n]).await.is_err() {
+            // Client closed mid-stream. Keep reading upstream so
+            // the cache file can still be complete for the next
+            // request — no wasted work.
+            client_abandoned = true;
         }
     }
 
@@ -6338,9 +7589,8 @@ async fn handle_forwarder_connection(
     // Observed 2026-04-19: main bundle cached at 111 KB with
     // Content-Length: 689625 after agent restart → page permanently
     // stuck at "loading".
-    let cacheable_ok = response_is_2xx(&response)
-        && !response.is_empty()
-        && response_is_complete(&response);
+    let cacheable_ok =
+        response_is_2xx(&response) && !response.is_empty() && response_is_complete(&response);
     if cacheable_ok {
         // The cache dir may have been removed out from under us (user
         // deleted /tmp/tytus manually, periodic /tmp sweep, etc).
@@ -6381,7 +7631,7 @@ async fn handle_forwarder_connection(
 /// Rejects:
 ///   - Content-Length header present but body shorter (truncation).
 ///   - Transfer-Encoding: chunked (we don't dechunk; don't cache).
-/// Accepts:
+///     Accepts:
 ///   - Content-Length present AND body == declared length.
 ///   - No length headers at all (rare; HTTP/1.0-style). We assume
 ///     connection-close-delimited and the whole thing was read.
@@ -6405,7 +7655,9 @@ fn response_is_complete(response: &[u8]) -> bool {
             content_length = v.trim().parse::<usize>().ok();
         }
         if let Some(v) = lower.strip_prefix("transfer-encoding:") {
-            if v.contains("chunked") { return false; }
+            if v.contains("chunked") {
+                return false;
+            }
         }
     }
     match content_length {
@@ -6439,9 +7691,9 @@ async fn spawn_chunk_prefetch(
     // filter (we only fetch if it's a known cacheable extension that
     // isn't already on disk).
     let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (start_idx, _) in body.match_indices(|c: char| c == '"' || c == '\'') {
+    for (start_idx, _) in body.match_indices(['"', '\'']) {
         let rest = &body[start_idx + 1..];
-        let end = match rest.find(|c: char| c == '"' || c == '\'') {
+        let end = match rest.find(['"', '\'']) {
             Some(e) => e,
             None => continue,
         };
@@ -6451,16 +7703,28 @@ async fn spawn_chunk_prefetch(
         // filename. Without this, every dynamic import fell through
         // the "contains('/')" check and never prefetched.
         let candidate = raw.trim_start_matches("./").trim_start_matches('/');
-        if !candidate.contains('-') { continue; }
-        if candidate.contains('/') { continue; } // still multi-path? skip
-        let ext = match candidate.rfind('.') { Some(p) => &candidate[p..], None => continue };
-        if !matches!(ext, ".js" | ".mjs" | ".css" | ".svg" | ".png" | ".woff2" | ".wasm") {
+        if !candidate.contains('-') {
+            continue;
+        }
+        if candidate.contains('/') {
+            continue;
+        } // still multi-path? skip
+        let ext = match candidate.rfind('.') {
+            Some(p) => &candidate[p..],
+            None => continue,
+        };
+        if !matches!(
+            ext,
+            ".js" | ".mjs" | ".css" | ".svg" | ".png" | ".woff2" | ".wasm"
+        ) {
             continue;
         }
         candidates.insert(candidate.to_string());
     }
 
-    if candidates.is_empty() { return; }
+    if candidates.is_empty() {
+        return;
+    }
 
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(candidates.len().max(1));
     for c in candidates {
@@ -6487,7 +7751,9 @@ async fn spawn_chunk_prefetch(
                 };
                 let asset_path = format!("/assets/{}", name);
                 let cache_file = cache_dir.join(cache_key_for(&asset_path));
-                if cache_file.exists() { continue; }
+                if cache_file.exists() {
+                    continue;
+                }
                 let _ = fetch_and_cache_asset(&upstream_addr, &asset_path, &cache_file).await;
             }
         });
@@ -6549,7 +7815,10 @@ async fn raw_proxy(
     let mut upstream = match TcpStream::connect(upstream_addr).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[tytus ui] upstream connect to {} failed: {}", upstream_addr, e);
+            eprintln!(
+                "[tytus ui] upstream connect to {} failed: {}",
+                upstream_addr, e
+            );
             return Ok(());
         }
     };
@@ -6575,8 +7844,12 @@ async fn raw_proxy(
 /// head passes through untouched so users with their own auth story
 /// (e.g. plain wss proxy) aren't clobbered.
 fn inject_auth_header(request_head: &[u8], gateway_token: Option<&str>) -> Vec<u8> {
-    let Some(token) = gateway_token else { return request_head.to_vec(); };
-    if token.is_empty() { return request_head.to_vec(); }
+    let Some(token) = gateway_token else {
+        return request_head.to_vec();
+    };
+    if token.is_empty() {
+        return request_head.to_vec();
+    }
     let text = match std::str::from_utf8(request_head) {
         Ok(s) => s,
         Err(_) => return request_head.to_vec(),
@@ -6673,7 +7946,8 @@ fn render_hermes_landing(
     let sdk_key = "sk-any-string-the-forwarder-injects-the-real-one";
     let fwd = forwarder_key.unwrap_or("(not cached yet — restart the agent)");
     let stable = stable_user_key.unwrap_or("(no stable key — run `tytus env`)");
-    format!(r#"<!doctype html><html><head><meta charset="utf-8">
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8">
 <title>Tytus · Hermes · pod {pod}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -6724,7 +7998,13 @@ export OPENAI_API_KEY="{sdk_key}"</pre>
 </div>
 
 <p class="dim">Stop the forwarder: <code>tytus ui --pod {pod} --stop</code> · Docs: <code>tytus llm-docs</code></p>
-</body></html>"#, pod = pod_id, base = base, sdk_key = sdk_key, fwd = fwd, stable = stable)
+</body></html>"#,
+        pod = pod_id,
+        base = base,
+        sdk_key = sdk_key,
+        fwd = fwd,
+        stable = stable
+    )
 }
 
 /// Position of the \r\n\r\n header terminator + 4 (start of body), if any.
@@ -6746,11 +8026,17 @@ fn find_crlf2(buf: &[u8]) -> Option<usize> {
 /// lives in one place and the forwarder can multiplex without any
 /// provider/DAM round-trip.
 fn agent_ui_port(agent_type: &str) -> u16 {
-    match agent_type { "hermes" => 9119, _ => 3000 }
+    match agent_type {
+        "hermes" => 9119,
+        _ => 3000,
+    }
 }
 
 fn agent_api_port(agent_type: &str) -> u16 {
-    match agent_type { "hermes" => 8642, _ => 3000 }
+    match agent_type {
+        "hermes" => 8642,
+        _ => 3000,
+    }
 }
 
 /// For the given request path on a Hermes pod, decide which upstream
@@ -6759,10 +8045,7 @@ fn agent_api_port(agent_type: &str) -> u16 {
 /// dashboard config, static assets) goes to the dashboard.
 fn hermes_path_needs_api_upstream(path: &str) -> bool {
     let p = path.split('?').next().unwrap_or(path);
-    p.starts_with("/v1/")
-        || p == "/health"
-        || p == "/health/detailed"
-        || p.starts_with("/api/jobs")
+    p.starts_with("/v1/") || p == "/health" || p == "/health/detailed" || p.starts_with("/api/jobs")
 }
 
 /// Swap the port component of a `host:port` upstream string.
@@ -6825,10 +8108,24 @@ fn is_cacheable_asset(path: &str) -> bool {
         Some(pos) => &p[pos..],
         None => return false,
     };
-    matches!(ext,
-        ".js" | ".mjs" | ".css" | ".svg" | ".png" | ".jpg" | ".jpeg" |
-        ".gif" | ".webp" | ".ico" | ".woff" | ".woff2" | ".ttf" | ".otf" |
-        ".map" | ".wasm"
+    matches!(
+        ext,
+        ".js"
+            | ".mjs"
+            | ".css"
+            | ".svg"
+            | ".png"
+            | ".jpg"
+            | ".jpeg"
+            | ".gif"
+            | ".webp"
+            | ".ico"
+            | ".woff"
+            | ".woff2"
+            | ".ttf"
+            | ".otf"
+            | ".map"
+            | ".wasm"
     )
 }
 
@@ -6850,7 +8147,9 @@ fn cache_key_for(path: &str) -> String {
 /// True if response starts with "HTTP/1.1 2xx" (or HTTP/1.0 2xx).
 fn response_is_2xx(response: &[u8]) -> bool {
     // "HTTP/1.1 200 OK\r\n…"
-    if response.len() < 12 { return false; }
+    if response.len() < 12 {
+        return false;
+    }
     // Find the status code — three digits starting at byte 9.
     let code = &response[9..12];
     code[0] == b'2' && code[1].is_ascii_digit() && code[2].is_ascii_digit()
@@ -6862,7 +8161,8 @@ async fn cmd_ui_stop(pod_id: Option<String>, json: bool) {
     let mut stale: Vec<String> = Vec::new();
 
     let markers: Vec<std::path::PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path()))
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| {
                 let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 n.starts_with("ui-") && n.ends_with(".port")
@@ -6872,22 +8172,41 @@ async fn cmd_ui_stop(pod_id: Option<String>, json: bool) {
     };
 
     for path in markers {
-        let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        let pod = fname.trim_start_matches("ui-").trim_end_matches(".port").to_string();
+        let fname = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let pod = fname
+            .trim_start_matches("ui-")
+            .trim_end_matches(".port")
+            .to_string();
         if let Some(ref want) = pod_id {
-            if &pod != want { continue; }
+            if &pod != want {
+                continue;
+            }
         }
-        let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => continue };
-        let v: serde_json::Value = match serde_json::from_str(&raw) { Ok(v) => v, Err(_) => {
-            let _ = std::fs::remove_file(&path); stale.push(pod); continue;
-        }};
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                stale.push(pod);
+                continue;
+            }
+        };
         let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as i32;
         if pid <= 0 || unsafe { libc::kill(pid, 0) } != 0 {
             let _ = std::fs::remove_file(&path);
             stale.push(pod);
             continue;
         }
-        unsafe { libc::kill(pid, libc::SIGTERM); }
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
         // Give it a moment to clean up its own marker; if it's stuck, we
         // remove the file ourselves so the tray doesn't reuse it.
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -6898,19 +8217,26 @@ async fn cmd_ui_stop(pod_id: Option<String>, json: bool) {
     }
 
     if json {
-        println!("{}", serde_json::json!({
-            "stopped": stopped.iter().map(|(p, pid)| serde_json::json!({"pod_id": p, "pid": pid})).collect::<Vec<_>>(),
-            "stale_markers_cleaned": stale,
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "stopped": stopped.iter().map(|(p, pid)| serde_json::json!({"pod_id": p, "pid": pid})).collect::<Vec<_>>(),
+                "stale_markers_cleaned": stale,
+            })
+        );
     } else {
         if stopped.is_empty() && stale.is_empty() {
             match pod_id {
                 Some(p) => println!("No forwarder running for pod {}", p),
-                None    => println!("No forwarders running"),
+                None => println!("No forwarders running"),
             }
         }
-        for (p, pid) in &stopped { println!("✓ Stopped forwarder for pod {} (pid {})", p, pid); }
-        for p in &stale { println!("→ Cleaned stale marker for pod {}", p); }
+        for (p, pid) in &stopped {
+            println!("✓ Stopped forwarder for pod {} (pid {})", p, pid);
+        }
+        for p in &stale {
+            println!("→ Cleaned stale marker for pod {}", p);
+        }
     }
 }
 
@@ -6937,25 +8263,35 @@ async fn cmd_doctor_pod(http: &atomek_core::HttpClient, pod_id: String, json: bo
     match atomek_pods::get_agent_status(&client, &pod_id).await {
         Ok(status) => {
             if json {
-                println!("{}", serde_json::json!({
-                    "pod_id": pod_id,
-                    "pod_num": status.pod_num,
-                    "agent_type": status.agent_type,
-                    "container_status": status.container_status,
-                    "healthy": status.healthy,
-                    "uptime_seconds": status.uptime_seconds,
-                    "image": status.image,
-                    "ports": {
-                        "api": status.ports.as_ref().and_then(|p| p.api),
-                        "health": status.ports.as_ref().and_then(|p| p.health),
-                    },
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "pod_id": pod_id,
+                        "pod_num": status.pod_num,
+                        "agent_type": status.agent_type,
+                        "container_status": status.container_status,
+                        "healthy": status.healthy,
+                        "uptime_seconds": status.uptime_seconds,
+                        "image": status.image,
+                        "ports": {
+                            "api": status.ports.as_ref().and_then(|p| p.api),
+                            "health": status.ports.as_ref().and_then(|p| p.health),
+                        },
+                    })
+                );
                 return;
             }
             // Plain output — one line per fact so the tray's SSE relay
             // surfaces them as individual log events.
-            println!("Pod {} — {}", pod_id, status.agent_type.as_deref().unwrap_or("?"));
-            println!("Container: {}", status.container_status.as_deref().unwrap_or("?"));
+            println!(
+                "Pod {} — {}",
+                pod_id,
+                status.agent_type.as_deref().unwrap_or("?")
+            );
+            println!(
+                "Container: {}",
+                status.container_status.as_deref().unwrap_or("?")
+            );
             match status.healthy {
                 Some(true) => println!("Health: healthy"),
                 Some(false) => println!("Health: NOT healthy (still starting?)"),
@@ -6968,8 +8304,14 @@ async fn cmd_doctor_pod(http: &atomek_core::HttpClient, pod_id: String, json: bo
                 println!("Image: {}", image);
             }
             if let Some(ports) = status.ports {
-                let api = ports.api.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
-                let health = ports.health.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+                let api = ports
+                    .api
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".into());
+                let health = ports
+                    .health
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".into());
                 println!("Ports: api={} health={}", api, health);
             }
         }
@@ -7004,15 +8346,25 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("tytus")
         .join("state.json");
-    checks.push(("state_file", state_path.exists(),
-        if state_path.exists() { state_path.display().to_string() }
-        else { "Not found. Run: tytus login".into() }
+    checks.push((
+        "state_file",
+        state_path.exists(),
+        if state_path.exists() {
+            state_path.display().to_string()
+        } else {
+            "Not found. Run: tytus login".into()
+        },
     ));
 
     // 2. Login
-    checks.push(("logged_in", state.is_logged_in(),
-        if state.is_logged_in() { format!("as {}", state.email.as_deref().unwrap_or("?")) }
-        else { "Run: tytus login".into() }
+    checks.push((
+        "logged_in",
+        state.is_logged_in(),
+        if state.is_logged_in() {
+            format!("as {}", state.email.as_deref().unwrap_or("?"))
+        } else {
+            "Run: tytus login".into()
+        },
     ));
 
     // 3. Token validity.
@@ -7024,41 +8376,59 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
     // probably transient; if not, re-login.
     let token_valid = state.has_valid_token();
     let daemon_alive = std::path::Path::new("/tmp/tytus/daemon.sock").exists();
-    checks.push(("token_valid", token_valid,
+    checks.push((
+        "token_valid",
+        token_valid,
         if token_valid {
             "Access token current".into()
         } else if state.refresh_token.is_some() && daemon_alive {
-            "Expired — daemon will auto-refresh within 30 min (if this persists, run: tytus login)".into()
+            "Expired — daemon will auto-refresh within 30 min (if this persists, run: tytus login)"
+                .into()
         } else if state.refresh_token.is_some() {
             "Expired — daemon not running. Try: tytus daemon run, or run: tytus login".into()
         } else {
             "No token — run: tytus login".into()
-        }
+        },
     ));
 
     // 4. Tytus subscription
-    checks.push(("subscription", state.secret_key.is_some(),
-        if let Some(ref tier) = state.tier { format!("Plan: {}", tier) }
-        else { "No subscription. Upgrade at traylinx.com".into() }
+    checks.push((
+        "subscription",
+        state.secret_key.is_some(),
+        if let Some(ref tier) = state.tier {
+            format!("Plan: {}", tier)
+        } else {
+            "No subscription. Upgrade at traylinx.com".into()
+        },
     ));
 
     // 5. Default pod (added SPRINT §6 B3). Separate check from "any pods"
     // so the doctor distinguishes "no AIL access" from "pods but no agent".
-    let default_pod = state.pods.iter().find(|p| p.agent_type.as_deref() == Some("none"));
-    checks.push(("default_pod", default_pod.is_some(),
+    let default_pod = state
+        .pods
+        .iter()
+        .find(|p| p.agent_type.as_deref() == Some("none"));
+    checks.push((
+        "default_pod",
+        default_pod.is_some(),
         if let Some(p) = default_pod {
             format!("Pod {} (AIL-only, 0 units)", p.pod_id)
         } else if state.is_logged_in() {
             "Missing — run: tytus login (auto-provisions) or tytus connect".into()
         } else {
             "No login yet".into()
-        }
+        },
     ));
 
     // 6. Pods
-    checks.push(("pods", !state.pods.is_empty(),
-        if state.pods.is_empty() { "No pods. Run: tytus connect".into() }
-        else { format!("{} pod(s)", state.pods.len()) }
+    checks.push((
+        "pods",
+        !state.pods.is_empty(),
+        if state.pods.is_empty() {
+            "No pods. Run: tytus connect".into()
+        } else {
+            format!("{} pod(s)", state.pods.len())
+        },
     ));
 
     // 6. Tunnel — union of state.json's tunnel_iface + live pidfiles
@@ -7074,11 +8444,17 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
             let pidfile = format!("/tmp/tytus/tunnel-{}.pid", pod.pod_id);
             if let Ok(raw) = std::fs::read_to_string(&pidfile) {
                 if let Ok(pid) = raw.trim().parse::<i32>() {
-                    let alive = pid > 1 && unsafe {
-                        if libc::kill(pid, 0) == 0 { true }
-                        else { std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
-                    };
-                    if alive { tunnel_ok = true; }
+                    let alive = pid > 1
+                        && unsafe {
+                            if libc::kill(pid, 0) == 0 {
+                                true
+                            } else {
+                                std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+                            }
+                        };
+                    if alive {
+                        tunnel_ok = true;
+                    }
                 }
             }
         }
@@ -7086,13 +8462,17 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
             live_tunnel_pods.push(pod.pod_id.clone());
             if let Some(ref iface) = pod.tunnel_iface {
                 live_tunnel_ifaces.push(iface.clone());
-            } else if let Ok(iface) = std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.iface", pod.pod_id)) {
+            } else if let Ok(iface) =
+                std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.iface", pod.pod_id))
+            {
                 live_tunnel_ifaces.push(iface.trim().to_string());
             }
         }
     }
     let has_tunnel = !live_tunnel_pods.is_empty();
-    checks.push(("tunnel", has_tunnel,
+    checks.push((
+        "tunnel",
+        has_tunnel,
         if has_tunnel {
             if live_tunnel_ifaces.is_empty() {
                 format!("Active for pod(s) {}", live_tunnel_pods.join(", "))
@@ -7103,7 +8483,7 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
             "Not running. Run: tytus connect --pod <id>".into()
         } else {
             "No pods".into()
-        }
+        },
     ));
 
     // 7. Gateway reachability (only if tunnel active)
@@ -7115,9 +8495,11 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
                     .timeout(std::time::Duration::from_secs(5))
                     .build()
                     .unwrap_or_default();
-                match client.get(&url)
+                match client
+                    .get(&url)
                     .header("Authorization", format!("Bearer {}", key))
-                    .send().await
+                    .send()
+                    .await
                 {
                     Ok(resp) if resp.status().is_success() => {
                         let body = resp.text().await.unwrap_or_default();
@@ -7125,13 +8507,25 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
                             .ok()
                             .and_then(|v| v.get("data").and_then(|d| d.as_array().map(|a| a.len())))
                             .unwrap_or(0);
-                        checks.push(("gateway", true, format!("{} models available at {}", count, ep)));
+                        checks.push((
+                            "gateway",
+                            true,
+                            format!("{} models available at {}", count, ep),
+                        ));
                     }
                     Ok(resp) => {
-                        checks.push(("gateway", false, format!("HTTP {} from {}", resp.status(), ep)));
+                        checks.push((
+                            "gateway",
+                            false,
+                            format!("HTTP {} from {}", resp.status(), ep),
+                        ));
                     }
                     Err(e) => {
-                        checks.push(("gateway", false, format!("Unreachable: {}. Is tunnel running?", e)));
+                        checks.push((
+                            "gateway",
+                            false,
+                            format!("Unreachable: {}. Is tunnel running?", e),
+                        ));
                     }
                 }
             }
@@ -7172,17 +8566,26 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
-    checks.push(("mcp_server", mcp_exists,
-        if mcp_exists { "tytus-mcp installed".into() }
-        else { "Not found. Install for AI CLI integration".into() }
+    checks.push((
+        "mcp_server",
+        mcp_exists,
+        if mcp_exists {
+            "tytus-mcp installed".into()
+        } else {
+            "Not found. Install for AI CLI integration".into()
+        },
     ));
 
     if json {
-        let results: Vec<serde_json::Value> = checks.iter().map(|(name, ok, msg)| {
-            serde_json::json!({ "check": name, "ok": ok, "message": msg })
-        }).collect();
+        let results: Vec<serde_json::Value> = checks
+            .iter()
+            .map(|(name, ok, msg)| serde_json::json!({ "check": name, "ok": ok, "message": msg }))
+            .collect();
         let all_ok = checks.iter().all(|(_, ok, _)| *ok);
-        println!("{}", serde_json::json!({ "healthy": all_ok, "checks": results }));
+        println!(
+            "{}",
+            serde_json::json!({ "healthy": all_ok, "checks": results })
+        );
     } else {
         println!("Tytus Doctor\n");
         for (name, ok, msg) in &checks {
@@ -7578,12 +8981,15 @@ fn should_proactively_refresh(state: &CliState) -> bool {
 }
 
 /// Update tokens from API response. Preserves email if API returns empty.
-fn update_tokens(state: &mut CliState, result: &atomek_auth::DeviceAuthResult, fallback_email: &Option<String>) {
+fn update_tokens(
+    state: &mut CliState,
+    result: &atomek_auth::DeviceAuthResult,
+    fallback_email: &Option<String>,
+) {
     state.access_token = Some(result.access_token.clone());
     state.refresh_token = Some(result.refresh_token.clone());
-    state.expires_at_ms = Some(
-        chrono::Utc::now().timestamp_millis() + (result.expires_in as i64 * 1000)
-    );
+    state.expires_at_ms =
+        Some(chrono::Utc::now().timestamp_millis() + (result.expires_in as i64 * 1000));
     // refresh_access_token returns empty user — preserve existing email
     if !result.user.email.is_empty() {
         state.email = Some(result.user.email.clone());
@@ -7597,7 +9003,9 @@ fn update_tokens(state: &mut CliState, result: &atomek_auth::DeviceAuthResult, f
     // keychain is the one persistence point that matters.
     if let Some(ref email) = state.email {
         if !email.is_empty() {
-            if let Err(e) = atomek_auth::KeychainStore::store_refresh_token(email, &result.refresh_token) {
+            if let Err(e) =
+                atomek_auth::KeychainStore::store_refresh_token(email, &result.refresh_token)
+            {
                 tracing::error!(
                     "CRITICAL: failed to persist rotated refresh token to keychain: {}. \
                      Next restart will require re-login.",
@@ -7605,7 +9013,8 @@ fn update_tokens(state: &mut CliState, result: &atomek_auth::DeviceAuthResult, f
                 );
                 if !wizard::is_interactive() {
                     append_autostart_log(&format!(
-                        "CRITICAL: keychain write failed after token rotation: {}", e
+                        "CRITICAL: keychain write failed after token rotation: {}",
+                        e
                     ));
                 }
             }
@@ -7637,10 +9046,16 @@ fn probe_stable_gateway() -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    if stream.set_read_timeout(Some(timeout)).is_err() { return false; }
-    if stream.set_write_timeout(Some(timeout)).is_err() { return false; }
+    if stream.set_read_timeout(Some(timeout)).is_err() {
+        return false;
+    }
+    if stream.set_write_timeout(Some(timeout)).is_err() {
+        return false;
+    }
     let req = b"GET /v1/models HTTP/1.0\r\nHost: 10.42.42.1:18080\r\nConnection: close\r\n\r\n";
-    if stream.write_all(req).is_err() { return false; }
+    if stream.write_all(req).is_err() {
+        return false;
+    }
     let mut buf = [0u8; 16];
     let n = match stream.read(&mut buf) {
         Ok(n) => n,
@@ -7649,7 +9064,10 @@ fn probe_stable_gateway() -> bool {
     n >= 5 && buf[..5] == *b"HTTP/"
 }
 
-pub(crate) async fn ensure_token(state: &mut CliState, http: &atomek_core::HttpClient) -> Result<(), atomek_core::AtomekError> {
+pub(crate) async fn ensure_token(
+    state: &mut CliState,
+    http: &atomek_core::HttpClient,
+) -> Result<(), atomek_core::AtomekError> {
     let headless = !wizard::is_interactive();
 
     if state.has_valid_token() {
@@ -7667,7 +9085,7 @@ pub(crate) async fn ensure_token(state: &mut CliState, http: &atomek_core::HttpC
                 Ok(info) => {
                     // Sync local expiry with server-reported TTL
                     state.expires_at_ms = Some(
-                        chrono::Utc::now().timestamp_millis() + (info.expires_in as i64 * 1000)
+                        chrono::Utc::now().timestamp_millis() + (info.expires_in as i64 * 1000),
                     );
                     state.save();
                     trust_token = true;
@@ -7715,7 +9133,10 @@ pub(crate) async fn ensure_token(state: &mut CliState, http: &atomek_core::HttpC
                             // Non-fatal: token still has some life left
                             tracing::debug!("Proactive refresh failed (non-fatal): {}", e);
                             if headless {
-                                append_autostart_log(&format!("ensure_token: proactive refresh failed (non-fatal): {}", e));
+                                append_autostart_log(&format!(
+                                    "ensure_token: proactive refresh failed (non-fatal): {}",
+                                    e
+                                ));
                             }
                         }
                     }
@@ -7736,7 +9157,10 @@ pub(crate) async fn ensure_token(state: &mut CliState, http: &atomek_core::HttpC
                     if let Err(e) = state.save_critical() {
                         tracing::error!("CRITICAL: Failed to save rotated tokens: {}. Re-login may be required.", e);
                         if headless {
-                            append_autostart_log(&format!("CRITICAL: save_critical failed after mandatory refresh: {}", e));
+                            append_autostart_log(&format!(
+                                "CRITICAL: save_critical failed after mandatory refresh: {}",
+                                e
+                            ));
                         }
                     }
                     Ok(())
@@ -7753,10 +9177,15 @@ pub(crate) async fn ensure_token(state: &mut CliState, http: &atomek_core::HttpC
     };
     if headless {
         if let Err(ref e) = result {
+            let redacted_email = state
+                .email
+                .as_deref()
+                .map(atomek_core::redact_email)
+                .unwrap_or_else(|| "none".to_string());
             append_autostart_log(&format!(
                 "ensure_token FAILED: {}. email={}, has_rt={}, has_at={}, expires_at_ms={:?}",
                 e,
-                state.email.as_deref().unwrap_or("none"),
+                redacted_email,
                 state.refresh_token.is_some(),
                 state.access_token.is_some(),
                 state.expires_at_ms,
@@ -7784,7 +9213,9 @@ fn reap_dead_tunnels(state: &mut CliState) {
                     //   EPERM = process exists but we can't signal it (it's root) → alive
                     //   ESRCH = no such process → dead
                     let ret = unsafe { libc::kill(pid as i32, 0) };
-                    if ret == 0 { return true; }
+                    if ret == 0 {
+                        return true;
+                    }
                     // EPERM means "exists but you're not root" — daemon is alive
                     let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
                     errno == libc::EPERM
@@ -7794,7 +9225,8 @@ fn reap_dead_tunnels(state: &mut CliState) {
             if !daemon_alive {
                 tracing::debug!(
                     "Stale tunnel on pod {}: iface={} but daemon is dead — clearing",
-                    pod.pod_id, iface
+                    pod.pod_id,
+                    iface
                 );
                 pod.tunnel_iface = None;
                 // Clean up stale PID/iface files
@@ -7821,7 +9253,10 @@ fn append_autostart_log(msg: &str) {
     }
 }
 
-pub(crate) async fn get_credentials(state: &mut CliState, http: &atomek_core::HttpClient) -> (String, String) {
+pub(crate) async fn get_credentials(
+    state: &mut CliState,
+    http: &atomek_core::HttpClient,
+) -> (String, String) {
     if let (Some(s), Some(a)) = (&state.secret_key, &state.agent_user_id) {
         return (s.clone(), a.clone());
     }
@@ -7890,15 +9325,19 @@ fn print_json_status(state: &CliState) {
     // SECURITY: Only expose user-facing fields. Never leak infrastructure details
     // (droplet_id, droplet_ip, internal pod IPs, raw per-pod keys).
     // Use `tytus env --raw` for debugging (explicit opt-in).
-    let pods: Vec<_> = state.pods.iter().map(|p| {
-        serde_json::json!({
-            "pod_id": p.pod_id,
-            "agent_type": p.agent_type,
-            "tunnel_iface": p.tunnel_iface,
-            "stable_ai_endpoint": p.stable_ai_endpoint,
-            "stable_user_key": p.stable_user_key,
+    let pods: Vec<_> = state
+        .pods
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "pod_id": p.pod_id,
+                "agent_type": p.agent_type,
+                "tunnel_iface": p.tunnel_iface,
+                "stable_ai_endpoint": p.stable_ai_endpoint,
+                "stable_user_key": p.stable_user_key,
+            })
         })
-    }).collect();
+        .collect();
 
     let out = serde_json::json!({
         "logged_in": state.is_logged_in(),
@@ -7920,14 +9359,22 @@ fn print_human_status(state: &CliState) {
     } else {
         for pod in &state.pods {
             let agent = pod.agent_type.as_deref().unwrap_or("?");
-            let status = if pod.tunnel_iface.is_some() { "connected" } else { "disconnected" };
+            let status = if pod.tunnel_iface.is_some() {
+                "connected"
+            } else {
+                "disconnected"
+            };
             println!("\nPod {} [{}] {}", pod.pod_id, agent, status);
             // SECURITY: Only show stable endpoint (never internal IPs or raw keys)
             if let Some(ref ep) = pod.stable_ai_endpoint {
                 println!("  Endpoint:      {}", ep);
             }
             if let Some(ref key) = pod.stable_user_key {
-                println!("  API Key:       {}...{}", &key[..15.min(key.len())], &key[key.len().saturating_sub(4)..]);
+                println!(
+                    "  API Key:       {}...{}",
+                    &key[..15.min(key.len())],
+                    &key[key.len().saturating_sub(4)..]
+                );
             }
             if let Some(ref iface) = pod.tunnel_iface {
                 println!("  Tunnel:        {}", iface);
@@ -7951,37 +9398,60 @@ mod forwarder_tests {
     fn origin_header_rewritten_for_any_upstream() {
         // Matrix: three pods across two droplets, two agent types.
         let scenarios = [
-            ("10.18.1.1:3000",  "pod 01 on droplet 18, openclaw"),
-            ("10.18.2.1:3000",  "pod 02 on droplet 18, openclaw"),
-            ("10.18.2.1:8642",  "pod 02 on droplet 18, hermes"),
-            ("10.42.7.1:3000",  "pod 07 on droplet 42, openclaw"),
+            ("10.18.1.1:3000", "pod 01 on droplet 18, openclaw"),
+            ("10.18.2.1:3000", "pod 02 on droplet 18, openclaw"),
+            ("10.18.2.1:8642", "pod 02 on droplet 18, hermes"),
+            ("10.42.7.1:3000", "pod 07 on droplet 42, openclaw"),
             ("10.99.99.1:8642", "pod 99 on droplet 99, hermes"),
         ];
         for (upstream, desc) in scenarios {
-            let req = format!(
-                "GET /ws HTTP/1.1\r\n\
+            let req = "GET /ws HTTP/1.1\r\n\
                  Host: localhost:18702\r\n\
                  Origin: http://localhost:18702\r\n\
                  Referer: http://localhost:18702/chat?s=main\r\n\
                  Connection: Upgrade\r\n\
                  Upgrade: websocket\r\n\r\n"
-            );
+                .to_string();
             let rewritten = rewrite_origin_headers(req.as_bytes(), upstream);
             let text = std::str::from_utf8(&rewritten).expect("utf8");
             let expected_origin = format!("Origin: http://{}", upstream);
             let expected_host = format!("Host: {}", upstream);
             let expected_referer = format!("Referer: http://{}/chat?s=main", upstream);
-            assert!(text.contains(&expected_origin), "{}: missing {}", desc, expected_origin);
-            assert!(text.contains(&expected_host),   "{}: missing {}", desc, expected_host);
-            assert!(text.contains(&expected_referer),"{}: missing {}", desc, expected_referer);
-            assert!(text.contains("Connection: Upgrade"), "{}: lost Connection header", desc);
-            assert!(text.contains("Upgrade: websocket"),  "{}: lost Upgrade header", desc);
+            assert!(
+                text.contains(&expected_origin),
+                "{}: missing {}",
+                desc,
+                expected_origin
+            );
+            assert!(
+                text.contains(&expected_host),
+                "{}: missing {}",
+                desc,
+                expected_host
+            );
+            assert!(
+                text.contains(&expected_referer),
+                "{}: missing {}",
+                desc,
+                expected_referer
+            );
+            assert!(
+                text.contains("Connection: Upgrade"),
+                "{}: lost Connection header",
+                desc
+            );
+            assert!(
+                text.contains("Upgrade: websocket"),
+                "{}: lost Upgrade header",
+                desc
+            );
         }
     }
 
     #[test]
     fn origin_rewrite_case_insensitive() {
-        let req = b"GET / HTTP/1.1\r\norigin: http://localhost:18702\r\nHOST: localhost:18702\r\n\r\n";
+        let req =
+            b"GET / HTTP/1.1\r\norigin: http://localhost:18702\r\nHOST: localhost:18702\r\n\r\n";
         let rewritten = rewrite_origin_headers(req, "10.18.2.1:3000");
         let text = std::str::from_utf8(&rewritten).unwrap();
         assert!(text.contains("Origin: http://10.18.2.1:3000"));
@@ -8022,27 +9492,51 @@ mod forwarder_tests {
             );
             let rewritten = rewrite_origin_headers(req.as_bytes(), "10.18.2.1:3000");
             let text = std::str::from_utf8(&rewritten).unwrap();
-            assert!(text.contains("Origin: http://10.18.2.1:3000"), "failed for fp={}", forwarder_port);
-            assert!(!text.contains(&format!("localhost:{}", forwarder_port)),
-                "leaked source port {} in rewritten request", forwarder_port);
+            assert!(
+                text.contains("Origin: http://10.18.2.1:3000"),
+                "failed for fp={}",
+                forwarder_port
+            );
+            assert!(
+                !text.contains(&format!("localhost:{}", forwarder_port)),
+                "leaked source port {} in rewritten request",
+                forwarder_port
+            );
         }
     }
 
     #[test]
     fn cache_key_is_deterministic_and_safe() {
-        assert_eq!(cache_key_for("/assets/index-Dts6VHgr.js"), "_assets_index-Dts6VHgr.js");
-        assert_eq!(cache_key_for("/assets/index-Dts6VHgr.js?v=2"), "_assets_index-Dts6VHgr.js");
-        assert_eq!(cache_key_for("/deep/path/with-hash-1A2B.css"), "_deep_path_with-hash-1A2B.css");
+        assert_eq!(
+            cache_key_for("/assets/index-Dts6VHgr.js"),
+            "_assets_index-Dts6VHgr.js"
+        );
+        assert_eq!(
+            cache_key_for("/assets/index-Dts6VHgr.js?v=2"),
+            "_assets_index-Dts6VHgr.js"
+        );
+        assert_eq!(
+            cache_key_for("/deep/path/with-hash-1A2B.css"),
+            "_deep_path_with-hash-1A2B.css"
+        );
         // No /, no weird chars
         assert!(!cache_key_for("/anything").contains('/'));
     }
 
     #[test]
     fn is_cacheable_asset_accepts_expected_extensions() {
-        for p in ["/x.js", "/x.mjs", "/x.css", "/x.svg", "/x.png", "/x.woff2", "/x.wasm"] {
+        for p in [
+            "/x.js", "/x.mjs", "/x.css", "/x.svg", "/x.png", "/x.woff2", "/x.wasm",
+        ] {
             assert!(is_cacheable_asset(p), "should cache {}", p);
         }
-        for p in ["/api/foo", "/data.json", "/", "/chat", "/__openclaw/control-ui-config.json"] {
+        for p in [
+            "/api/foo",
+            "/data.json",
+            "/",
+            "/chat",
+            "/__openclaw/control-ui-config.json",
+        ] {
             assert!(!is_cacheable_asset(p), "should NOT cache {}", p);
         }
     }
@@ -8053,7 +9547,9 @@ mod forwarder_tests {
         assert!(response_is_2xx(b"HTTP/1.1 204 No Content\r\n\r\n"));
         assert!(response_is_2xx(b"HTTP/1.0 201 Created\r\n\r\n"));
         assert!(!response_is_2xx(b"HTTP/1.1 404 Not Found\r\n\r\n"));
-        assert!(!response_is_2xx(b"HTTP/1.1 500 Internal Server Error\r\n\r\n"));
+        assert!(!response_is_2xx(
+            b"HTTP/1.1 500 Internal Server Error\r\n\r\n"
+        ));
         assert!(!response_is_2xx(b""));
         assert!(!response_is_2xx(b"garbage"));
     }

@@ -60,7 +60,9 @@ struct CreateDeviceResponse {
     expires_in: u64,
 }
 
-fn default_expires_in() -> u64 { 600 }
+fn default_expires_in() -> u64 {
+    600
+}
 
 #[derive(Deserialize)]
 struct DeviceStatusResponse {
@@ -85,19 +87,25 @@ struct RefreshResponse {
 pub async fn create_device_session(http: &HttpClient) -> atomek_core::Result<DeviceAuthSession> {
     let url = format!("{}/devices", SENTINEL_URL);
 
-    let resp = http.send_with_retry(|| {
-        http.post(&url)
-            .header("Content-Type", "application/json")
-            .json(&serde_json::json!({ "client": CLIENT_NAME }))
-    }).await?;
+    let resp = http
+        .send_with_retry(|| {
+            http.post(&url)
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({ "client": CLIENT_NAME }))
+        })
+        .await?;
 
-    let body: CreateDeviceResponse = resp.json().await
+    let body: CreateDeviceResponse = resp
+        .json()
+        .await
         .map_err(|e| AtomekError::Other(format!("Failed to parse device session: {}", e)))?;
 
     Ok(DeviceAuthSession {
         device_id: body.device_id,
         // Use the complete URI (with code pre-filled) if available
-        verification_uri: body.verification_uri_complete.unwrap_or(body.verification_uri),
+        verification_uri: body
+            .verification_uri_complete
+            .unwrap_or(body.verification_uri),
         user_code: body.user_code,
         expires_in: body.expires_in,
     })
@@ -116,7 +124,9 @@ pub async fn poll_for_authorization(
 
     loop {
         if start.elapsed() > MAX_POLL_DURATION {
-            return Err(AtomekError::Other("Device authorization timed out (10 minutes)".into()));
+            return Err(AtomekError::Other(
+                "Device authorization timed out (10 minutes)".into(),
+            ));
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -139,11 +149,14 @@ pub async fn poll_for_authorization(
 
         match body.status.as_str() {
             "authorized" => {
-                let access_token = body.access_token
+                let access_token = body
+                    .access_token
                     .ok_or_else(|| AtomekError::Other("Authorized but no access_token".into()))?;
-                let refresh_token = body.refresh_token
+                let refresh_token = body
+                    .refresh_token
                     .ok_or_else(|| AtomekError::Other("Authorized but no refresh_token".into()))?;
-                let user = body.user
+                let user = body
+                    .user
                     .ok_or_else(|| AtomekError::Other("Authorized but no user info".into()))?;
 
                 return Ok(DeviceAuthResult {
@@ -177,7 +190,8 @@ pub async fn refresh_access_token(
 ) -> atomek_core::Result<DeviceAuthResult> {
     // Try CLI-specific refresh first
     let url = format!("{}/devices/refresh", SENTINEL_URL);
-    let resp = http.post(&url)
+    let resp = http
+        .post(&url)
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({ "refresh_token": refresh_tok }))
         .send()
@@ -188,7 +202,9 @@ pub async fn refresh_access_token(
             if let Ok(body) = r.json::<RefreshResponse>().await {
                 return Ok(DeviceAuthResult {
                     access_token: body.access_token,
-                    refresh_token: body.refresh_token.unwrap_or_else(|| refresh_tok.to_string()),
+                    refresh_token: body
+                        .refresh_token
+                        .unwrap_or_else(|| refresh_tok.to_string()),
                     expires_in: body.expires_in.unwrap_or(900),
                     user: DeviceAuthUser {
                         id: String::new(),
@@ -203,7 +219,8 @@ pub async fn refresh_access_token(
 
     // Fallback to OAuth standard endpoint
     let url = format!("{}/oauth/token", SENTINEL_URL);
-    let resp = http.post(&url)
+    let resp = http
+        .post(&url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(format!(
             "grant_type=refresh_token&refresh_token={}",
@@ -217,12 +234,16 @@ pub async fn refresh_access_token(
         return Err(AtomekError::AuthExpired);
     }
 
-    let body: RefreshResponse = resp.json().await
+    let body: RefreshResponse = resp
+        .json()
+        .await
         .map_err(|e| AtomekError::Other(format!("Failed to parse refresh response: {}", e)))?;
 
     Ok(DeviceAuthResult {
         access_token: body.access_token,
-        refresh_token: body.refresh_token.unwrap_or_else(|| refresh_tok.to_string()),
+        refresh_token: body
+            .refresh_token
+            .unwrap_or_else(|| refresh_tok.to_string()),
         expires_in: body.expires_in.unwrap_or(900),
         user: DeviceAuthUser {
             id: String::new(),
@@ -247,7 +268,8 @@ pub async fn validate_token(
     access_token: &str,
 ) -> atomek_core::Result<TokenValidation> {
     let url = format!("{}/oauth/token/info", SENTINEL_URL);
-    let resp = http.get(&url)
+    let resp = http
+        .get(&url)
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
         .await
@@ -258,7 +280,9 @@ pub async fn validate_token(
     }
 
     // Parse expiresIn from the nested response: { "data": { "attributes": { "expiresIn": N } } }
-    let body: serde_json::Value = resp.json().await
+    let body: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| AtomekError::Other(format!("Failed to parse token info: {}", e)))?;
 
     let expires_in = body

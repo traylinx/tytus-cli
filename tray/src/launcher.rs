@@ -22,20 +22,66 @@ pub struct AiCli {
 
 /// All known AI CLIs we can detect and launch.
 const KNOWN_CLIS: &[AiCli] = &[
-    AiCli { name: "Claude Code",  binary: "claude",    command: "claude",    link_filter: "claude" },
-    AiCli { name: "OpenCode",     binary: "opencode",  command: "opencode",  link_filter: "opencode" },
-    AiCli { name: "Gemini CLI",   binary: "gemini",    command: "gemini",    link_filter: "agents" },
-    AiCli { name: "Codex",        binary: "codex",     command: "codex",     link_filter: "agents" },
-    AiCli { name: "Aider",        binary: "aider",     command: "aider --model openai/ail-compound", link_filter: "shell" },
-    AiCli { name: "Cursor",       binary: "cursor",    command: "cursor .",  link_filter: "claude" },
-    AiCli { name: "Vibe",         binary: "vibe",      command: "vibe",      link_filter: "agents" },
-    AiCli { name: "Cody",         binary: "cody",      command: "cody",      link_filter: "agents" },
-    AiCli { name: "Amp",          binary: "amp",       command: "amp",       link_filter: "agents" },
+    AiCli {
+        name: "Claude Code",
+        binary: "claude",
+        command: "claude",
+        link_filter: "claude",
+    },
+    AiCli {
+        name: "OpenCode",
+        binary: "opencode",
+        command: "opencode",
+        link_filter: "opencode",
+    },
+    AiCli {
+        name: "Gemini CLI",
+        binary: "gemini",
+        command: "gemini",
+        link_filter: "agents",
+    },
+    AiCli {
+        name: "Codex",
+        binary: "codex",
+        command: "codex",
+        link_filter: "agents",
+    },
+    AiCli {
+        name: "Aider",
+        binary: "aider",
+        command: "aider --model openai/ail-compound",
+        link_filter: "shell",
+    },
+    AiCli {
+        name: "Cursor",
+        binary: "cursor",
+        command: "cursor .",
+        link_filter: "claude",
+    },
+    AiCli {
+        name: "Vibe",
+        binary: "vibe",
+        command: "vibe",
+        link_filter: "agents",
+    },
+    AiCli {
+        name: "Cody",
+        binary: "cody",
+        command: "cody",
+        link_filter: "agents",
+    },
+    AiCli {
+        name: "Amp",
+        binary: "amp",
+        command: "amp",
+        link_filter: "agents",
+    },
 ];
 
 /// Detect which AI CLIs are installed on the system.
 pub fn detect_installed_clis() -> Vec<AiCli> {
-    KNOWN_CLIS.iter()
+    KNOWN_CLIS
+        .iter()
         .filter(|cli| is_on_path(cli.binary))
         .cloned()
         .collect()
@@ -94,7 +140,11 @@ pub fn launch_in_terminal(cli: &AiCli, conn: &PodConnection) {
         conn.ai_gateway,
         conn.model,
         // Last 8 chars of API key for identification
-        if conn.api_key.len() > 8 { &conn.api_key[conn.api_key.len()-8..] } else { &conn.api_key },
+        if conn.api_key.len() > 8 {
+            &conn.api_key[conn.api_key.len() - 8..]
+        } else {
+            &conn.api_key
+        },
         cli.command,
     );
 
@@ -142,17 +192,11 @@ fn open_in_terminal(shell_command: &str) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            "/tmp/tytus",
-            std::fs::Permissions::from_mode(0o700),
-        );
+        let _ = std::fs::set_permissions("/tmp/tytus", std::fs::Permissions::from_mode(0o700));
     }
     let script_path = "/tmp/tytus/_launch.sh";
     // Write script that: (1) runs the command, (2) deletes itself after execution
-    let script = format!(
-        "#!/bin/bash\nrm -f '{}'\n{}\n",
-        script_path, shell_command
-    );
+    let script = format!("#!/bin/bash\nrm -f '{}'\n{}\n", script_path, shell_command);
     if std::fs::write(script_path, &script).is_err() {
         eprintln!("[tray] Failed to write launch script");
         return;
@@ -175,7 +219,8 @@ fn open_in_terminal(shell_command: &str) {
 end tell"#,
             script_path
         );
-        if Command::new("osascript").args(["-e", &osa])
+        if Command::new("osascript")
+            .args(["-e", &osa])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -195,7 +240,8 @@ end tell"#,
 end tell"#,
         script_path
     );
-    let _ = Command::new("osascript").args(["-e", &osa])
+    let _ = Command::new("osascript")
+        .args(["-e", &osa])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
@@ -210,7 +256,8 @@ fn open_in_terminal(shell_command: &str) {
         ("xterm", vec!["-e", "bash", "-c"]),
     ];
     for (term, args) in &terminals {
-        if Command::new("which").arg(term)
+        if Command::new("which")
+            .arg(term)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -218,11 +265,16 @@ fn open_in_terminal(shell_command: &str) {
             .unwrap_or(false)
         {
             let mut cmd = Command::new(term);
-            for a in &args { cmd.arg(a); }
+            for a in &args {
+                cmd.arg(a);
+            }
             cmd.arg(shell_command);
             let _ = cmd.spawn();
             return;
         }
     }
-    eprintln!("[tray] No terminal emulator found. Run manually:\n{}", shell_command);
+    eprintln!(
+        "[tray] No terminal emulator found. Run manually:\n{}",
+        shell_command
+    );
 }
