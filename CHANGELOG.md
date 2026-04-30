@@ -7,6 +7,30 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-04-30
+
+**App Store + Readiness + Workspace Files — daemon surface for TytusOS.**
+
+### Added
+- `/api/apps` (GET) — serve embedded `apps.json` App Store catalog
+- `/api/apps/check` (POST) — detect installed apps via PATH + `/Applications`
+- `/api/pods/{pod}/readiness` (GET) — 6-stage pod readiness: allocation, tunnel, agent HTTP, agent UI, Tytus bootstrap, shared storage
+- `/api/files/list` (GET) — browse pod workspace + local filesystem + shared folders with path traversal guards
+- `TYTUS_READINESS_STRICT` env var gate — requires `.tytus/health.json` smoke for `Ready` verdict (on by default)
+- `wait_for_installed_agent_ready()` — polls readiness post-install for up to 3 min
+- `gateway_token` on `AgentSlot` — never serialized to TytusOS, used only for Hermes API probes
+
+### Changed
+- Agent status probe now checks both API (`/v1/models`) and browser UI root for agents with dashboards (OpenClaw, NemoClaw, Hermes)
+- Hermes bearer token preference: uses per-pod `gateway_token` instead of stable user key for API probes
+- `probe_agent_status()` signature expanded: accepts `agent_type`, `gateway_token`, `ui_url`
+- Shared folders list extracted to `shared_bindings_from_cache()` helper
+- File list endpoints support safe relative paths, percent-decoded query values, and `/app/workspace` pod listing via `tytus exec`
+
+### Fixed
+- `run_tytus_exec_shell()` return type now `Result<(bool, String, String, bool), String>` — callers handle errors explicitly
+- Clippy clean (0 warnings), 168 tests green
+
 ## [0.6.0] — 2026-04-26
 
 **Tytus v0.6 — grandma-easy across CLI + tray + Tower.** First public
