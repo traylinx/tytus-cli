@@ -15,6 +15,7 @@ tray-icon = { version = "0.19", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde.workspace = true
 serde_json.workspace = true
+base64.workspace = true
 tokio = { workspace = true, features = ["full"] }
 dirs.workspace = true
 # tiny_http powers the localhost install wizard (sprint §6 E1). Chosen

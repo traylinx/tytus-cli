@@ -48,6 +48,7 @@ fn daemon_started_at() -> u64 {
     })
 }
 
+use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -1874,6 +1875,21 @@ fn handle(request: Request, registry: Registry) {
         // ── rc.13 / PR3: Files app safe browser actions ─────────────
         (Method::Get, "/api/files/list") => {
             handle_files_list(request, &query);
+        }
+        (Method::Post, "/api/files/mkdir") => {
+            handle_files_mkdir(request);
+        }
+        (Method::Post, "/api/files/rename") => {
+            handle_files_rename(request);
+        }
+        (Method::Post, "/api/files/delete") => {
+            handle_files_delete(request);
+        }
+        (Method::Get, "/api/files/download") => {
+            handle_files_download(request, &query);
+        }
+        (Method::Post, "/api/files/upload") => {
+            handle_files_upload(request);
         }
         // Open the per-pod local downloads dir in Finder. Path is the
         // same `~/Tytus/Downloads/pod-NN/` the tray writes to. Created
@@ -3842,15 +3858,41 @@ fn query_value_decoded(query: &str, key: &str) -> Result<Option<String>, String>
 }
 
 fn safe_relative_path(raw: Option<String>) -> Result<PathBuf, String> {
-    let raw = raw.unwrap_or_default();
+    let mut raw = raw.unwrap_or_default();
+    if raw.contains('\0') {
+        return Err("null bytes are not allowed".to_string());
+    }
+    if raw.len() >= 2 && raw.as_bytes()[1] == b':' && raw.as_bytes()[0].is_ascii_alphabetic() {
+        return Err("absolute paths are not allowed".to_string());
+    }
+    for _ in 0..2 {
+        let lower = raw.to_ascii_lowercase();
+        let suspicious = lower.contains("%2e")
+            || lower.contains("%2f")
+            || lower.contains("%5c")
+            || lower.contains("%00")
+            || lower.contains("%25");
+        if !suspicious {
+            break;
+        }
+        let decoded = percent_decode(&raw)?;
+        if decoded == raw {
+            break;
+        }
+        raw = decoded;
+        if raw.contains('\0') {
+            return Err("null bytes are not allowed".to_string());
+        }
+    }
+    let p_raw = Path::new(raw.as_str());
+    if p_raw.is_absolute() || raw.starts_with('/') || raw.starts_with('\\') {
+        return Err("absolute paths are not allowed".to_string());
+    }
     let trimmed = raw.trim_matches('/');
     if trimmed.is_empty() || trimmed == "." {
         return Ok(PathBuf::new());
     }
     let p = Path::new(trimmed);
-    if p.is_absolute() {
-        return Err("absolute paths are not allowed".to_string());
-    }
     let mut out = PathBuf::new();
     for comp in p.components() {
         match comp {
@@ -4133,6 +4175,408 @@ fn handle_files_list(request: Request, query: &str) {
             }),
         ),
         Err(e) => respond_json(request, 400, &serde_json::json!({"error": e})),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FileMutationBody {
+    source: String,
+    path: Option<String>,
+    binding: Option<usize>,
+    name: Option<String>,
+    new_name: Option<String>,
+    content_base64: Option<String>,
+}
+
+const MAX_FILE_TRANSFER_BYTES: usize = 100 * 1024 * 1024;
+
+fn read_file_mutation_body(request: &mut Request) -> Result<FileMutationBody, String> {
+    let mut buf = String::new();
+    request
+        .as_reader()
+        .read_to_string(&mut buf)
+        .map_err(|_| "bad body".to_string())?;
+    serde_json::from_str(&buf).map_err(|_| "bad json".to_string())
+}
+
+fn safe_file_name(raw: Option<String>) -> Result<String, String> {
+    let name = raw.unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return Err("name is required".to_string());
+    }
+    if name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err("name must be a single file or folder name".to_string());
+    }
+    Ok(name)
+}
+
+fn local_files_root(source: &str, binding: Option<usize>) -> Result<PathBuf, String> {
+    match source {
+        "tytus-home" => Ok(crate::workspace::ensure_tytus_home()),
+        "shared" => {
+            let Some(idx) = binding else {
+                return Err("missing binding index".to_string());
+            };
+            let bindings = shared_bindings_from_cache();
+            let Some(binding) = bindings.get(idx) else {
+                return Err("binding not found".to_string());
+            };
+            let Some(local_path) = binding.get("local_path").and_then(|v| v.as_str()) else {
+                return Err("binding has no local_path".to_string());
+            };
+            Ok(PathBuf::from(local_path))
+        }
+        "pod-workspace" => Err("pod workspaces are read-only from Files".to_string()),
+        _ => Err("unknown file source".to_string()),
+    }
+}
+
+fn writable_files_root(body: &FileMutationBody) -> Result<PathBuf, String> {
+    local_files_root(&body.source, body.binding)
+}
+
+fn anchored_child_path(root: &Path, parent_rel: &Path, name: &str) -> Result<PathBuf, String> {
+    let parent = anchor_local_path(root, parent_rel)?;
+    if !parent.is_dir() {
+        return Err("parent is not a directory".to_string());
+    }
+    let candidate = parent.join(name);
+    let root_real = root
+        .canonicalize()
+        .map_err(|e| format!("root is not accessible: {}", e))?;
+    if !candidate.starts_with(&root_real) {
+        return Err("path escapes allowed root".to_string());
+    }
+    Ok(candidate)
+}
+
+fn anchored_existing_entry(root: &Path, rel: &Path) -> Result<PathBuf, String> {
+    if rel.as_os_str().is_empty() {
+        return Err("cannot operate on source root".to_string());
+    }
+    let parent_rel = rel.parent().unwrap_or_else(|| Path::new(""));
+    let name = rel
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "invalid path".to_string())?;
+    anchored_child_path(root, parent_rel, name)
+}
+
+fn handle_files_mkdir(mut request: Request) {
+    let body = match read_file_mutation_body(&mut request) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let root = match writable_files_root(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let parent_rel = match safe_relative_path(body.path.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let name = match safe_file_name(body.name) {
+        Ok(n) => n,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let target = match anchored_child_path(&root, &parent_rel, &name) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    if target.exists() {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"target already exists"}),
+        );
+        return;
+    }
+    match fs::create_dir(&target) {
+        Ok(_) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+fn handle_files_rename(mut request: Request) {
+    let body = match read_file_mutation_body(&mut request) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let root = match writable_files_root(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let rel = match safe_relative_path(body.path.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let new_name = match safe_file_name(body.new_name) {
+        Ok(n) => n,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let old_path = match anchored_existing_entry(&root, &rel) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let parent_rel = rel.parent().unwrap_or_else(|| Path::new(""));
+    let new_path = match anchored_child_path(&root, parent_rel, &new_name) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    if new_path.exists() {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"target already exists"}),
+        );
+        return;
+    }
+    match fs::rename(&old_path, &new_path) {
+        Ok(_) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+fn handle_files_delete(mut request: Request) {
+    let body = match read_file_mutation_body(&mut request) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let root = match writable_files_root(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let rel = match safe_relative_path(body.path.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let target = match anchored_existing_entry(&root, &rel) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let meta = match fs::symlink_metadata(&target) {
+        Ok(m) => m,
+        Err(e) => {
+            respond_json(request, 404, &serde_json::json!({"error": e.to_string()}));
+            return;
+        }
+    };
+    let result = if meta.is_dir() {
+        fs::remove_dir(&target)
+    } else {
+        fs::remove_file(&target)
+    };
+    match result {
+        Ok(_) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+fn files_root_from_query(query: &str) -> Result<(String, PathBuf), String> {
+    let source = query_value_decoded(query, "source")?.unwrap_or_else(|| "tytus-home".to_string());
+    let binding = match query_value_decoded(query, "binding")? {
+        Some(v) => Some(
+            v.parse::<usize>()
+                .map_err(|_| "invalid binding index".to_string())?,
+        ),
+        None => None,
+    };
+    let root = local_files_root(&source, binding)?;
+    Ok((source, root))
+}
+
+fn handle_files_download(request: Request, query: &str) {
+    let (_source, root) = match files_root_from_query(query) {
+        Ok(v) => v,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let rel = match query_value_decoded(query, "path").and_then(safe_relative_path) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let target = match anchored_existing_entry(&root, &rel) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let meta = match fs::symlink_metadata(&target) {
+        Ok(m) => m,
+        Err(e) => {
+            respond_json(request, 404, &serde_json::json!({"error": e.to_string()}));
+            return;
+        }
+    };
+    if meta.is_dir() {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"folders cannot be downloaded directly"}),
+        );
+        return;
+    }
+    if meta.len() > MAX_FILE_TRANSFER_BYTES as u64 {
+        respond_json(
+            request,
+            413,
+            &serde_json::json!({"error":"file exceeds 100 MiB transfer cap"}),
+        );
+        return;
+    }
+    let mut data = Vec::new();
+    match File::open(&target).and_then(|mut f| f.read_to_end(&mut data)) {
+        Ok(_) => {
+            let name = rel
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("download.bin")
+                .replace(['"', '\r', '\n'], "_");
+            let resp = Response::from_data(data)
+                .with_status_code(StatusCode(200))
+                .with_header(header("Content-Type", "application/octet-stream"))
+                .with_header(header(
+                    "Content-Disposition",
+                    &format!("attachment; filename=\"{}\"", name),
+                ))
+                .with_header(header("X-Content-Type-Options", "nosniff"));
+            let _ = request.respond(resp);
+        }
+        Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+fn handle_files_upload(mut request: Request) {
+    let body = match read_file_mutation_body(&mut request) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let root = match writable_files_root(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let parent_rel = match safe_relative_path(body.path.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let name = match safe_file_name(body.name) {
+        Ok(n) => n,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let encoded = body.content_base64.unwrap_or_default();
+    if encoded.len() > ((MAX_FILE_TRANSFER_BYTES * 4) / 3 + 8) {
+        respond_json(
+            request,
+            413,
+            &serde_json::json!({"error":"upload exceeds 100 MiB transfer cap"}),
+        );
+        return;
+    }
+    let bytes = match general_purpose::STANDARD.decode(encoded.as_bytes()) {
+        Ok(b) => b,
+        Err(_) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":"content_base64 is not valid base64"}),
+            );
+            return;
+        }
+    };
+    if bytes.len() > MAX_FILE_TRANSFER_BYTES {
+        respond_json(
+            request,
+            413,
+            &serde_json::json!({"error":"upload exceeds 100 MiB transfer cap"}),
+        );
+        return;
+    }
+    let target = match anchored_child_path(&root, &parent_rel, &name) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    if target.exists() {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"target already exists"}),
+        );
+        return;
+    }
+    match fs::write(&target, bytes) {
+        Ok(_) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
     }
 }
 
@@ -6883,6 +7327,95 @@ mod tests {
         assert!(!parse_reveal_flag("pod=02&reveal=true"));
         assert!(!parse_reveal_flag("pod=02&reveal=Secrets"));
         assert!(!parse_reveal_flag(""));
+    }
+
+    #[test]
+    fn files_safe_relative_path_rejects_escape_inputs() {
+        assert_eq!(
+            safe_relative_path(Some("Projects/demo".to_string())).unwrap(),
+            PathBuf::from("Projects/demo")
+        );
+        assert!(safe_relative_path(Some("../secrets".to_string())).is_err());
+        assert!(safe_relative_path(Some("Projects/../../secrets".to_string())).is_err());
+        assert!(safe_relative_path(Some("/etc/passwd".to_string())).is_err());
+        assert!(safe_relative_path(Some("Projects\0secret".to_string())).is_err());
+        assert!(safe_relative_path(Some(r"C:\Users\sebastian".to_string())).is_err());
+    }
+
+    #[test]
+    fn files_percent_decode_catches_url_encoded_traversal() {
+        let decoded = query_value_decoded("path=Projects%2F..%2Fsecrets", "path")
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded, "Projects/../secrets");
+        assert!(safe_relative_path(Some(decoded)).is_err());
+        assert!(safe_relative_path(Some("Projects%2F..%2Fsecrets".to_string())).is_err());
+        assert!(safe_relative_path(Some("Projects%252F..%252Fsecrets".to_string())).is_err());
+        assert!(safe_relative_path(Some("Projects%00secret".to_string())).is_err());
+    }
+
+    #[test]
+    fn files_anchor_local_path_blocks_absolute_escape() {
+        let root = std::env::temp_dir().join(format!(
+            "tytus-files-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(root.join("child"));
+        let ok = anchor_local_path(&root, Path::new("child")).unwrap();
+        assert!(ok.starts_with(root.canonicalize().unwrap()));
+        assert!(anchor_local_path(&root, Path::new("../escape")).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_anchor_local_path_blocks_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tytus-files-root-{}", stamp));
+        let outside = std::env::temp_dir().join(format!("tytus-files-outside-{}", stamp));
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("link")).unwrap();
+        assert!(anchor_local_path(&root, Path::new("link")).is_err());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn files_safe_file_name_rejects_path_components() {
+        assert_eq!(
+            safe_file_name(Some("Project A".to_string())).unwrap(),
+            "Project A"
+        );
+        assert!(safe_file_name(Some("".to_string())).is_err());
+        assert!(safe_file_name(Some("..".to_string())).is_err());
+        assert!(safe_file_name(Some("nested/name".to_string())).is_err());
+        assert!(safe_file_name(Some("nested\\name".to_string())).is_err());
+        assert!(safe_file_name(Some("bad\0name".to_string())).is_err());
+    }
+
+    #[test]
+    fn files_existing_entry_blocks_source_root() {
+        let root = std::env::temp_dir().join(format!(
+            "tytus-files-root-entry-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert!(anchored_existing_entry(&root, Path::new("")).is_err());
+        fs::write(root.join("note.txt"), "hello").unwrap();
+        let entry = anchored_existing_entry(&root, Path::new("note.txt")).unwrap();
+        assert!(entry.starts_with(root.canonicalize().unwrap()));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
