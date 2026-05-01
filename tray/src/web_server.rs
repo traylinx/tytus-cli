@@ -721,13 +721,13 @@ fn bootstrap_status_is_failed(status: &str) -> bool {
 
 fn check_pod_shared_storage_stage(pod_id: &str) -> (String, String) {
     let script = r#"cd /app/workspace || exit 20
-if [ ! -e .garagetytus/garagetytus-shared ] && [ ! -e .garagetytus/credentials.json ]; then
-  echo "not configured"
-  exit 10
+if [ ! -e .garagetytus/garagetytus-shared ]; then
+  echo "helper missing; restart/rebuild pod with latest Tytus image"
+  exit 30
 fi
-test -x .garagetytus/garagetytus-shared || { echo "helper missing or not executable"; exit 30; }
-test -f .garagetytus/credentials.json || { echo "credentials.json missing"; exit 31; }
-test -f .garagetytus/_last-provision.json || { echo "_last-provision.json missing"; exit 32; }
+test -x .garagetytus/garagetytus-shared || { echo "helper present but not executable"; exit 30; }
+test -f .garagetytus/credentials.json || { echo "credentials.json missing; provision Sharing in TytusOS"; exit 31; }
+test -f .garagetytus/_last-provision.json || { echo "_last-provision.json missing; refresh Sharing credentials"; exit 32; }
 python3 - <<'PY'
 import json
 with open(".garagetytus/credentials.json") as f:
