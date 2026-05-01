@@ -7999,6 +7999,22 @@ mod tests {
     }
 
     #[test]
+    fn files_dotfile_policy_allows_only_anchored_dotfiles() {
+        // Dotfiles are valid inside Tytus Home (`.tytus/`, `.env.example`)
+        // because the workspace contract itself uses them. They are not
+        // a traversal primitive; the root anchor remains the security boundary.
+        assert_eq!(
+            safe_relative_path(Some(".tytus/health.json".to_string())).unwrap(),
+            PathBuf::from(".tytus/health.json")
+        );
+        assert_eq!(
+            safe_file_name(Some(".env.example".to_string())).unwrap(),
+            ".env.example"
+        );
+        assert!(safe_relative_path(Some("../.ssh/id_rsa".to_string())).is_err());
+    }
+
+    #[test]
     fn files_existing_entry_blocks_source_root() {
         let root = std::env::temp_dir().join(format!(
             "tytus-files-root-entry-{}",
