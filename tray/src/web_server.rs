@@ -719,6 +719,56 @@ fn bootstrap_status_is_failed(status: &str) -> bool {
     status == "failed"
 }
 
+fn check_pod_shared_storage_stage(pod_id: &str) -> (String, String) {
+    let script = r#"cd /app/workspace || exit 20
+if [ ! -e .garagetytus/garagetytus-shared ] && [ ! -e .garagetytus/credentials.json ]; then
+  echo "not configured"
+  exit 10
+fi
+test -x .garagetytus/garagetytus-shared || { echo "helper missing or not executable"; exit 30; }
+test -f .garagetytus/credentials.json || { echo "credentials.json missing"; exit 31; }
+test -f .garagetytus/_last-provision.json || { echo "_last-provision.json missing"; exit 32; }
+python3 - <<'PY'
+import json
+with open(".garagetytus/credentials.json") as f:
+    creds = json.load(f)
+buckets = creds.get("buckets") or []
+print(f"configured ({len(buckets)} bucket(s))" if buckets else "configured (credentials present)")
+PY
+"#;
+    match run_tytus_exec_shell(pod_id, script, Duration::from_secs(8)) {
+        Ok((true, stdout, _stderr, false)) => (
+            "ok".to_string(),
+            stdout
+                .lines()
+                .last()
+                .unwrap_or("shared storage configured")
+                .to_string(),
+        ),
+        Ok((_success, stdout, _stderr, false)) => {
+            let detail = stdout
+                .lines()
+                .last()
+                .unwrap_or("not configured")
+                .to_string();
+            if detail == "not configured" {
+                ("skipped".to_string(), "not configured".to_string())
+            } else {
+                ("degraded".to_string(), detail)
+            }
+        }
+        Ok((_success, _stdout, stderr, true)) => (
+            "unknown".to_string(),
+            stderr
+                .lines()
+                .next()
+                .unwrap_or("shared storage probe timed out")
+                .to_string(),
+        ),
+        Err(e) => ("unknown".to_string(), e),
+    }
+}
+
 fn bootstrap_stage_detail(entry: &BootstrapHealthEntry) -> String {
     if entry.overall == "skipped" {
         entry.detail.clone()
@@ -1874,6 +1924,9 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Post, "/api/pod/refresh-creds") => {
             handle_pod_refresh_creds(request, &registry, &query);
+        }
+        (Method::Post, "/api/shared-folders/provision-pod") => {
+            handle_shared_folders_provision_pod(request, &registry);
         }
         (Method::Post, "/api/shared-folders/pick-folder") => {
             handle_shared_folders_pick_folder(request);
@@ -5391,6 +5444,116 @@ fn handle_pod_refresh_creds(request: Request, registry: &Registry, query: &str) 
     );
 }
 
+fn all_known_shared_buckets() -> Vec<String> {
+    let mut buckets = std::collections::BTreeSet::new();
+    for binding in shared_bindings_from_cache() {
+        if let Some(bucket) = binding.get("bucket").and_then(|v| v.as_str()) {
+            if valid_sharing_bucket(bucket) {
+                buckets.insert(bucket.to_string());
+            }
+        }
+    }
+    buckets.into_iter().collect()
+}
+
+/// POST /api/shared-folders/provision-pod — body
+/// `{ "pod":"02", "buckets":["shared"] }`. Spawns
+/// `garagetytus-pod-provision 02 --bucket shared ...` and streams via
+/// the job channel. The helper owns secret-safe credential minting +
+/// file transfer; daemon only passes pod id + bucket names in argv.
+fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry) {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        pod: String,
+        #[serde(default)]
+        buckets: Vec<String>,
+        #[serde(default)]
+        no_restart: bool,
+    }
+
+    if !sharing_mutations_enabled() {
+        respond_sharing_paused(request);
+        return;
+    }
+
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: Body = match serde_json::from_str(&buf) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":format!("bad json: {}", e)}),
+            );
+            return;
+        }
+    };
+
+    let pod_id = match normalize_pod_id_for_query(&body.pod) {
+        Some(p) if pod_exists(&p) => p,
+        _ => {
+            respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
+            return;
+        }
+    };
+
+    let buckets = if body.buckets.is_empty() {
+        all_known_shared_buckets()
+    } else {
+        let mut dedup = std::collections::BTreeSet::new();
+        for bucket in body.buckets {
+            let bucket = bucket.trim().to_string();
+            if !valid_sharing_bucket(&bucket) {
+                respond_json(
+                    request,
+                    400,
+                    &serde_json::json!({
+                        "error": format!("invalid bucket: {}", bucket),
+                        "code": "sharing.provision.bucket.invalid"
+                    }),
+                );
+                return;
+            }
+            dedup.insert(bucket);
+        }
+        dedup.into_iter().collect::<Vec<_>>()
+    };
+
+    if buckets.is_empty() {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({
+                "error":"no shared buckets configured yet",
+                "code":"sharing.provision.no_buckets"
+            }),
+        );
+        return;
+    }
+
+    let mut args = vec![pod_id.clone()];
+    for bucket in &buckets {
+        args.push("--bucket".to_string());
+        args.push(bucket.clone());
+    }
+    if body.no_restart {
+        args.push("--no-restart".to_string());
+    }
+
+    let bin = resolve_garagetytus_helper("garagetytus-pod-provision");
+    let (job_id, job) = registry.create();
+    spawn_external_command(job, bin, args);
+    respond_json(
+        request,
+        202,
+        &serde_json::json!({"job_id": job_id, "pod": pod_id, "buckets": buckets}),
+    );
+}
+
 /// Probe whether a just-installed pod is actually reachable. The CLI's
 /// `agent install` returns as soon as Scalesys allocates the pod row +
 /// fires the DAM deploy — the container is typically still starting at
@@ -5677,11 +5840,12 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
         "status": bootstrap.status.clone(),
         "detail": bootstrap_stage_detail(&bootstrap)
     }));
+    let (shared_status, shared_detail) = check_pod_shared_storage_stage(&pod_id);
     stages.push(serde_json::json!({
         "id":"shared_storage",
         "label":"Shared storage",
-        "status":"not_configured",
-        "detail":"PR1 baseline; configured in Sharing sprint PR2"
+        "status": shared_status,
+        "detail": shared_detail
     }));
 
     respond_json(
@@ -6659,6 +6823,19 @@ fn valid_channel_name(s: &str) -> bool {
 
 fn valid_pod_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 4 && s.chars().all(|c| c.is_ascii_digit())
+}
+
+fn normalize_pod_id_for_query(raw: &str) -> Option<String> {
+    let pod = raw
+        .trim()
+        .strip_prefix("wannolot-")
+        .or_else(|| raw.trim().strip_prefix("tytus-"))
+        .unwrap_or_else(|| raw.trim());
+    if valid_pod_id(pod) {
+        Some(pod.to_string())
+    } else {
+        None
+    }
 }
 
 fn parse_channel_query(query: &str) -> (Option<String>, Option<String>) {
@@ -7879,6 +8056,21 @@ mod tests {
         assert!(!valid_sharing_bucket("shared-"));
         assert!(!valid_sharing_bucket("sh"));
         assert!(!valid_sharing_bucket("shared_bucket"));
+    }
+
+    #[test]
+    fn sharing_provision_pod_id_normalizer_accepts_known_forms() {
+        assert_eq!(normalize_pod_id_for_query("02").as_deref(), Some("02"));
+        assert_eq!(
+            normalize_pod_id_for_query("wannolot-04").as_deref(),
+            Some("04")
+        );
+        assert_eq!(
+            normalize_pod_id_for_query("tytus-004").as_deref(),
+            Some("004")
+        );
+        assert!(normalize_pod_id_for_query("pod-02").is_none());
+        assert!(normalize_pod_id_for_query("02;rm").is_none());
     }
 
     #[test]
