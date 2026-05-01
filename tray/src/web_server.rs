@@ -1851,6 +1851,9 @@ fn handle(request: Request, registry: Registry) {
             handle_terminal_stop(request, &query);
         }
         // ── Tower Wave 5 (v0.5.4): garagetytus shared-folders parity ──
+        (Method::Get, "/api/garagetytus/status") => {
+            handle_garagetytus_status(request);
+        }
         (Method::Get, "/api/shared-folders/list") => {
             handle_shared_folders_list(request);
         }
@@ -3583,6 +3586,12 @@ fn spawn_pod_action(job: Arc<Mutex<Job>>, argv: Vec<String>) {
 /// `tray/src/shared_folders.rs::helper_path` so backend + frontend
 /// agree on which binary to invoke.
 fn resolve_garagetytus_helper(name: &str) -> String {
+    resolve_garagetytus_helper_path(name)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn resolve_garagetytus_helper_path(name: &str) -> Option<PathBuf> {
     let candidates = [
         format!("/usr/local/bin/{}", name),
         format!("/opt/homebrew/bin/{}", name),
@@ -3592,10 +3601,42 @@ fn resolve_garagetytus_helper(name: &str) -> String {
     ];
     for c in &candidates {
         if !c.is_empty() && std::path::Path::new(c).is_file() {
-            return c.clone();
+            return Some(PathBuf::from(c));
         }
     }
-    name.to_string()
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_garagetytus_binary_path() -> Option<PathBuf> {
+    let candidates = [
+        "/usr/local/bin/garagetytus".to_string(),
+        "/opt/homebrew/bin/garagetytus".to_string(),
+        std::env::var("HOME")
+            .map(|h| format!("{}/.cargo/bin/garagetytus", h))
+            .unwrap_or_default(),
+    ];
+    for c in &candidates {
+        if !c.is_empty() && Path::new(c).is_file() {
+            return Some(PathBuf::from(c));
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("garagetytus");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Generic external-command spawner. Same architecture as
@@ -4011,6 +4052,145 @@ fn shared_bindings_from_cache() -> Vec<serde_json::Value> {
         }
     }
     bindings
+}
+
+const GARAGETYTUS_REQUIRED_HELPERS: &[&str] = &[
+    "garagetytus-folder-bind",
+    "garagetytus-folder-list",
+    "garagetytus-folder-status",
+    "garagetytus-folder-conflicts",
+    "garagetytus-refresh-watchdog",
+    "garagetytus-pod-provision",
+    "garagetytus-pod-refresh",
+    "garagetytus-shared",
+];
+
+fn parse_garagetytus_status_line(stdout: &str) -> (Option<bool>, String) {
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("garagetytus status:"))
+        .map(str::trim)
+        .unwrap_or_else(|| stdout.trim());
+    let state = line
+        .strip_prefix("garagetytus status:")
+        .map(str::trim)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or("unknown")
+        .trim_matches(|c: char| c == '(' || c == ')' || c == ',')
+        .to_string();
+    let running = match state.as_str() {
+        "running" | "active" => Some(true),
+        "stopped" | "inactive" | "failed" => Some(false),
+        _ => None,
+    };
+    (running, state)
+}
+
+fn garagetytus_cache_path() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".cache/garagetytus"))
+}
+
+/// GET /api/garagetytus/status — read-only helper/service health for
+/// Settings → Sharing. Deliberately does NOT expose start/stop/restart:
+/// current garagetytus sharing is a mix of a local Garage service,
+/// per-binding launchd jobs, and helper scripts. Lifecycle controls
+/// need scoped semantics first; status is safe and production-useful now.
+fn handle_garagetytus_status(request: Request) {
+    let binary = resolve_garagetytus_binary_path();
+    let mut warnings: Vec<String> = Vec::new();
+
+    let (running, state, status_text) = if let Some(bin) = &binary {
+        match Command::new(bin).arg("status").output() {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let combined = if text.is_empty() { stderr } else { text };
+                let (running, state) = parse_garagetytus_status_line(&combined);
+                (running, state, combined)
+            }
+            Err(e) => {
+                warnings.push(format!("failed to run garagetytus status: {}", e));
+                (None, "unknown".to_string(), String::new())
+            }
+        }
+    } else {
+        warnings.push("garagetytus binary not found".to_string());
+        (None, "missing".to_string(), String::new())
+    };
+
+    let version = binary.as_ref().and_then(|bin| {
+        Command::new(bin)
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+
+    let helpers: Vec<serde_json::Value> = GARAGETYTUS_REQUIRED_HELPERS
+        .iter()
+        .map(|name| {
+            let path = resolve_garagetytus_helper_path(name);
+            serde_json::json!({
+                "name": name,
+                "found": path.is_some(),
+                "path": path.map(|p| p.to_string_lossy().to_string()),
+            })
+        })
+        .collect();
+    let missing_helpers: Vec<String> = helpers
+        .iter()
+        .filter_map(|h| {
+            if h.get("found").and_then(|v| v.as_bool()) == Some(false) {
+                h.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    for helper in &missing_helpers {
+        warnings.push(format!("{} not found", helper));
+    }
+
+    let bindings = shared_bindings_from_cache();
+    let mut pods = std::collections::BTreeSet::new();
+    for binding in &bindings {
+        if let Some(arr) = binding.get("pods_provisioned").and_then(|v| v.as_array()) {
+            for pod in arr.iter().filter_map(|v| v.as_str()) {
+                pods.insert(pod.to_string());
+            }
+        }
+    }
+
+    let cache_path = garagetytus_cache_path();
+    let cache_exists = cache_path.as_ref().map(|p| p.exists()).unwrap_or(false);
+
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({
+            "available": binary.is_some() && missing_helpers.is_empty(),
+            "running": running,
+            "state": state,
+            "status_text": status_text,
+            "version": version,
+            "port": 3900,
+            "binary_path": binary.map(|p| p.to_string_lossy().to_string()),
+            "cache_path": cache_path.map(|p| p.to_string_lossy().to_string()),
+            "cache_exists": cache_exists,
+            "bindings_count": bindings.len(),
+            "provisioned_pods": pods.into_iter().collect::<Vec<_>>(),
+            "helpers": helpers,
+            "missing_helpers": missing_helpers,
+            "lifecycle_control_available": false,
+            "lifecycle_control_reason": "Deferred: current sharing lifecycle is helper/per-binding based, not one global start/stop/restart target.",
+            "warnings": warnings,
+        }),
+    );
 }
 
 fn shell_single_quote(s: &str) -> String {
@@ -7397,6 +7577,38 @@ mod tests {
     }
 
     // ── Shared-folders action allowlist (Phase 3 cont) ──────────
+
+    #[test]
+    fn garagetytus_status_parser_handles_macos_and_linux_states() {
+        assert_eq!(
+            parse_garagetytus_status_line("garagetytus status: running (pid=586, state=running)"),
+            (Some(true), "running".to_string()),
+        );
+        assert_eq!(
+            parse_garagetytus_status_line("garagetytus status: active (user)"),
+            (Some(true), "active".to_string()),
+        );
+        assert_eq!(
+            parse_garagetytus_status_line("garagetytus status: stopped"),
+            (Some(false), "stopped".to_string()),
+        );
+        assert_eq!(
+            parse_garagetytus_status_line("garagetytus status: inactive (user)"),
+            (Some(false), "inactive".to_string()),
+        );
+    }
+
+    #[test]
+    fn garagetytus_status_parser_keeps_unknown_state_non_fatal() {
+        assert_eq!(
+            parse_garagetytus_status_line("garagetytus status: activating (user)"),
+            (None, "activating".to_string()),
+        );
+        assert_eq!(
+            parse_garagetytus_status_line("unexpected output"),
+            (None, "unknown".to_string()),
+        );
+    }
 
     #[test]
     fn shared_folder_action_argv_accepts_known_actions() {
