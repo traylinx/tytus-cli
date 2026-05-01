@@ -1854,6 +1854,12 @@ fn handle(request: Request, registry: Registry) {
         (Method::Get, "/api/garagetytus/status") => {
             handle_garagetytus_status(request);
         }
+        (Method::Get, "/api/sharing/defaults") => {
+            handle_sharing_defaults_get(request);
+        }
+        (Method::Post, "/api/sharing/defaults") | (Method::Put, "/api/sharing/defaults") => {
+            handle_sharing_defaults_save(request);
+        }
         (Method::Get, "/api/shared-folders/list") => {
             handle_shared_folders_list(request);
         }
@@ -3743,6 +3749,200 @@ fn handle_shared_folders_list(request: Request) {
     );
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+struct SharingDefaults {
+    #[serde(default = "default_sharing_schema_version")]
+    schema_version: u8,
+    /// Global safety switch for every mutating sharing operation.
+    /// Existing bindings remain visible/read-only when this is false.
+    #[serde(default = "default_true")]
+    sharing_globally_enabled: bool,
+    /// Default for new bind flows. Existing launchd jobs are not mutated.
+    #[serde(default = "default_true")]
+    default_auto_sync: bool,
+    #[serde(default = "default_sharing_bucket")]
+    default_bucket: String,
+    #[serde(default = "default_sharing_local_root")]
+    default_local_root: String,
+}
+
+impl Default for SharingDefaults {
+    fn default() -> Self {
+        Self {
+            schema_version: default_sharing_schema_version(),
+            sharing_globally_enabled: true,
+            default_auto_sync: true,
+            default_bucket: default_sharing_bucket(),
+            default_local_root: default_sharing_local_root(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_sharing_schema_version() -> u8 {
+    1
+}
+
+fn default_sharing_bucket() -> String {
+    "shared".to_string()
+}
+
+fn default_sharing_local_root() -> String {
+    crate::workspace::ensure_tytus_home()
+        .join("Shared")
+        .to_string_lossy()
+        .to_string()
+}
+
+fn sharing_defaults_path() -> Option<PathBuf> {
+    if let Some(dir) = dirs::config_dir() {
+        return Some(dir.join("tytus").join("sharing-defaults.json"));
+    }
+    std::env::var_os("HOME").map(|h| {
+        PathBuf::from(h)
+            .join(".config")
+            .join("tytus")
+            .join("sharing-defaults.json")
+    })
+}
+
+fn load_sharing_defaults() -> SharingDefaults {
+    let Some(path) = sharing_defaults_path() else {
+        return SharingDefaults::default();
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return SharingDefaults::default();
+    };
+    let mut parsed: SharingDefaults = serde_json::from_str(&raw).unwrap_or_default();
+    if !valid_sharing_bucket(&parsed.default_bucket) {
+        parsed.default_bucket = default_sharing_bucket();
+    }
+    if parsed.default_local_root.trim().is_empty() {
+        parsed.default_local_root = default_sharing_local_root();
+    }
+    parsed.schema_version = default_sharing_schema_version();
+    parsed
+}
+
+fn save_sharing_defaults(defaults: &SharingDefaults) -> std::io::Result<()> {
+    let Some(path) = sharing_defaults_path() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_string_pretty(defaults).unwrap_or_else(|_| "{}".to_string());
+    std::fs::write(path, raw)
+}
+
+fn valid_sharing_bucket(bucket: &str) -> bool {
+    let len = bucket.len();
+    if !(3..=63).contains(&len) {
+        return false;
+    }
+    let bytes = bucket.as_bytes();
+    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let allowed = |b: u8| alnum(b) || b == b'.' || b == b'-';
+    alnum(bytes[0]) && alnum(bytes[len - 1]) && bytes.iter().all(|&b| allowed(b))
+}
+
+fn respond_sharing_paused(request: Request) {
+    respond_json(
+        request,
+        423,
+        &serde_json::json!({
+            "error": "sharing is paused in Settings → Sharing",
+            "code": "sharing.paused",
+        }),
+    );
+}
+
+fn sharing_mutations_enabled() -> bool {
+    load_sharing_defaults().sharing_globally_enabled
+}
+
+fn handle_sharing_defaults_get(request: Request) {
+    respond_json(request, 200, &load_sharing_defaults());
+}
+
+fn handle_sharing_defaults_save(mut request: Request) {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        sharing_globally_enabled: Option<bool>,
+        default_auto_sync: Option<bool>,
+        default_bucket: Option<String>,
+        default_local_root: Option<String>,
+    }
+
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: Body = match serde_json::from_str(&buf) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":format!("bad json: {}", e)}),
+            );
+            return;
+        }
+    };
+
+    let mut defaults = load_sharing_defaults();
+    if let Some(enabled) = body.sharing_globally_enabled {
+        defaults.sharing_globally_enabled = enabled;
+    }
+    if let Some(auto_sync) = body.default_auto_sync {
+        defaults.default_auto_sync = auto_sync;
+    }
+    if let Some(bucket) = body.default_bucket {
+        let bucket = bucket.trim().to_string();
+        if !valid_sharing_bucket(&bucket) {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({
+                    "error":"default_bucket must be 3-63 chars, lowercase letters/digits/dot/hyphen only, alnum endpoints",
+                    "code":"sharing.defaults.bucket.invalid"
+                }),
+            );
+            return;
+        }
+        defaults.default_bucket = bucket;
+    }
+    if let Some(local_root) = body.default_local_root {
+        let local_root = local_root.trim().to_string();
+        if local_root.is_empty() {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({
+                    "error":"default_local_root cannot be empty",
+                    "code":"sharing.defaults.local_root.empty"
+                }),
+            );
+            return;
+        }
+        defaults.default_local_root = local_root;
+    }
+    defaults.schema_version = default_sharing_schema_version();
+
+    match save_sharing_defaults(&defaults) {
+        Ok(()) => respond_json(request, 200, &defaults),
+        Err(e) => respond_json(
+            request,
+            500,
+            &serde_json::json!({"error":format!("failed to save sharing defaults: {}", e)}),
+        ),
+    }
+}
+
 /// Map a shared-folders action string to the helper binary name +
 /// its arg vector. `None` for actions outside the frozen allowlist.
 ///
@@ -3786,6 +3986,10 @@ fn handle_shared_folders_run_streamed(request: Request, registry: &Registry, que
         .find_map(|kv| kv.strip_prefix("action="))
         .map(|s| s.to_string())
         .unwrap_or_default();
+    if !sharing_mutations_enabled() && action == "refresh-all" {
+        respond_sharing_paused(request);
+        return;
+    }
     let (helper, args) = match shared_folder_action_argv(&action) {
         Some(pair) => pair,
         None => {
@@ -5066,8 +5270,9 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
         #[serde(default = "default_true")]
         auto_sync: bool,
     }
-    fn default_true() -> bool {
-        true
+    if !sharing_mutations_enabled() {
+        respond_sharing_paused(request);
+        return;
     }
 
     let mut buf = String::new();
@@ -5111,18 +5316,7 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
 
     // Validate bucket name (Garage rules: 3-63 chars, lowercase alnum
     // + dot + hyphen, alnum endpoints).
-    let bucket_ok = {
-        let len = body.bucket.len();
-        if !(3..=63).contains(&len) {
-            false
-        } else {
-            let bytes = body.bucket.as_bytes();
-            let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-            let allowed = |b: u8| alnum(b) || b == b'.' || b == b'-';
-            alnum(bytes[0]) && alnum(bytes[len - 1]) && bytes.iter().all(|&b| allowed(b))
-        }
-    };
-    if !bucket_ok {
+    if !valid_sharing_bucket(&body.bucket) {
         respond_json(
             request,
             400,
@@ -5176,6 +5370,10 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
 /// re-reads credentials.json on every call so no pod restart is
 /// needed after rotation.
 fn handle_pod_refresh_creds(request: Request, registry: &Registry, query: &str) {
+    if !sharing_mutations_enabled() {
+        respond_sharing_paused(request);
+        return;
+    }
     let pod_id = match parse_pod_id(query) {
         Some(p) => p,
         None => {
@@ -7660,6 +7858,27 @@ mod tests {
         assert!(shared_folder_action_argv("../../../etc/passwd").is_none());
         assert!(shared_folder_action_argv("list\0").is_none());
         assert!(shared_folder_action_argv("list ").is_none());
+    }
+
+    #[test]
+    fn sharing_defaults_default_to_enabled_tytus_home() {
+        let defaults = SharingDefaults::default();
+        assert_eq!(defaults.schema_version, 1);
+        assert!(defaults.sharing_globally_enabled);
+        assert!(defaults.default_auto_sync);
+        assert_eq!(defaults.default_bucket, "shared");
+        assert!(defaults.default_local_root.ends_with("/Tytus/Shared"));
+    }
+
+    #[test]
+    fn sharing_bucket_validation_matches_bind_rules() {
+        assert!(valid_sharing_bucket("shared"));
+        assert!(valid_sharing_bucket("sebastian-shared"));
+        assert!(!valid_sharing_bucket("Shared"));
+        assert!(!valid_sharing_bucket("-shared"));
+        assert!(!valid_sharing_bucket("shared-"));
+        assert!(!valid_sharing_bucket("sh"));
+        assert!(!valid_sharing_bucket("shared_bucket"));
     }
 
     #[test]
