@@ -7,6 +7,17 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-05-02
+
+**TytusOS window-drag stability bundle.**
+
+### Changed
+- Bundled TytusOS dist refreshed from `tytus-os` main (`38de46c`) so released tray assets include the state-driven window drag/resize stabilization.
+- Window geometry persistence is debounced during drag to reduce storage churn.
+
+### Fixed
+- Regression coverage added for WindowFrame drag movement after resize/drag interactions.
+
 ## [0.6.3] — 2026-05-02
 
 **TytusOS docs + JULI3TA host-service release.**
