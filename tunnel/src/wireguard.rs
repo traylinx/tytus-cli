@@ -165,12 +165,12 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
     // allowed_ips is a single string like "10.X.Y.0/24" — may contain commas for multiple
     let allowed_ip_list: Vec<&str> = config.allowed_ips.split(',').map(|s| s.trim()).collect();
     for allowed_ip in &allowed_ip_list {
-        let network = allowed_ip.split('/').next().unwrap_or(allowed_ip);
-        let cidr_bits = allowed_ip.split('/').nth(1).unwrap_or("24");
         tracing::info!(route = %allowed_ip, interface = %interface_name, "Adding route");
 
         #[cfg(target_os = "macos")]
         {
+            let network = allowed_ip.split('/').next().unwrap_or(allowed_ip);
+            let cidr_bits = allowed_ip.split('/').nth(1).unwrap_or("24");
             let output = std::process::Command::new("/sbin/route")
                 .args([
                     "-n",

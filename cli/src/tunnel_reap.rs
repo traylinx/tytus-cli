@@ -150,8 +150,9 @@ fn ifacefile_path(pod_num: &str) -> PathBuf {
     base_dir().join(format!("tunnel-{}.iface", pod_num))
 }
 
-/// Cross-platform errno accessor. macOS uses `__error()`, Linux uses
+/// Unix errno accessor. macOS uses `__error()`, Linux uses
 /// `__errno_location()`. Returns the raw errno after a failed libc call.
+#[cfg(unix)]
 #[inline]
 fn last_errno() -> i32 {
     unsafe {
@@ -166,7 +167,7 @@ fn last_errno() -> i32 {
     }
 }
 
-/// Production liveness check using `kill(pid, 0)`.
+/// Production Unix liveness check using `kill(pid, 0)`.
 ///
 /// SAFETY: `libc::kill(pid, 0)` is a thin FFI call; it reads no user
 /// memory and has no aliasing concerns. Signal 0 checks existence +
@@ -176,6 +177,7 @@ fn last_errno() -> i32 {
 /// that IS alive; the scoped `tytus tunnel-down` helper runs as root via
 /// sudoers and can reap it. ESRCH means no such process. Anything else →
 /// assume dead and let the state machine clean up.
+#[cfg(unix)]
 fn pid_is_alive(pid: i32) -> bool {
     if pid <= 1 {
         return false;
@@ -186,6 +188,15 @@ fn pid_is_alive(pid: i32) -> bool {
         }
     }
     last_errno() == libc::EPERM
+}
+
+/// Windows tunnel reaping is not enabled yet. The Windows release build still
+/// includes the CLI for non-tunnel commands, but there is no root-owned
+/// `/tmp/tytus` tunnel daemon to reap. Treat pidfiles as stale instead of
+/// trying to call Unix-only libc APIs.
+#[cfg(windows)]
+fn pid_is_alive(_pid: i32) -> bool {
+    false
 }
 
 /// Read a pidfile for `pod_num` and parse its contents as an i32.
@@ -210,6 +221,7 @@ fn pid_is_alive(pid: i32) -> bool {
 /// literally says `tytus tunnel-up /tmp/tytus/tunnel-<pod>.json`. The
 /// `<pod>` is already validated against `is_safe_pod_num` by the caller,
 /// so the shell-interpolation surface is just `[0-9A-Za-z_-]` characters.
+#[cfg(unix)]
 fn find_orphan_tunnel_daemon(pod_num: &str) -> Option<i32> {
     let needle = format!("tunnel-up /tmp/tytus/tunnel-{}.json", pod_num);
     // `ps -ax -o pid=,command=` — pid col then full argv, no header.
@@ -238,6 +250,11 @@ fn find_orphan_tunnel_daemon(pod_num: &str) -> Option<i32> {
             }
         }
     }
+    None
+}
+
+#[cfg(windows)]
+fn find_orphan_tunnel_daemon(_pod_num: &str) -> Option<i32> {
     None
 }
 
@@ -338,6 +355,7 @@ pub fn list_pod_pidfiles() -> Vec<(String, PathBuf)> {
 /// process and return the unique `pod` values. Complements
 /// `list_pod_pidfiles` so that a bare `tytus disconnect` also reaps
 /// daemons whose pidfiles vanished (orphan recovery).
+#[cfg(unix)]
 pub fn list_orphan_tunnel_pods() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let output = match std::process::Command::new("ps")
@@ -372,6 +390,11 @@ pub fn list_orphan_tunnel_pods() -> Vec<String> {
     out
 }
 
+#[cfg(windows)]
+pub fn list_orphan_tunnel_pods() -> Vec<String> {
+    Vec::new()
+}
+
 /// Best-effort filesystem cleanup. Removes the pidfile and iface marker for
 /// a given pod. Errors are ignored on purpose — both files are advisory, and
 /// a stale file on disk cannot cause incorrect behaviour because
@@ -390,6 +413,7 @@ fn cleanup_files(pod_num: &str) {
 /// signalling, so this cannot be abused as an arbitrary kill primitive —
 /// even if the PID is recycled between our `is_alive` check and its `kill()`,
 /// the helper will refuse to signal and we surface `ReapFailed`.
+#[cfg(unix)]
 fn invoke_tunnel_down(pid: i32) -> Result<(), String> {
     if pid <= 1 {
         return Err(format!("refusing to signal PID {}", pid));
@@ -413,6 +437,14 @@ fn invoke_tunnel_down(pid: i32) -> Result<(), String> {
             stderr
         })
     }
+}
+
+#[cfg(windows)]
+fn invoke_tunnel_down(pid: i32) -> Result<(), String> {
+    Err(format!(
+        "tunnel daemon reaping is not supported on Windows yet (pid {})",
+        pid
+    ))
 }
 
 /// Reap the tunnel daemon for `pod_num`, if any.

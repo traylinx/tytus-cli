@@ -7,6 +7,13 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.7] — 2026-05-02
+
+### Fixed
+
+- Fixed Windows release build by gating Unix-only tunnel daemon reaping (`kill(2)`, `ps`, `sudo tunnel-down`) behind Unix cfgs.
+- Kept Windows release packaging enabled while tunnel reaping remains a safe no-op on Windows.
+
 ## [0.6.6] — 2026-05-02
 
 ### Fixed
