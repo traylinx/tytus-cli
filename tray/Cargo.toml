@@ -22,6 +22,7 @@ dirs.workspace = true
 # over warp/axum/actix because it's dep-free, std-only, synchronous, and
 # under 200KB — we only need 4 endpoints and one SSE stream.
 tiny_http = "0.12"
+reqwest = { workspace = true, features = ["blocking"] }
 atomek-pods = { path = "../pods" }
 atomek-core = { path = "../core" }
 atomek-auth = { path = "../auth" }
