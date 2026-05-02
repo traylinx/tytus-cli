@@ -33,6 +33,10 @@ jobs:
             os: ubuntu-latest
             name: tytus-linux-x86_64
             archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: tytus-windows-x86_64
+            archive: zip
           # aarch64-linux via cross needs libdbus-1-dev inside the container
           # which requires a Cross.toml pre-install step. Deferred until v0.3.1
           # to avoid blocking the initial launch — install.sh falls back to
@@ -72,14 +76,18 @@ jobs:
           fi
         shell: bash
 
-      - name: Package (tar.gz)
+      - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          files="tytus tytus-mcp"
-          if [[ -f tytus-tray ]]; then
-            files="${files} tytus-tray"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Force -Path tytus.exe,tytus-mcp.exe -DestinationPath ../../../${{ matrix.name }}.zip"
+          else
+            files="tytus tytus-mcp"
+            if [[ -f tytus-tray ]]; then
+              files="${files} tytus-tray"
+            fi
+            tar czf ../../../${{ matrix.name }}.tar.gz ${files}
           fi
-          tar czf ../../../${{ matrix.name }}.tar.gz ${files}
           cd ../../..
         shell: bash
 

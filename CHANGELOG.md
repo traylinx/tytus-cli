@@ -7,6 +7,13 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.5] — 2026-05-02
+
+### Release packaging
+
+- Added the Windows x86_64 release artifact (`tytus-windows-x86_64.zip`) to the manual release workflow.
+- Updated the Windows installer copy so fresh Windows installs can opt into the checksum-verified release binary with `TYTUS_USE_RELEASE=1`, with source-build fallback unchanged.
+
 ## [0.6.4] — 2026-05-02
 
 **TytusOS window-drag stability bundle.**

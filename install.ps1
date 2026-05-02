@@ -6,16 +6,16 @@
 #     powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
 #
 # Early-access policy:
-#   Tytus is under active development. The installer builds from source
-#   against `main` via `cargo install --git` so every user gets the latest
-#   fixes without us cutting a release for every bugfix. Prebuilt binaries
-#   will return once the CLI is stable and versioned.
+#   Tytus is under active development. By default the installer builds from
+#   source against `main` so users get the latest fixes. Set
+#   TYTUS_USE_RELEASE=1 to install the latest checksum-verified Windows
+#   x86_64 release asset when available.
 #
 # What it does:
 #   1. Detects architecture (x86_64 or arm64)
 #   2. Ensures a Rust toolchain is present (offers rustup install if not)
 #   3. Builds tytus + tytus-mcp from the main branch
-#   4. (Opt-in) Uses the last published release if $env:TYTUS_USE_RELEASE=1
+#   4. (Opt-in) Uses the last published Windows release if $env:TYTUS_USE_RELEASE=1
 #   5. Adds install dir to user PATH
 #
 # Env vars:
@@ -257,9 +257,13 @@ Show-Banner
 
 $arch = Get-Arch
 Write-Ok "Detected: Windows $arch"
-Write-Warn2 "Early access — building from main branch source."
+if ($env:TYTUS_USE_RELEASE -eq '1') {
+    Write-Warn2 "Early access — using latest checksum-verified release when available."
+} else {
+    Write-Warn2 "Early access — building from main branch source. Set TYTUS_USE_RELEASE=1 to prefer release binaries."
+}
 
-# Default path: source build from main. Opt in to stale prebuilt
+# Default path: source build from main. Opt in to checksum-verified
 # release via $env:TYTUS_USE_RELEASE=1.
 $ok = $false
 if ($env:TYTUS_USE_RELEASE -eq '1') {
