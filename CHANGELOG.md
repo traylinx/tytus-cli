@@ -7,6 +7,21 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-05-02
+
+**TytusOS docs + JULI3TA host-service release.**
+
+### Added
+- `tytus os-docs` / `tytus-os-docs` hidden CLI command with the bundled TytusOS user manual for AI agents.
+- `tytus_os_docs` MCP tool so Claude/OpenCode/Gemini-style agents can retrieve the OS manual without shelling out.
+- Tray-backed JULI3TA library persistence endpoints for real host-file music saves.
+- Music connector credential/status endpoints backed by the OS keychain.
+
+### Changed
+- Bundled TytusOS dist refreshed from `tytus-os` main (`6105708`) so the tray-served OS includes the latest music-library recovery and window-drag polish.
+- Music/yt-dlp tray endpoints hardened for provider discovery, setup status, stream proxying, and host-library recovery.
+- Linked projects now receive `.tytus/os-manual.md` alongside CLI integration docs.
+
 ## [0.6.2] — 2026-05-02
 
 **TytusOS cutover + session-state hardening.**
