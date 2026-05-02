@@ -329,6 +329,13 @@ enum Commands {
     /// Print the full LLM-facing reference (for AI agents driving tytus-cli)
     #[command(hide = true)]
     LlmDocs,
+    /// Print the Tytus OS user manual (concatenated). Companion to llm-docs:
+    /// covers the desktop OS — windows, dock, settings, apps, files,
+    /// shortcuts, troubleshooting. AI agents should read this before answering
+    /// questions about how Tytus OS *looks* or *behaves* (vs `llm-docs` which
+    /// covers the command-line tool).
+    #[command(hide = true, alias = "tytus-os-docs")]
+    OsDocs,
     /// Discover the pod's AI gateway catalog — models + provider-native
     /// tools (e.g. MiniMax M2.7's autonomous web_search). One call covers
     /// every model the pod exposes via `/v1/models`.
@@ -726,6 +733,9 @@ async fn main() {
         Some(Commands::LlmDocs) => {
             print!("{}", LLM_DOCS);
         }
+        Some(Commands::OsDocs) => {
+            print!("{}", OS_DOCS);
+        }
         Some(Commands::Capabilities { pod }) => cmd_capabilities(&http, pod, cli.json).await,
         Some(Commands::BootstrapPrompt) => {
             print!("{}", BOOTSTRAP_PROMPT);
@@ -897,6 +907,17 @@ fn cmd_help_topic(topic: Option<&str>, json: bool) {
              That sets OPENAI_BASE_URL and OPENAI_API_KEY in your shell. The\n\
              pair never changes (even if your workspace gets rotated), so you\n\
              can paste it into any OpenAI-compatible app once and forget it.",
+        ),
+        (
+            "docs",
+            "AI-readable docs (for Claude Code, OpenCode, Gemini, etc.)",
+            "Two markdown blobs ship inside the `tytus` binary so any AI CLI on\n\
+             your machine can answer Tytus questions natively:\n\
+             \n  tytus llm-docs    # the CLI surface — every command + recipe\n\
+             tytus os-docs     # the Tytus OS user manual — windows, dock, apps, settings\n\n\
+             `tytus link [DIR]` drops the OS manual as `.tytus/os-manual.md`\n\
+             into the target project, so AI agents can read it directly. The\n\
+             same content is also served via the `tytus_os_docs` MCP tool.",
         ),
     ];
 
@@ -4757,6 +4778,23 @@ fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
 
     let mut injected = Vec::new();
 
+    // 0. Drop the Tytus OS user manual whenever any CLI integration is
+    // requested. .tytus/os-manual.md becomes the AI's offline source of
+    // truth for desktop-OS questions (windows, dock, settings, apps,
+    // shortcuts). Companion to llm-docs (CLI surface).
+    let want_cli = should_inject("claude")
+        || should_inject("agents")
+        || should_inject("kilocode")
+        || should_inject("opencode")
+        || should_inject("archon");
+    if want_cli {
+        let tytus_dir = base.join(".tytus");
+        let _ = std::fs::create_dir_all(&tytus_dir);
+        let manual_path = tytus_dir.join("os-manual.md");
+        let _ = std::fs::write(&manual_path, OS_DOCS);
+        injected.push(".tytus/os-manual.md");
+    }
+
     // 1. Claude Code: CLAUDE.md context + .claude/commands/ + .mcp.json
     if should_inject("claude") {
         // Append to existing CLAUDE.md or create new one
@@ -4793,6 +4831,7 @@ fn cmd_link(dir: &str, only: Option<Vec<String>>, json: bool) {
                     "args": [],
                     "alwaysAllow": [
                         "tytus_docs",
+                        "tytus_os_docs",
                         "tytus_status",
                         "tytus_env",
                         "tytus_models",
@@ -8612,6 +8651,17 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
 // ─────────────────────────────────────────────────────────────────────────
 const LLM_DOCS: &str = include_str!("../../llm-docs.md");
 
+// ─────────────────────────────────────────────────────────────────────────
+// OS_DOCS — the concatenated Tytus OS user manual, for AI agents that need
+// to answer questions about the *desktop OS* (windows, dock, settings, apps,
+// files, shortcuts) rather than the CLI tool. Same content is exposed by:
+//   * `tytus os-docs` (this binary)
+//   * MCP tool `tytus_os_docs` (the tytus-mcp binary)
+// Regenerated from ../tytus-os/docs/user-manual/*.md via
+// scripts/regen-os-docs.sh — run that script whenever the OS docs change.
+// ─────────────────────────────────────────────────────────────────────────
+const OS_DOCS: &str = include_str!("../../os-docs.md");
+
 // Short "paste this into any AI tool" bootstrap prompt. Mirrors the 2md
 // pattern: a single URL + instruction that teaches any AI agent how to
 // drive the product natively. Printed by `tytus bootstrap-prompt`.
@@ -8633,12 +8683,19 @@ The user runs the `tytus` CLI and you can drive every part of it. Always
 prefer `tytus` commands over hand-crafting curl calls — `tytus` knows the
 current state, the stable endpoint, and the per-user key.
 
-### One-command full reference (read this first)
+### Two reference blobs (read both first)
 ```bash
-tytus llm-docs              # comprehensive structured reference for AI agents
+tytus llm-docs              # the CLI surface — every command, recipe, error
+tytus os-docs               # the Tytus OS user manual — desktop, windows, apps, settings
 ```
-Run this whenever you need the authoritative command surface, error
-messages, troubleshooting recipes, and known caveats.
+`llm-docs` covers driving the `tytus` CLI itself. `os-docs` covers the
+desktop OS — windows, dock, launcher, settings, app catalog, files,
+keyboard shortcuts, troubleshooting. The latter is the source of truth
+when the user asks "how do I … in Tytus OS?"
+
+The OS manual is also dropped to `.tytus/os-manual.md` in any project
+linked via `tytus link`, so you can read it directly without spawning
+the CLI.
 
 ### Mental model
 - **Tytus** = customer name for the private AI pod product (Traylinx brand)
@@ -8689,7 +8746,8 @@ tytus configure              # interactive overlay editor for agent config
 tytus link [DIR] [--only claude|agents|kilocode|opencode|archon|shell]
 tytus mcp [--format claude|kilocode|opencode|archon|json]
 tytus bootstrap-prompt       # paste this into any AI tool to enable Tytus
-tytus llm-docs               # the doc you should read before driving Tytus
+tytus llm-docs               # CLI reference (every command + recipe)
+tytus os-docs                # Tytus OS user manual (desktop, windows, apps, settings)
 ```
 
 ### Recipe: ensure the user has a working pod, then chat
@@ -8728,7 +8786,8 @@ tytus restart --pod 02                          # picks up the overlay merge
 | `tytus_chat` | Send a chat completion through the user's pod |
 | `tytus_revoke` | Free a pod's units |
 | `tytus_setup_guide` | What to tell the user when nothing is connected |
-| `tytus_docs` | Returns the full LLM-facing reference (same as `tytus llm-docs`) |
+| `tytus_docs` | Full CLI reference (same as `tytus llm-docs`) |
+| `tytus_os_docs` | Full Tytus OS user manual (same as `tytus os-docs`) — call this before answering any "how do I ... in Tytus OS?" question |
 
 ### Troubleshooting cheat sheet
 | Symptom | Cause | Fix |
@@ -8757,10 +8816,16 @@ You are an AI agent (OpenCode / Codex / Gemini / similar) running in a project
 that has access to a Tytus private AI pod. Tytus is a WireGuard-tunneled,
 isolated AI runtime owned by the user. The `tytus` CLI is your interface to it.
 
-### Read this first
+### Read these first
 ```bash
-tytus llm-docs             # full structured reference for AI agents
+tytus llm-docs             # CLI reference (every command + recipe)
+tytus os-docs              # Tytus OS user manual (desktop, windows, apps, settings)
 ```
+`llm-docs` covers the `tytus` command-line tool. `os-docs` covers the
+desktop OS — windows, dock, launcher, settings, app catalog, files,
+keyboard shortcuts, troubleshooting. Read the OS manual before answering
+"how do I X in Tytus OS?" — the answer is in there. The same content is
+written to `.tytus/os-manual.md` in linked projects.
 
 ### What is Tytus
 - **Pod** = one user's isolated slice (WireGuard sidecar + agent container)
@@ -8825,13 +8890,16 @@ Tytus is a WireGuard-tunneled, isolated LLM gateway running on the user's
 Traylinx subscription. The CLI handles everything: auth, allocation, tunnel,
 agent lifecycle, and stable endpoint management.
 
-**Read the full reference before doing anything:**
+**Read the full references before doing anything:**
 ```bash
-tytus llm-docs
+tytus llm-docs        # CLI surface — every command, recipe, error
+tytus os-docs         # Tytus OS user manual — desktop, windows, apps, settings, shortcuts
 ```
-That command prints the authoritative documentation as Markdown — command
-surface, models, plans, recipes, error catalog. Cache it in your context for
-the rest of the session.
+`llm-docs` is the source of truth for the `tytus` command-line tool.
+`os-docs` is the source of truth for the desktop OS — read it before
+answering any question about how Tytus OS *looks* or *behaves*. The
+OS manual is also dropped to `.tytus/os-manual.md` in this project.
+Cache both in your context for the rest of the session.
 
 Then dispatch on `$ARGUMENTS`:
 
@@ -8868,8 +8936,13 @@ Then dispatch on `$ARGUMENTS`:
 - **setup**: `tytus setup` — full interactive wizard (login → plan → agent
   pick → tunnel → test). Best for first-run experiences.
 
-- **docs**: `tytus llm-docs` — print the full reference (this is what you
-  should consult before any non-trivial operation).
+- **docs**: `tytus llm-docs` — full CLI reference. Use this for any
+  command-line / pod-management question.
+
+- **os-docs**: `tytus os-docs` — full Tytus OS user manual. Use this when
+  the user asks about the *desktop OS* — windows, dock, settings panels,
+  apps, keyboard shortcuts, files, drag/drop, paste, troubleshooting.
+  Same content lives at `.tytus/os-manual.md` in linked projects.
 
 After running the requested command, summarize:
 - Plan tier + units used / remaining
@@ -8883,17 +8956,23 @@ description: "Drive the Tytus private AI pod via tytus-cli (status / connect / t
 ---
 
 You are an OpenCode/KiloCode agent with access to the user's Tytus
-private AI pod via the `tytus` CLI. Read the full reference first:
+private AI pod via the `tytus` CLI. Read the full references first:
 
 ```bash
-tytus llm-docs
+tytus llm-docs       # CLI surface — every command, recipe, error
+tytus os-docs        # Tytus OS user manual — desktop, windows, apps, settings, shortcuts
 ```
 
-That command outputs the authoritative documentation: every subcommand,
-the stable URL/key model, the agent types (nemoclaw=1u, hermes=2u),
-the plan tiers (Explorer=1u, Creator=2u, Operator=4u), the models on the
-gateway (ail-compound, ail-image, ail-embed), and a troubleshooting
-catalog. Read it, then act.
+`llm-docs` is the authoritative documentation for the `tytus` tool:
+every subcommand, the stable URL/key model, agent types (nemoclaw=1u,
+hermes=2u), plan tiers (Explorer=1u, Creator=2u, Operator=4u), models
+(ail-compound, ail-image, ail-embed), and a troubleshooting catalog.
+
+`os-docs` is the authoritative documentation for the desktop OS — read
+it before answering any "how do I X in Tytus OS?" question. The same
+content is in `.tytus/os-manual.md` in this project.
+
+Read both, then act.
 
 Common flow:
 
@@ -8923,10 +9002,11 @@ description: "Drive the user's Tytus private AI pod via tytus-cli"
 ---
 
 You have the `tytus` CLI available. It manages a private AI pod on the
-user's Traylinx subscription. Read the full reference before acting:
+user's Traylinx subscription. Read the full references before acting:
 
 ```bash
-tytus llm-docs
+tytus llm-docs        # CLI surface
+tytus os-docs         # Tytus OS user manual (desktop, windows, apps, settings)
 ```
 
 Quick recipe:

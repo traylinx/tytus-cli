@@ -48,9 +48,17 @@ pub fn status() -> music_ytdlp::MusicStatus {
     music_ytdlp::MusicStatus {
         ready: ytdlp.ready,
         installing: setup.installing,
-        source: if ytdlp.ready { ytdlp.source } else { setup.source },
+        source: if ytdlp.ready {
+            ytdlp.source
+        } else {
+            setup.source
+        },
         version: ytdlp.version.or(setup.version),
-        error: if ytdlp.ready { None } else { setup.error.or(ytdlp.error) },
+        error: if ytdlp.ready {
+            None
+        } else {
+            setup.error.or(ytdlp.error)
+        },
     }
 }
 
@@ -115,12 +123,23 @@ fn system_ytdlp_version() -> Option<String> {
         return None;
     }
     let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if version.is_empty() { None } else { Some(version) }
+    if version.is_empty() {
+        None
+    } else {
+        Some(version)
+    }
 }
 
 fn ytdlp_binary_path() -> PathBuf {
-    let base = dirs::data_dir().unwrap_or_else(|| std::env::temp_dir()).join("tytus").join("ytdlp");
-    let file = if cfg!(target_os = "windows") { "yt-dlp.exe" } else { "yt-dlp" };
+    let base = dirs::data_dir()
+        .unwrap_or_else(|| std::env::temp_dir())
+        .join("tytus")
+        .join("ytdlp");
+    let file = if cfg!(target_os = "windows") {
+        "yt-dlp.exe"
+    } else {
+        "yt-dlp"
+    };
     base.join(file)
 }
 
@@ -139,7 +158,10 @@ fn release_asset_name() -> &'static str {
 }
 
 fn download_ytdlp(path: &PathBuf) -> Result<(), String> {
-    let url = format!("https://github.com/yt-dlp/yt-dlp/releases/latest/download/{}", release_asset_name());
+    let url = format!(
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/{}",
+        release_asset_name()
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("cannot create yt-dlp dir: {e}"))?;
     }
@@ -153,10 +175,15 @@ fn download_ytdlp(path: &PathBuf) -> Result<(), String> {
         .send()
         .map_err(|e| format!("yt-dlp download failed: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("yt-dlp download failed with HTTP {}", response.status()));
+        return Err(format!(
+            "yt-dlp download failed with HTTP {}",
+            response.status()
+        ));
     }
-    let mut file = std::fs::File::create(&tmp).map_err(|e| format!("cannot create yt-dlp file: {e}"))?;
-    std::io::copy(&mut response, &mut file).map_err(|e| format!("cannot write yt-dlp file: {e}"))?;
+    let mut file =
+        std::fs::File::create(&tmp).map_err(|e| format!("cannot create yt-dlp file: {e}"))?;
+    std::io::copy(&mut response, &mut file)
+        .map_err(|e| format!("cannot write yt-dlp file: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot install yt-dlp file: {e}"))?;
     Ok(())
 }
@@ -165,7 +192,9 @@ fn ensure_permissions(path: &PathBuf) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path).map_err(|e| format!("cannot stat yt-dlp: {e}"))?.permissions();
+        let mut perms = std::fs::metadata(path)
+            .map_err(|e| format!("cannot stat yt-dlp: {e}"))?
+            .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(path, perms).map_err(|e| format!("cannot chmod yt-dlp: {e}"))?;
     }

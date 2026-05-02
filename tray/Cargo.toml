@@ -24,6 +24,8 @@ dirs.workspace = true
 # under 200KB — we only need 4 endpoints and one SSE stream.
 tiny_http = "0.12"
 reqwest = { workspace = true, features = ["blocking"] }
+keyring.workspace = true
+thiserror.workspace = true
 atomek-pods = { path = "../pods" }
 atomek-core = { path = "../core" }
 atomek-auth = { path = "../auth" }
