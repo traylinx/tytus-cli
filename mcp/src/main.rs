@@ -121,6 +121,15 @@ fn tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "tytus_os_docs".into(),
+            description: "Return the complete Tytus OS user manual (same content as `tytus os-docs`). This is the source of truth for the *desktop OS*: boot/login phases, the desktop, top panel, dock, App Launcher, window management (drag/resize/snap/animations), keyboard shortcuts, the Settings app and every panel (account, plan, pods, agents, daemon, sharing, background, appearance, dock, languages, notifications, privacy, about), the Files window (vfs vs daemon backends, drag-out, multi-select, conflict resolution, partial-failure semantics, undo, trash), host clipboard (Cmd+V) per-browser support, all 50 installed apps in 8 categories, troubleshooting recipes. Read this BEFORE answering any question about how Tytus OS looks, behaves, or what its surfaces do. Companion to tytus_docs (which covers the CLI tool).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolInfo {
             name: "tytus_status".into(),
             description: "Return the current state of the user's Tytus account: signed-in email, subscription plan tier (Explorer/Creator/Operator), active pods with their pod_id, droplet_id, agent_type, tunnel state, and the stable user key + stable AI endpoint. Always call this first in any new conversation to find out what the user actually has — branch on the result instead of guessing.".into(),
             input_schema: serde_json::json!({

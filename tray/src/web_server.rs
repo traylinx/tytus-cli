@@ -52,7 +52,7 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-use crate::{music_proxy, music_ytdlp, music_ytdlp_setup};
+use crate::{juli3ta_library, music_connectors, music_proxy, music_ytdlp, music_ytdlp_setup};
 
 mod os_assets {
     include!(concat!(env!("OUT_DIR"), "/os_assets.rs"));
@@ -1610,6 +1610,7 @@ pub fn open_os() {
 /// here but produce a URL the browser may interpret unexpectedly. None of
 /// the current call sites do this; this is a future-maintainer warning.
 pub fn open_os_at(fragment: &str) {
+    let fragment = canonical_os_fragment(fragment);
     let port = match current_port() {
         Some(p) => p,
         None => {
@@ -1628,6 +1629,17 @@ pub fn open_os_at(fragment: &str) {
         format!("http://127.0.0.1:{}/{}{}n={:x}", port, fragment, sep, nonce)
     };
     open_url(&url);
+}
+
+#[allow(dead_code)]
+fn canonical_os_fragment(fragment: &str) -> String {
+    match fragment {
+        "" => String::new(),
+        "#chat" => "#/chat".to_string(),
+        "#files" => "#/files".to_string(),
+        "#channels" => "#/channels".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn open_url(url: &str) {
@@ -1668,6 +1680,17 @@ fn handle_music_status(request: Request) {
     respond_json(request, 200, &status);
 }
 
+fn handle_music_providers(request: Request) {
+    if !music_ytdlp_setup::status().ready {
+        music_ytdlp_setup::start_background_install();
+    }
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({ "providers": music_ytdlp::providers() }),
+    );
+}
+
 fn handle_music_search(request: Request, query: &str) {
     if !music_ytdlp_setup::status().ready {
         music_ytdlp_setup::start_background_install();
@@ -1684,7 +1707,11 @@ fn handle_music_search(request: Request, query: &str) {
     let q = match query_value_decoded(query, "q") {
         Ok(Some(v)) => v,
         Ok(None) => {
-            respond_json(request, 400, &serde_json::json!({"error":"query is required"}));
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":"query is required"}),
+            );
             return;
         }
         Err(e) => {
@@ -1697,6 +1724,52 @@ fn handle_music_search(request: Request, query: &str) {
         .unwrap_or(20);
     match music_ytdlp::search(&q, limit) {
         Ok(results) => respond_json(request, 200, &serde_json::json!({ "results": results })),
+        Err(e) => respond_json(request, 500, &serde_json::json!({"error": e})),
+    }
+}
+
+fn handle_music_search2(request: Request, query: &str) {
+    if !music_ytdlp_setup::status().ready {
+        music_ytdlp_setup::start_background_install();
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "error": "music_unavailable",
+                "status": music_ytdlp_setup::status(),
+            }),
+        );
+        return;
+    }
+    let q = match query_value_decoded(query, "q") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":"query is required"}),
+            );
+            return;
+        }
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let limit = query_value(query, "limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(20);
+    let types_raw = query_value_decoded(query, "types")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "tracks,albums,artists,playlists".to_string());
+    let types = types_raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    match music_ytdlp::search_unified(&q, &types, limit) {
+        Ok(results) => respond_json(request, 200, &results),
         Err(e) => respond_json(request, 500, &serde_json::json!({"error": e})),
     }
 }
@@ -1717,7 +1790,11 @@ fn handle_music_stream(request: Request, query: &str) {
     let video_id = match query_value_decoded(query, "videoId") {
         Ok(Some(v)) => v,
         Ok(None) => {
-            respond_json(request, 400, &serde_json::json!({"error":"videoId is required"}));
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":"videoId is required"}),
+            );
             return;
         }
         Err(e) => {
@@ -1764,7 +1841,11 @@ fn handle_music_playlist(request: Request, query: &str) {
     let url = match query_value_decoded(query, "url") {
         Ok(Some(v)) => v,
         Ok(None) => {
-            respond_json(request, 400, &serde_json::json!({"error":"url is required"}));
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":"url is required"}),
+            );
             return;
         }
         Err(e) => {
@@ -1778,6 +1859,161 @@ fn handle_music_playlist(request: Request, query: &str) {
     match music_ytdlp::playlist(&url, limit) {
         Ok(playlist) => respond_json(request, 200, &playlist),
         Err(e) => respond_json(request, 500, &serde_json::json!({"error": e})),
+    }
+}
+
+fn connector_error_response(request: Request, err: music_connectors::ConnectorError) {
+    let status = music_connectors::connector_error_status(&err);
+    respond_json(
+        request,
+        status,
+        &serde_json::json!({
+            "error": err.to_string(),
+        }),
+    );
+}
+
+fn parse_json_body<T: serde::de::DeserializeOwned>(
+    mut request: Request,
+) -> Result<(Request, T), (Request, String)> {
+    let mut body = String::new();
+    if request.as_reader().read_to_string(&mut body).is_err() {
+        return Err((request, "failed to read request body".to_string()));
+    }
+    match serde_json::from_str::<T>(&body) {
+        Ok(parsed) => Ok((request, parsed)),
+        Err(e) => Err((request, format!("invalid JSON body: {e}"))),
+    }
+}
+
+fn juli3ta_library_error_response(request: Request, err: juli3ta_library::LibraryError) {
+    let status = juli3ta_library::error_status(&err);
+    respond_json(
+        request,
+        status,
+        &serde_json::json!({ "error": err.to_string() }),
+    );
+}
+
+fn handle_juli3ta_library_tracks(request: Request) {
+    match juli3ta_library::list_tracks() {
+        Ok(list) => respond_json(request, 200, &list),
+        Err(e) => juli3ta_library_error_response(request, e),
+    }
+}
+
+fn handle_juli3ta_library_save(request: Request) {
+    let (request, body) = match parse_json_body::<juli3ta_library::SaveTrackRequest>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e }));
+            return;
+        }
+    };
+    match juli3ta_library::save_track(body) {
+        Ok(saved) => respond_json(request, 200, &saved),
+        Err(e) => juli3ta_library_error_response(request, e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Juli3taDeleteTrackRequest {
+    id: String,
+}
+
+fn handle_juli3ta_library_delete(request: Request) {
+    let (request, body) = match parse_json_body::<Juli3taDeleteTrackRequest>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e }));
+            return;
+        }
+    };
+    match juli3ta_library::delete_track(&body.id) {
+        Ok(()) => respond_json(request, 200, &serde_json::json!({ "ok": true })),
+        Err(e) => juli3ta_library_error_response(request, e),
+    }
+}
+
+fn handle_juli3ta_library_audio(request: Request, query: &str) {
+    let Some(id) = query_value(query, "id") else {
+        respond_json(request, 400, &serde_json::json!({ "error": "missing id" }));
+        return;
+    };
+    match juli3ta_library::read_audio(&id) {
+        Ok((bytes, mime)) => {
+            let resp = Response::from_data(bytes)
+                .with_status_code(StatusCode(200))
+                .with_header(header("Content-Type", &mime))
+                .with_header(header("X-Content-Type-Options", "nosniff"))
+                .with_header(header("Accept-Ranges", "bytes"));
+            let _ = request.respond(resp);
+        }
+        Err(e) => juli3ta_library_error_response(request, e),
+    }
+}
+
+fn handle_juli3ta_library_open_folder(request: Request) {
+    match juli3ta_library::open_library_folder() {
+        Ok(path) => respond_json(
+            request,
+            200,
+            &serde_json::json!({ "ok": true, "path": path }),
+        ),
+        Err(e) => juli3ta_library_error_response(request, e),
+    }
+}
+
+fn handle_music_connectors(request: Request) {
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({ "connectors": music_connectors::statuses() }),
+    );
+}
+
+fn handle_music_connector_configure(request: Request) {
+    let (request, body) =
+        match parse_json_body::<music_connectors::ConfigureConnectorRequest>(request) {
+            Ok(v) => v,
+            Err((request, e)) => {
+                respond_json(request, 400, &serde_json::json!({ "error": e }));
+                return;
+            }
+        };
+    match music_connectors::configure(body) {
+        Ok(status) => respond_json(request, 200, &status),
+        Err(e) => connector_error_response(request, e),
+    }
+}
+
+fn handle_music_connector_verify(request: Request) {
+    let (request, body) =
+        match parse_json_body::<music_connectors::ConnectorProviderRequest>(request) {
+            Ok(v) => v,
+            Err((request, e)) => {
+                respond_json(request, 400, &serde_json::json!({ "error": e }));
+                return;
+            }
+        };
+    match music_connectors::verify(&body.provider) {
+        Ok(status) => respond_json(request, 200, &status),
+        Err(e) => connector_error_response(request, e),
+    }
+}
+
+fn handle_music_connector_disconnect(request: Request) {
+    let (request, body) =
+        match parse_json_body::<music_connectors::ConnectorProviderRequest>(request) {
+            Ok(v) => v,
+            Err((request, e)) => {
+                respond_json(request, 400, &serde_json::json!({ "error": e }));
+                return;
+            }
+        };
+    match music_connectors::disconnect(&body.provider) {
+        Ok(status) => respond_json(request, 200, &status),
+        Err(e) => connector_error_response(request, e),
     }
 }
 
@@ -2017,11 +2253,46 @@ fn handle(request: Request, registry: Registry) {
             handle_version(request);
         }
         // ── JULI3TA music search/playback (Nuclear yt-dlp pipeline) ──
+
+        // ── JULI3TA generated-song file library (real host folder) ──
+        (Method::Get, "/api/juli3ta/library/tracks") => {
+            handle_juli3ta_library_tracks(request);
+        }
+        (Method::Post, "/api/juli3ta/library/tracks") => {
+            handle_juli3ta_library_save(request);
+        }
+        (Method::Post, "/api/juli3ta/library/delete") => {
+            handle_juli3ta_library_delete(request);
+        }
+        (Method::Get, "/api/juli3ta/library/audio") => {
+            handle_juli3ta_library_audio(request, &query);
+        }
+        (Method::Post, "/api/juli3ta/library/open-folder") => {
+            handle_juli3ta_library_open_folder(request);
+        }
         (Method::Get, "/api/music/status") => {
             handle_music_status(request);
         }
+        (Method::Get, "/api/music/providers") => {
+            handle_music_providers(request);
+        }
+        (Method::Get, "/api/music/connectors") => {
+            handle_music_connectors(request);
+        }
+        (Method::Post, "/api/music/connectors/configure") => {
+            handle_music_connector_configure(request);
+        }
+        (Method::Post, "/api/music/connectors/verify") => {
+            handle_music_connector_verify(request);
+        }
+        (Method::Post, "/api/music/connectors/disconnect") => {
+            handle_music_connector_disconnect(request);
+        }
         (Method::Get, "/api/music/search") => {
             handle_music_search(request, &query);
+        }
+        (Method::Get, "/api/music/search2") => {
+            handle_music_search2(request, &query);
         }
         (Method::Get, "/api/music/stream") => {
             handle_music_stream(request, &query);

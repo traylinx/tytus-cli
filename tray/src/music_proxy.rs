@@ -22,7 +22,10 @@ pub fn validate_proxy_target(raw: &str) -> Result<reqwest::Url, String> {
     if url.scheme() != "https" {
         return Err("proxy URL must be https".to_string());
     }
-    let host = url.host_str().ok_or_else(|| "proxy URL missing host".to_string())?.to_ascii_lowercase();
+    let host = url
+        .host_str()
+        .ok_or_else(|| "proxy URL missing host".to_string())?
+        .to_ascii_lowercase();
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_or_local_ip(ip) {
             return Err("proxy URL IP target rejected".to_string());
@@ -40,7 +43,9 @@ pub fn validate_proxy_target(raw: &str) -> Result<reqwest::Url, String> {
 
 fn is_private_or_local_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified(),
+        IpAddr::V4(v4) => {
+            v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
+        }
         IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local(),
     }
 }
@@ -82,7 +87,9 @@ pub fn handle_proxy(request: Request, encoded: &str) {
         return respond_text(request, 502, &format!("upstream returned HTTP {status}"));
     }
 
-    let len = upstream.content_length().and_then(|n| usize::try_from(n).ok());
+    let len = upstream
+        .content_length()
+        .and_then(|n| usize::try_from(n).ok());
     let headers = response_headers(upstream.headers());
     let resp = Response::new(StatusCode(status), headers, upstream, len, None);
     let _ = request.respond(resp);
@@ -140,8 +147,12 @@ mod tests {
 
     #[test]
     fn validates_googlevideo_only() {
-        assert!(validate_proxy_target("https://rr4---sn-test.googlevideo.com/videoplayback").is_ok());
-        assert!(validate_proxy_target("http://rr4---sn-test.googlevideo.com/videoplayback").is_err());
+        assert!(
+            validate_proxy_target("https://rr4---sn-test.googlevideo.com/videoplayback").is_ok()
+        );
+        assert!(
+            validate_proxy_target("http://rr4---sn-test.googlevideo.com/videoplayback").is_err()
+        );
         assert!(validate_proxy_target("https://example.com/videoplayback").is_err());
         assert!(validate_proxy_target("https://127.0.0.1/videoplayback").is_err());
     }
