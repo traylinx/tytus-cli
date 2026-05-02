@@ -7,6 +7,22 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-05-02
+
+**TytusOS cutover + session-state hardening.**
+
+### Added
+- Vendored TytusOS web bundle into `tytus-tray` so the tray serves TytusOS directly.
+- Release workflow dist check to fail fast when the embedded TytusOS bundle is missing.
+
+### Changed
+- Tray now opens TytusOS as the primary web shell; legacy Tower is hidden behind `TYTUS_ENABLE_LEGACY_TOWER=1`.
+- Install docs and release packaging now include the tray-served TytusOS path.
+
+### Fixed
+- Stale daemon-socket refresh errors no longer pin TytusOS in `Session expired` after a successful browser/CLI login when the local token is valid and keychain is healthy.
+- TytusOS dist serving uses safe path resolution and SPA fallback hardening.
+
 ## [0.6.1] — 2026-04-30
 
 **App Store + Readiness + Workspace Files — daemon surface for TytusOS.**
