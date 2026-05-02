@@ -920,7 +920,7 @@ fn build_menu(state: &TrayState) -> Menu {
     // submenu. This builder is populated incrementally throughout the
     // logged-in branches below (Connect/Disconnect, Open-in, Health test,
     // Pods & Agents, Shared Folders, AIL connection info) and finally
-    // appended to the top-level menu in one place, after Tower deep-links
+    // appended to the top-level menu in one place, after TytusOS deep-links
     // and before Settings/Help. Empty when not logged in (we skip the
     // append).
     let quick_actions_sub = Submenu::new("Quick actions", true);
@@ -931,31 +931,29 @@ fn build_menu(state: &TrayState) -> Menu {
         let _ = menu.append(&PredefinedMenuItem::separator());
     } else {
         // Phase C top-level: three primary verbs (Chat / Files / Channels)
-        // followed by the full Tower deep-link. Tower's hash routing
-        // arrives in Phase B; rc.2 lands at the page root because
-        // tower.html ignores unknown anchors, which still gets the user
-        // there — Phase B-D collapse the gap.
+        // followed by the full TytusOS deep-link. The tray emits canonical
+        // `/#/...` routes consumed by the TytusOS shell dispatcher.
         let _ = menu.append(&MenuItem::with_id(
-            "open_tower_chat",
+            "open_os_chat",
             "💬  Chat now…",
             true,
             None,
         ));
         let _ = menu.append(&MenuItem::with_id(
-            "open_tower_files",
+            "open_os_files",
             "📁  Files…",
             true,
             None,
         ));
         let _ = menu.append(&MenuItem::with_id(
-            "open_tower_channels",
+            "open_os_channels",
             "📨  Channels…",
             true,
             None,
         ));
         let _ = menu.append(&MenuItem::with_id(
-            "open_tower",
-            "🌐  Open Tytus Tower",
+            "open_os",
+            "🌐  Open TytusOS",
             true,
             None,
         ));
@@ -1956,11 +1954,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 .status();
         }
         "test" => {
-            // Tower's "Run Health Test" button (#hdr-health) streams
-            // tytus test in-page via /api/test. Deep-link the tray menu
-            // straight into that flow so users stop seeing a Terminal
-            // window for what is now a browser-native action.
-            web_server::open_tower_at("#/run/test");
+            // TytusOS streams `tytus test` in-page via /api/test. Deep-link
+            // the tray menu straight into that browser-native action.
+            web_server::open_os_at("#/run/test");
         }
         "view_daemon_log" => {
             open_log_file("/tmp/tytus/daemon.log");
@@ -1969,10 +1965,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             open_log_file("/tmp/tytus/autostart.log");
         }
         "doctor" => {
-            // Tower's Troubleshoot ▸ Run Doctor button (#tr-doctor)
-            // already streams `tytus doctor` in-page via /api/doctor.
+            // TytusOS streams `tytus doctor` in-page via /api/doctor.
             // Deep-link into it.
-            web_server::open_tower_at("#/run/doctor");
+            web_server::open_os_at("#/run/doctor");
         }
         "help_dialog" => {
             // User-facing recovery dialog. Same UI as the post-timeout
@@ -2096,26 +2091,24 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             // that CLI users see. Detached — no Terminal window for this.
             spawn_detached("tytus", &["ui", "--stop", "--pod", &pod_id]);
         }
-        // Agent container restart (no state loss). Tower handles this
-        // via /api/pod/restart and Phase B will stream output in-page;
-        // the JS hash handler also confirms on the user's behalf.
+        // Agent container restart (no state loss). TytusOS handles this
+        // via /api/pod/restart and streams output in-page.
         other if other.starts_with("pod_") && other.ends_with("_restart") => {
             let pod_id = other
                 .trim_start_matches("pod_")
                 .trim_end_matches("_restart");
-            web_server::open_tower_at(&format!("#/pod/{}/restart", pod_id));
+            web_server::open_os_at(&format!("#/pod/{}/restart", pod_id));
         }
-        // Destructive: frees units + wipes pod workspace. Tower confirms
+        // Destructive: frees units + wipes pod workspace. TytusOS confirms
         // before POSTing /api/pod/revoke; tray no longer double-confirms.
         other if other.starts_with("pod_") && other.ends_with("_revoke") => {
             let pod_id = other.trim_start_matches("pod_").trim_end_matches("_revoke");
-            web_server::open_tower_at(&format!("#/pod/{}/revoke", pod_id));
+            web_server::open_os_at(&format!("#/pod/{}/revoke", pod_id));
         }
-        // Channel catalog (informational). Tower's Run Channels Catalog
-        // button (#pod-channels-catalog-btn) renders the listing inline.
+        // Channel catalog (informational). TytusOS renders the listing inline.
         other if other.starts_with("pod_") && other.ends_with("_channels_catalog") => {
             let _ = other; // pod_id ignored — catalog is global
-            web_server::open_tower_at("#/run/channels-catalog");
+            web_server::open_os_at("#/run/channels-catalog");
         }
         // Add a specific channel — opens Terminal with the exact
         // command skeleton so the user only needs to paste their token.
@@ -2130,10 +2123,10 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 if let Some(middle) = rest.strip_suffix("_add") {
                     // middle = "<pod>_channel_<type>"
                     if let Some((pod_id, channel)) = middle.split_once("_channel_") {
-                        // Phase C: tray menu deep-links to Tower's
-                        // token modal. The browser <dialog> collects
+                        // Tray menu deep-links to TytusOS token modal.
+                        // The browser <dialog> collects
                         // the token in-page; no Terminal `read -rs`.
-                        web_server::open_tower_at(&format!(
+                        web_server::open_os_at(&format!(
                             "#/pod/{}/channels?action=add&type={}",
                             pod_id, channel,
                         ));
@@ -2142,7 +2135,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             }
         }
         // Remove a configured channel — clears keychain + manifest +
-        // redeploys agent. Tower confirms before POSTing
+        // redeploys agent. TytusOS confirms before POSTing
         // /api/channels/remove and renders the result inline.
         other
             if other.starts_with("pod_")
@@ -2152,7 +2145,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             if let Some(rest) = other.strip_prefix("pod_") {
                 if let Some(middle) = rest.strip_suffix("_remove") {
                     if let Some((pod_id, channel)) = middle.split_once("_channel_") {
-                        web_server::open_tower_at(&format!(
+                        web_server::open_os_at(&format!(
                             "#/pod/{}/channels?action=remove&type={}",
                             pod_id, channel,
                         ));
@@ -2161,33 +2154,30 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             }
         }
         // Agent uninstall = stop container, keep pod slot (AIL still
-        // works). Tower confirms before POSTing /api/pod/uninstall.
+        // works). TytusOS confirms before POSTing /api/pod/uninstall.
         other if other.starts_with("pod_") && other.ends_with("_uninstall") => {
             let pod_id = other
                 .trim_start_matches("pod_")
                 .trim_end_matches("_uninstall");
-            web_server::open_tower_at(&format!("#/pod/{}/uninstall", pod_id));
+            web_server::open_os_at(&format!("#/pod/{}/uninstall", pod_id));
         }
         // Primary install entry point — opens the localhost wizard in
         // the user's default browser (SPRINT §6 E). The per-agent
         // terminal shortcuts below are legacy + fallback when the
         // localhost server isn't bound (rare).
-        "install_agent" | "open_tower" => {
-            web_server::open_tower();
+        "install_agent" | "open_os" => {
+            web_server::open_os();
         }
         // Phase C tray simplification — top-level Chat/Files/Channels
-        // shortcuts deep-link into Tower's primary tabs. Phase B's tab
-        // routing in tower.html consumes the hash; until then Tower's
-        // hashchange handler ignores unknown anchors and the page just
-        // loads at the current section. No-op fallback by design.
-        "open_tower_chat" => {
-            web_server::open_tower_at("#chat");
+        // shortcuts deep-link into TytusOS primary apps via canonical `/#/...` routes.
+        "open_os_chat" => {
+            web_server::open_os_at("#/chat");
         }
-        "open_tower_files" => {
-            web_server::open_tower_at("#files");
+        "open_os_files" => {
+            web_server::open_os_at("#/files");
         }
-        "open_tower_channels" => {
-            web_server::open_tower_at("#channels");
+        "open_os_channels" => {
+            web_server::open_os_at("#/channels");
         }
         // Install a specific agent via the terminal-picker fallback.
         "install_agent_nemoclaw" => {

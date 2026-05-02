@@ -28,6 +28,8 @@
 # needs wintun.dll to function — we're bundling it in a future release.
 # Until then, `tytus` works fine for login, chat, env, MCP, and link
 # operations; `tytus connect` will fail with a clear error message.
+# TytusOS browser UI is not full-parity on Windows yet; use CLI mode until
+# the Windows tray/browser packaging sprint lands.
 # ============================================================
 
 $ErrorActionPreference = 'Stop'
@@ -236,6 +238,10 @@ function Print-NextSteps {
     Write-Host "       tytus login" -ForegroundColor Cyan
     Write-Host "       tytus connect" -ForegroundColor Cyan
     Write-Host "       tytus chat" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  3. TytusOS desktop/browser UI:" -ForegroundColor White
+    Write-Warn2 "Windows TytusOS UI packaging is not full-parity yet."
+    Write-Warn2 "Use CLI mode today; tray/browser UI support is tracked in the TytusOS cutover sprint."
     Write-Host ""
     Write-Warn2 "Windows tunnel support is experimental."
     Write-Warn2 "'tytus connect' currently needs wintun.dll — this is being bundled in a future release."

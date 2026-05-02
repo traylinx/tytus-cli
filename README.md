@@ -21,9 +21,9 @@ and send your first chat. About 60 seconds end to end.
 - **A private connection.** Prompts and responses go straight from your
   laptop to your pod over WireGuard. Traylinx Cloud never sees the contents
   of your conversations.
-- **A menu-bar app** (macOS) and **a local dashboard** (Tytus Tower) for
-  managing your AI without ever opening a terminal — `tytus tray install`
-  enables them after `tytus setup`.
+- **A menu-bar app** (macOS) and **TytusOS**, the local web shell for
+  managing pods, files, channels, settings, and agent install flows without
+  opening a terminal — `tytus tray install` enables them after `tytus setup`.
 
 ```bash
 eval "$(tytus env --export)"
@@ -89,13 +89,24 @@ curl -fsSL https://get.traylinx.com/install.sh | bash
 
 What the installer does:
 
-1. Detects your OS and architecture (macOS / Linux, x86_64 / aarch64)
+1. Detects your OS and architecture (macOS / Linux / Windows, x86_64 / aarch64)
 2. Ensures a Rust toolchain is present — offers to install rustup if missing
 3. Builds `tytus` and `tytus-mcp` from the `main` branch via
    `cargo install --git` (~3 minutes first build)
 4. Sets up a tightly-scoped passwordless sudoers entry so `tytus connect`
    never prompts you for a password (opt-out with `TYTUS_SKIP_SUDOERS=1`)
 5. Verifies and prints next steps
+
+### Desktop UI status by platform
+
+| Platform | Fresh install result |
+|---|---|
+| macOS | `tytus tray install` installs `/Applications/Tytus.app`; the tray opens TytusOS at `http://127.0.0.1:<tray-port>/`. |
+| Linux | CLI, auth, daemon, MCP, project linking, and AI gateway workflows are supported. Desktop tray/browser packaging is tracked separately. |
+| Windows | CLI, auth, MCP, and project linking are supported. Tunnel + tray/browser UI parity depends on the Windows networking/packaging sprint. |
+
+Legacy Tytus Tower remains embedded only as a hidden rollback path until the
+2026-05-13+ cutover gate. Normal tray/menu/dashboard actions open TytusOS.
 
 Override the install location with `TYTUS_INSTALL_DIR=/opt/tytus/bin` if you
 want it somewhere other than `~/.cargo/bin`.
@@ -277,18 +288,20 @@ Start/Stop/Restart Daemon, Auto-start toggles, Documentation, About, Quit.
 
 Most non-interactive actions (`Run Health Test`, `Doctor`, per-pod
 `Restart` / `Uninstall` / `Revoke` / `Stop forwarder`, `Channels catalog`,
-`Add channel`) now run **in the Tower web UI** instead of opening a
-Terminal window. The tray menu deep-links the browser at
-`http://127.0.0.1:<port>/tower#/<action>`; output streams in-page via
-SSE. Sudo / browser-auth / interactive-wizard commands (`Connect`,
-`Sign In`, `Configure Agent`, `tytus tray install`, editor launches)
-still spawn a Terminal because they need a TTY.
+`Add channel`) now run **in TytusOS** instead of opening a host Terminal
+window. The tray menu deep-links the browser at
+`http://127.0.0.1:<port>/#/...`; output streams in-page via SSE. Sudo /
+browser-auth / interactive-wizard commands (`Connect`, `Sign In`,
+`tytus tray install`, editor launches) still spawn a native Terminal when a
+real TTY is required. In-app TytusOS terminal sessions are used for shell
+workflows that can run through the tray backend PTY.
 
-Each pod has its own subpage at `#/pod/<NN>` with three tabs:
+Each pod has its own subpage at `#/pod/<NN>` with readiness and connection
+details:
 **Overview** (URL strip + per-pod actions), **Output** (live log of
 the latest streamed action — Restart / Stop forwarder / Uninstall /
 Revoke), and **Channels** (add / remove the messengers each pod can
-talk through). A purple dot appears next to a pod's row on the Tower
+talk through). A purple dot appears next to a pod's row on the TytusOS
 overview while a streamed action is running on it. Adding a channel
 opens a native `<dialog>` in the page for the bot token — no more
 Terminal `read -rs` prompt.
