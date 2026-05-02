@@ -116,11 +116,18 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
         }
     };
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let interface_name = tun_device
         .as_ref()
         .tun_name()
         .map_err(|e| AtomekError::Tunnel(format!("Failed to get TUN name: {}", e)))?
         .to_string();
+
+    // The Windows tun backend does not expose `tun_name()` on AsyncDevice.
+    // Route setup is platform-gated to macOS/Linux below, so the name is only
+    // used for state/reporting until full Windows tunnel support lands.
+    #[cfg(target_os = "windows")]
+    let interface_name = "Tytus".to_string();
 
     tracing::info!(interface = %interface_name, "TUN device created");
 

@@ -7,6 +7,12 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.6] — 2026-05-02
+
+### Fixed
+
+- Fixed Windows release build by avoiding Unix-only TUN interface-name lookup on `x86_64-pc-windows-msvc`.
+
 ## [0.6.5] — 2026-05-02
 
 ### Release packaging
