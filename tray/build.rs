@@ -27,9 +27,9 @@ fn main() {
     for (rel, abs) in files {
         writeln!(
             out,
-            "    ({:?}, include_bytes!(r#\"{}\"#)),",
+            "    ({:?}, include_bytes!({:?})),",
             format!("/{rel}"),
-            abs.display()
+            abs.to_string_lossy()
         )
         .unwrap();
     }
@@ -43,6 +43,9 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) {
     for entry in entries {
         let entry = entry.expect("read_dir entry");
         let path = entry.path();
+        if path.is_symlink() {
+            continue;
+        }
         if path.is_dir() {
             collect_files(root, &path, files);
             continue;

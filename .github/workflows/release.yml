@@ -59,6 +59,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Check vendored TytusOS bundle
+        run: scripts/check-tytus-os-dist.sh
+        shell: bash
+
       - name: Build CLI
         run: |
           cargo build --release -p atomek-cli --target ${{ matrix.target }}

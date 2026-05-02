@@ -8,6 +8,11 @@ SERVICES_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OS_DIST="${SERVICES_ROOT}/tytus-os/app/dist"
 TRAY_OS="${SERVICES_ROOT}/tytus-cli/tray/web/os"
 
+if [ ! -d "${SERVICES_ROOT}/tytus-os" ]; then
+  echo "TytusOS source tree not present — skipping monorepo dist freshness check"
+  exit 0
+fi
+
 if [ ! -f "${OS_DIST}/index.html" ]; then
   echo "missing ${OS_DIST}/index.html — run npm run build in services/tytus-os/app" >&2
   exit 1

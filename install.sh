@@ -392,7 +392,7 @@ print_next_steps() {
     printf "  ${GREEN}4.${RESET} Open the desktop UI:\n"
     if [ "$(uname -s)" = "Darwin" ]; then
         printf "       ${BOLD}Tytus.app${RESET}                 # menu bar app; opens TytusOS in your browser\n"
-        printf "       ${BOLD}http://127.0.0.1:\$(cat /tmp/tytus/tray-web.port)/${RESET}\n"
+        printf "       after ${BOLD}tytus tray install${RESET}: ${BOLD}http://127.0.0.1:\$(cat /tmp/tytus/tray-web.port)/${RESET}\n"
     else
         printf "       TytusOS browser UI is packaged with the tray app today.\n"
         printf "       Linux CLI works now; Linux desktop-tray/browser packaging is tracked separately.\n"

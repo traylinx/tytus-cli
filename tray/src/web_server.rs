@@ -1566,7 +1566,7 @@ pub fn start() -> Option<u16> {
     let port = server.server_addr().to_ip()?.port();
 
     // Persist the port so subsequent "Install Agent" clicks (which call
-    // `open_tower`) can read it without a lookup.
+    // `open_os`) can read it without a lookup.
     if let Some(path) = port_file() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1592,17 +1592,6 @@ pub fn start() -> Option<u16> {
 
 pub fn open_os() {
     open_os_at("");
-}
-
-/// Back-compat wrapper for old tray call sites. Opens TytusOS by default;
-/// only opens legacy Tower when `TYTUS_ENABLE_LEGACY_TOWER=1` is explicitly set.
-#[allow(dead_code)]
-pub fn open_tower() {
-    if legacy_tower_enabled() {
-        open_legacy_tower_at("");
-    } else {
-        open_os();
-    }
 }
 
 /// Open TytusOS at a specific URL fragment so the tray menu can deep-link
@@ -1641,42 +1630,6 @@ pub fn open_os_at(fragment: &str) {
     open_url(&url);
 }
 
-/// Back-compat wrapper for old tray call sites. Emits canonical TytusOS routes
-/// unless the hidden Tower rollback env is explicitly enabled.
-#[allow(dead_code)]
-pub fn open_tower_at(fragment: &str) {
-    if legacy_tower_enabled() {
-        open_legacy_tower_at(fragment);
-    } else {
-        open_os_at(canonical_os_fragment(fragment).as_str());
-    }
-}
-
-#[allow(dead_code)]
-fn open_legacy_tower_at(fragment: &str) {
-    let port = match current_port() {
-        Some(p) => p,
-        None => {
-            eprintln!("[tray-web] no port recorded — is the server running?");
-            return;
-        }
-    };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let url = if fragment.is_empty() {
-        format!("http://127.0.0.1:{}/tower", port)
-    } else {
-        let sep = if fragment.contains('?') { '&' } else { '?' };
-        format!(
-            "http://127.0.0.1:{}/tower{}{}n={:x}",
-            port, fragment, sep, nonce
-        )
-    };
-    open_url(&url);
-}
-
 fn open_url(url: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -1689,17 +1642,6 @@ fn open_url(url: &str) {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = url;
-    }
-}
-
-#[allow(dead_code)]
-fn canonical_os_fragment(fragment: &str) -> String {
-    match fragment {
-        "" => String::new(),
-        "#chat" => "#/chat".to_string(),
-        "#files" => "#/files".to_string(),
-        "#channels" => "#/channels".to_string(),
-        other => other.to_string(),
     }
 }
 
@@ -1936,6 +1878,8 @@ fn is_static_path(path: &str) -> bool {
         || path.starts_with("/wallpapers/")
         || path == "/favicon.svg"
         || path == "/site.webmanifest"
+        // TytusOS is hash-routed. Extension-like paths are static assets;
+        // unknown assets should 404 instead of falling back to index.html.
         || path.rsplit('/').next().unwrap_or("").contains('.')
 }
 
@@ -2024,10 +1968,10 @@ fn handle(request: Request, registry: Registry) {
         (Method::Get, "/install") => {
             redirect(request, "/");
         }
-        (Method::Get, "/assets/tower.css") => {
+        (Method::Get, "/assets/tower.css") if legacy_tower_enabled() => {
             serve_bytes(request, TOWER_CSS, "text/css; charset=utf-8");
         }
-        (Method::Get, "/assets/tower.js") => {
+        (Method::Get, "/assets/tower.js") if legacy_tower_enabled() => {
             serve_bytes(request, TOWER_JS, "application/javascript; charset=utf-8");
         }
         (Method::Get, "/assets/icons/openclaw.svg") => {
@@ -2305,6 +2249,9 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Post, "/api/workspace/open") => {
             handle_workspace_open(request);
+        }
+        _ if path.starts_with("/api/") => {
+            respond_json(request, 404, &serde_json::json!({ "error": "not found" }));
         }
         _ => {
             if matches!(method, Method::Get) {
@@ -7503,18 +7450,6 @@ mod tests {
         assert_eq!(
             content_type_for_path("/site.webmanifest"),
             "application/manifest+json"
-        );
-    }
-
-    #[test]
-    fn canonical_os_fragment_normalizes_legacy_bare_tabs() {
-        assert_eq!(canonical_os_fragment(""), "");
-        assert_eq!(canonical_os_fragment("#chat"), "#/chat");
-        assert_eq!(canonical_os_fragment("#files"), "#/files");
-        assert_eq!(canonical_os_fragment("#channels"), "#/channels");
-        assert_eq!(
-            canonical_os_fragment("#/pod/01/restart"),
-            "#/pod/01/restart"
         );
     }
 
