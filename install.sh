@@ -389,7 +389,16 @@ print_next_steps() {
     printf "       ${BOLD}tytus bootstrap-prompt${RESET}   # short paste prompt for any AI tool\n"
     printf "       ${BOLD}tytus link .${RESET}              # drop integration files into a project\n"
     printf "\n"
-    printf "  ${GREEN}4.${RESET} Full LLM-facing reference (for AI agents):\n"
+    printf "  ${GREEN}4.${RESET} Open the desktop UI:\n"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        printf "       ${BOLD}Tytus.app${RESET}                 # menu bar app; opens TytusOS in your browser\n"
+        printf "       ${BOLD}http://127.0.0.1:\$(cat /tmp/tytus/tray-web.port)/${RESET}\n"
+    else
+        printf "       TytusOS browser UI is packaged with the tray app today.\n"
+        printf "       Linux CLI works now; Linux desktop-tray/browser packaging is tracked separately.\n"
+    fi
+    printf "\n"
+    printf "  ${GREEN}5.${RESET} Full LLM-facing reference (for AI agents):\n"
     printf "       ${BOLD}tytus llm-docs${RESET}\n"
     printf "\n"
     printf "${DIM}Docs: %s${RESET}\n" "${REPO_URL}"

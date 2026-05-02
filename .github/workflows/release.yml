@@ -63,12 +63,19 @@ jobs:
         run: |
           cargo build --release -p atomek-cli --target ${{ matrix.target }}
           cargo build --release -p tytus-mcp --target ${{ matrix.target }}
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            cargo build --release -p tytus-tray --target ${{ matrix.target }}
+          fi
         shell: bash
 
       - name: Package (tar.gz)
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.name }}.tar.gz tytus tytus-mcp
+          files="tytus tytus-mcp"
+          if [[ -f tytus-tray ]]; then
+            files="${files} tytus-tray"
+          fi
+          tar czf ../../../${{ matrix.name }}.tar.gz ${files}
           cd ../../..
         shell: bash
 

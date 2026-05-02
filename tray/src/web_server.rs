@@ -1,10 +1,10 @@
-//! Local HTTP server for the Tytus Tower control page.
+//! Local HTTP server for the TytusOS control surface.
 //!
-//! Binds to `127.0.0.1:<random>` at tray startup, serves embedded HTML/CSS/JS,
+//! Binds to `127.0.0.1:<random>` at tray startup, serves embedded TytusOS assets,
 //! and exposes a tiny local API so the static JS can (a) list the agent
 //! catalog, (b) kick off a `tytus agent install` subprocess, and (c) stream
 //! its stdout back via server-sent events. Legacy `/install` paths 302 to
-//! `/tower` for anyone with a bookmark or old external link.
+//! `/`; `/tower` is hidden rollback only behind `TYTUS_ENABLE_LEGACY_TOWER=1`.
 //!
 //! Spec: SPRINT-AIL-DEFAULT-POD-AND-AGENT-INSTALL.md §6 E1-E5.
 //!
@@ -15,7 +15,7 @@
 //!   concurrent install job at a time — the UI only lets the user click
 //!   one card. Parallel installs would overspend units anyway.
 //! - Port bound at startup to `127.0.0.1:0` (kernel picks). Written to
-//!   `<tmp>/tytus/tray-web.port` so `open_tower()` can read it.
+//!   `<tmp>/tytus/tray-web.port` so `open_os()` can read it.
 //! - Lifecycle: server thread owns the `tiny_http::Server` and parks on
 //!   `recv()`. On tray quit we drop the `Arc<Server>` and the kernel
 //!   tears down the listener.
@@ -54,12 +54,17 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{music_proxy, music_ytdlp, music_ytdlp_setup};
 
+mod os_assets {
+    include!(concat!(env!("OUT_DIR"), "/os_assets.rs"));
+}
+
 // ── Embedded static assets ────────────────────────────────────
 // `include_bytes!` paths are relative to THIS source file, so the web/
 // directory lives next to src/.
 const TOWER_HTML: &[u8] = include_bytes!("../web/tower.html");
 const TOWER_CSS: &[u8] = include_bytes!("../web/assets/tower.css");
 const TOWER_JS: &[u8] = include_bytes!("../web/assets/tower.js");
+const LEGACY_TOWER_ENV: &str = "TYTUS_ENABLE_LEGACY_TOWER";
 
 // ── Icons (lobehub @1.87.0) ───────────────────────────────────
 // Baked into the binary so the CSP can stay 'self'-only and the
@@ -93,7 +98,7 @@ struct Job {
     finished: bool,
     /// `None` for the install flow (one global install at a time);
     /// `Some(pod_id)` for per-pod actions so `Registry::active_for_pod`
-    /// can enforce one-running-action-per-pod and the Tower UI can
+    /// can enforce one-running-action-per-pod and the TytusOS UI can
     /// badge pod rows that have a live job.
     pod_id: Option<String>,
     /// Live child PID for cancellation. Set by the spawn thread once
@@ -188,7 +193,7 @@ impl Registry {
     }
 
     /// Compact view of currently-running per-pod jobs, keyed by pod_id
-    /// → count. Surfaced in StateSnapshot so the Tower overview can
+    /// → count. Surfaced in StateSnapshot so the TytusOS overview can
     /// dot pod rows that have a live action streaming.
     fn active_pods(&self) -> HashMap<String, usize> {
         let mut out: HashMap<String, usize> = HashMap::new();
@@ -1543,7 +1548,7 @@ fn handle_terminal_stop(request: Request, query: &str) {
 /// Spawn the wizard server on a random localhost port and return the port.
 ///
 /// Returns `None` if bind failed (very rare — only when 127.0.0.1 itself
-/// isn't available). Caller stores the returned port for `open_tower()`.
+/// isn't available). Caller stores the returned port for `open_os()`.
 pub fn start() -> Option<u16> {
     // Capture boot timestamp before we bind, so /api/version reflects
     // when the *daemon* came up — not when it first served a version
@@ -1585,11 +1590,22 @@ pub fn start() -> Option<u16> {
     Some(port)
 }
 
-pub fn open_tower() {
-    open_tower_at("");
+pub fn open_os() {
+    open_os_at("");
 }
 
-/// Open Tower at a specific URL fragment so the tray menu can deep-link
+/// Back-compat wrapper for old tray call sites. Opens TytusOS by default;
+/// only opens legacy Tower when `TYTUS_ENABLE_LEGACY_TOWER=1` is explicitly set.
+#[allow(dead_code)]
+pub fn open_tower() {
+    if legacy_tower_enabled() {
+        open_legacy_tower_at("");
+    } else {
+        open_os();
+    }
+}
+
+/// Open TytusOS at a specific URL fragment so the tray menu can deep-link
 /// directly into an in-page action (e.g. `#/run/doctor`, `#/pod/02/restart`).
 ///
 /// `fragment` should start with `#` if non-empty. A nonce query param is
@@ -1604,7 +1620,40 @@ pub fn open_tower() {
 /// so a fragment with a stray `?` (e.g. `"#/path?weird"`) would still parse
 /// here but produce a URL the browser may interpret unexpectedly. None of
 /// the current call sites do this; this is a future-maintainer warning.
+pub fn open_os_at(fragment: &str) {
+    let port = match current_port() {
+        Some(p) => p,
+        None => {
+            eprintln!("[tray-web] no port recorded — is the server running?");
+            return;
+        }
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let url = if fragment.is_empty() {
+        format!("http://127.0.0.1:{}/", port)
+    } else {
+        let sep = if fragment.contains('?') { '&' } else { '?' };
+        format!("http://127.0.0.1:{}/{}{}n={:x}", port, fragment, sep, nonce)
+    };
+    open_url(&url);
+}
+
+/// Back-compat wrapper for old tray call sites. Emits canonical TytusOS routes
+/// unless the hidden Tower rollback env is explicitly enabled.
+#[allow(dead_code)]
 pub fn open_tower_at(fragment: &str) {
+    if legacy_tower_enabled() {
+        open_legacy_tower_at(fragment);
+    } else {
+        open_os_at(canonical_os_fragment(fragment).as_str());
+    }
+}
+
+#[allow(dead_code)]
+fn open_legacy_tower_at(fragment: &str) {
     let port = match current_port() {
         Some(p) => p,
         None => {
@@ -1625,6 +1674,10 @@ pub fn open_tower_at(fragment: &str) {
             port, fragment, sep, nonce
         )
     };
+    open_url(&url);
+}
+
+fn open_url(url: &str) {
     #[cfg(target_os = "macos")]
     {
         let _ = Command::new("open").arg(&url).spawn();
@@ -1637,6 +1690,23 @@ pub fn open_tower_at(fragment: &str) {
     {
         let _ = url;
     }
+}
+
+#[allow(dead_code)]
+fn canonical_os_fragment(fragment: &str) -> String {
+    match fragment {
+        "" => String::new(),
+        "#chat" => "#/chat".to_string(),
+        "#files" => "#/files".to_string(),
+        "#channels" => "#/channels".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn legacy_tower_enabled() -> bool {
+    std::env::var(LEGACY_TOWER_ENV)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 fn port_file() -> Option<PathBuf> {
@@ -1805,6 +1875,103 @@ fn deny_cross_origin_post(request: Request) {
     );
 }
 
+fn redirect(request: Request, location: &str) {
+    let resp = Response::from_string("")
+        .with_status_code(StatusCode(302))
+        .with_header(header("Location", location));
+    let _ = request.respond(resp);
+}
+
+fn serve_tower_or_redirect(request: Request) {
+    if legacy_tower_enabled() {
+        serve_bytes(request, TOWER_HTML, "text/html; charset=utf-8");
+    } else {
+        redirect(request, "/");
+    }
+}
+
+fn os_asset(path: &str) -> Option<&'static [u8]> {
+    let normalized = if path.is_empty() || path == "/" {
+        "/index.html"
+    } else {
+        path
+    };
+    if normalized.contains("..") || normalized.contains('\\') {
+        return None;
+    }
+    os_assets::OS_ASSETS
+        .iter()
+        .find(|(asset_path, _)| *asset_path == normalized)
+        .map(|(_, bytes)| *bytes)
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    if path.is_empty() || path == "/" {
+        return "text/html; charset=utf-8";
+    }
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "wasm" => "application/wasm",
+        "json" | "webmanifest" => "application/manifest+json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "map" => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
+fn is_static_path(path: &str) -> bool {
+    path.starts_with("/assets/")
+        || path.starts_with("/brand/")
+        || path.starts_with("/agents/")
+        || path.starts_with("/favicons/")
+        || path.starts_with("/wallpapers/")
+        || path == "/favicon.svg"
+        || path == "/site.webmanifest"
+        || path.rsplit('/').next().unwrap_or("").contains('.')
+}
+
+fn accepts_html(request: &Request) -> bool {
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Accept"))
+        .map(|h| h.value.as_str().contains("text/html"))
+        .unwrap_or(true)
+}
+
+fn serve_os_route(request: Request, path: &str) {
+    if path.starts_with("/api/") {
+        respond_json(request, 404, &serde_json::json!({ "error": "not found" }));
+        return;
+    }
+    if let Some(bytes) = os_asset(path) {
+        serve_bytes(request, bytes, content_type_for_path(path));
+        return;
+    }
+    if is_static_path(path) {
+        let resp = Response::from_string("not found").with_status_code(StatusCode(404));
+        let _ = request.respond(resp);
+        return;
+    }
+    if accepts_html(&request) {
+        if let Some(bytes) = os_asset("/index.html") {
+            serve_bytes(request, bytes, "text/html; charset=utf-8");
+            return;
+        }
+    }
+    let resp = Response::from_string("not found").with_status_code(StatusCode(404));
+    let _ = request.respond(resp);
+}
+
 fn handle(request: Request, registry: Registry) {
     let method = request.method().clone();
     let url = request.url().to_string();
@@ -1838,19 +2005,24 @@ fn handle(request: Request, registry: Registry) {
         }
     }
 
+    if matches!(method, Method::Get) && path.starts_with("/tower/") {
+        serve_tower_or_redirect(request);
+        return;
+    }
+
     match (&method, path.as_str()) {
-        (Method::Get, "/tower") | (Method::Get, "/") => {
-            serve_bytes(request, TOWER_HTML, "text/html; charset=utf-8");
+        (Method::Get, "/") => {
+            serve_os_route(request, "/");
+        }
+        (Method::Get, "/tower") => {
+            serve_tower_or_redirect(request);
         }
         // Back-compat: external bookmarks and the pre-rename `open_tower`
         // URL both aimed at `/install`. Redirect instead of duplicating
         // the serve path — keeps the canonical URL visible in the address
         // bar after the redirect resolves.
         (Method::Get, "/install") => {
-            let resp = Response::from_string("")
-                .with_status_code(StatusCode(302))
-                .with_header(header("Location", "/tower"));
-            let _ = request.respond(resp);
+            redirect(request, "/");
         }
         (Method::Get, "/assets/tower.css") => {
             serve_bytes(request, TOWER_CSS, "text/css; charset=utf-8");
@@ -1968,7 +2140,7 @@ fn handle(request: Request, registry: Registry) {
                 .to_string();
             handle_pod_run_streamed(request, &registry, pod);
         }
-        // ── Tower control-surface endpoints (Wave 1) ─────────────────
+        // ── TytusOS control-surface endpoints (Wave 1) ─────────────────
         // Header actions + Settings block moved from tray submenus into
         // the page. All run as subprocesses of the `tytus` binary; the
         // tray's existing handlers keep working in parallel.
@@ -2005,7 +2177,7 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/logout") => {
             handle_logout(request);
         }
-        // ── Tower Wave 2: Troubleshoot surface ───────────────────────
+        // ── TytusOS Wave 2: Troubleshoot surface ───────────────────────
         (Method::Post, "/api/doctor") => {
             handle_doctor(request, &registry);
         }
@@ -2024,14 +2196,14 @@ fn handle(request: Request, registry: Registry) {
         (Method::Get, "/api/logs") => {
             handle_log_tail(request, &query);
         }
-        // ── Tower Wave 3b: launch in editor ──────────────────────────
+        // ── TytusOS Wave 3b: launch in editor ──────────────────────────
         (Method::Get, "/api/launchers") => {
             handle_launchers_list(request);
         }
         (Method::Post, "/api/launch") => {
             handle_launch(request, &query);
         }
-        // ── Tower Wave 3c: per-pod channels ──────────────────────────
+        // ── TytusOS Wave 3c: per-pod channels ──────────────────────────
         (Method::Get, "/api/channels") => {
             handle_channels_list(request, &query);
         }
@@ -2044,7 +2216,7 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/channels/catalog") => {
             handle_channels_catalog(request);
         }
-        // ── Tower Wave 4: sync gaps ──────────────────────────────────
+        // ── TytusOS Wave 4: sync gaps ──────────────────────────────────
         (Method::Post, "/api/pod/stop-forwarder") => {
             handle_pod_stop_forwarder(request, &query);
         }
@@ -2066,7 +2238,7 @@ fn handle(request: Request, registry: Registry) {
         (Method::Delete, "/api/terminal/session") => {
             handle_terminal_stop(request, &query);
         }
-        // ── Tower Wave 5 (v0.5.4): garagetytus shared-folders parity ──
+        // ── TytusOS Wave 5 (v0.5.4): garagetytus shared-folders parity ──
         (Method::Get, "/api/garagetytus/status") => {
             handle_garagetytus_status(request);
         }
@@ -2135,8 +2307,12 @@ fn handle(request: Request, registry: Registry) {
             handle_workspace_open(request);
         }
         _ => {
-            let resp = Response::from_string("not found").with_status_code(StatusCode(404));
-            let _ = request.respond(resp);
+            if matches!(method, Method::Get) {
+                serve_os_route(request, &path);
+            } else {
+                let resp = Response::from_string("not found").with_status_code(StatusCode(404));
+                let _ = request.respond(resp);
+            }
         }
     }
 
@@ -2156,7 +2332,7 @@ fn serve_bytes(request: Request, body: &[u8], content_type: &str) {
         // same with the CSS and the JSON endpoints.
         .with_header(header(
             "Content-Security-Policy",
-            "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self';",
+            "default-src 'self'; script-src 'self'; style-src 'self'; worker-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self';",
         ))
         // This wizard is local-only by design. Block embedding in any
         // frame and discourage MIME-sniffing.
@@ -2809,7 +2985,7 @@ struct StateSnapshot {
     connected: bool,
     logged_in: bool,
     /// True when the WG tunnel is up and 10.42.42.1:18080 is reachable.
-    /// Used by the Tower page header to choose between "Disconnect" and
+    /// Used by the TytusOS page header to choose between "Disconnect" and
     /// "Connect" actions. Cheap TCP probe — 500ms cap.
     tunnel_active: bool,
     tier: String,
@@ -3799,7 +3975,7 @@ fn spawn_pod_action(job: Arc<Mutex<Job>>, argv: Vec<String>) {
     });
 }
 
-// ── Tower Wave 5: Shared Folders parity (v0.5.4) ────────────
+// ── TytusOS Wave 5: Shared Folders parity (v0.5.4) ────────────
 //
 // Mirrors the tray's Shared Folders submenu (introduced in v0.5.2 +
 // v0.5.3) on the local web UI. Read-only operations (list / status /
@@ -6071,7 +6247,7 @@ fn handle_pod_uninstall(request: Request, query: &str) {
     }
 }
 
-// ── Tower control-surface handlers (Wave 1) ───────────────────
+// ── TytusOS control-surface handlers (Wave 1) ───────────────────
 
 fn handle_disconnect(request: Request) {
     // Detached subprocess — disconnect is fast (<1s, no sudo) because it
@@ -6620,7 +6796,7 @@ fn autostart_tray_installed() -> bool {
     false
 }
 
-// ── Tower Wave 2: Troubleshoot handlers ────────────────────────
+// ── TytusOS Wave 2: Troubleshoot handlers ────────────────────────
 
 fn handle_doctor(request: Request, registry: &Registry) {
     // Streamed: `tytus doctor` runs DNS, auth, tunnel, pod, gateway,
@@ -6841,7 +7017,7 @@ fn handle_log_tail(request: Request, query: &str) {
     );
 }
 
-// ── Tower Wave 3b: launch in editor ────────────────────────────
+// ── TytusOS Wave 3b: launch in editor ────────────────────────────
 
 fn handle_launchers_list(request: Request) {
     // Mirror the tray's "Open in ▸" detection so the page shows the
@@ -6971,7 +7147,7 @@ fn handle_launch(request: Request, query: &str) {
     );
 }
 
-// ── Tower Wave 3c: per-pod channels ────────────────────────────
+// ── TytusOS Wave 3c: per-pod channels ────────────────────────────
 
 /// `^[a-z][a-z0-9_-]{1,30}$` — matches known channel names (telegram,
 /// discord, slack, line) plus leaves room for future additions. Used
@@ -7175,7 +7351,7 @@ fn handle_channels_catalog(request: Request) {
     run_tytus_inline(request, &["channels", "catalog"]);
 }
 
-// ── Tower Wave 4: sync gaps ────────────────────────────────────
+// ── TytusOS Wave 4: sync gaps ────────────────────────────────────
 
 fn handle_pod_stop_forwarder(request: Request, query: &str) {
     // Mirrors the tray's `pod_NN_stop_forwarder` — runs `tytus ui --stop
@@ -7304,6 +7480,42 @@ mod tests {
             );
         }
         assert!(std::env::var_os("TYTUS_STATE_PATH").is_none());
+    }
+
+    #[test]
+    fn tytusos_assets_are_vendored() {
+        assert!(os_asset("/index.html").is_some());
+        assert!(os_asset("/").is_some());
+        assert!(os_asset("/assets/does-not-exist.js").is_none());
+    }
+
+    #[test]
+    fn tytusos_content_types_cover_spa_assets() {
+        assert_eq!(content_type_for_path("/"), "text/html; charset=utf-8");
+        assert_eq!(
+            content_type_for_path("/assets/index.js"),
+            "application/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for_path("/assets/sqlite3.wasm"),
+            "application/wasm"
+        );
+        assert_eq!(
+            content_type_for_path("/site.webmanifest"),
+            "application/manifest+json"
+        );
+    }
+
+    #[test]
+    fn canonical_os_fragment_normalizes_legacy_bare_tabs() {
+        assert_eq!(canonical_os_fragment(""), "");
+        assert_eq!(canonical_os_fragment("#chat"), "#/chat");
+        assert_eq!(canonical_os_fragment("#files"), "#/files");
+        assert_eq!(canonical_os_fragment("#channels"), "#/channels");
+        assert_eq!(
+            canonical_os_fragment("#/pod/01/restart"),
+            "#/pod/01/restart"
+        );
     }
 
     #[test]

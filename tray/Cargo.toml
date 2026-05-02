@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Tytus system tray — menu bar icon for managing your private AI pod"
+build = "build.rs"
 
 [[bin]]
 name = "tytus-tray"
