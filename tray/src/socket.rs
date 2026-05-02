@@ -234,6 +234,18 @@ pub fn poll_daemon_status() -> super::TrayState {
         }
     }
 
+    // A successful browser/CLI login writes a fresh access token to state.json
+    // immediately, but the long-running daemon can keep reporting its previous
+    // refresh failure until its next auth tick. Do not let that stale socket
+    // field pin TytusOS in "Session expired" while the tray/state file already
+    // prove the session is usable. Real expiry still surfaces when the local
+    // access token is no longer valid.
+    out.last_refresh_error = effective_last_refresh_error(
+        out.last_refresh_error,
+        out.token_valid,
+        out.keychain_healthy,
+    );
+
     // Derived fields: unit budget (used vs limit).
     out.units_used = out.pods.iter().map(|p| p.units()).sum();
     out.units_limit = super::units_for_tier(&out.tier);
@@ -438,4 +450,61 @@ fn chrono_now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn refresh_error_requires_login(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("refresh token expired")
+        || normalized.contains("run `tytus login`")
+        || normalized.contains("run 'tytus login'")
+        || normalized.contains("no refresh token available")
+}
+
+fn effective_last_refresh_error(
+    error: Option<String>,
+    token_valid_local: bool,
+    keychain_healthy: bool,
+) -> Option<String> {
+    match error {
+        Some(err)
+            if token_valid_local && keychain_healthy && refresh_error_requires_login(&err) =>
+        {
+            None
+        }
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_last_refresh_error, refresh_error_requires_login};
+
+    #[test]
+    fn classifies_login_required_refresh_errors() {
+        assert!(refresh_error_requires_login(
+            "refresh token expired — run `tytus login`"
+        ));
+        assert!(refresh_error_requires_login(
+            "No refresh token available — run 'tytus login'"
+        ));
+        assert!(!refresh_error_requires_login("temporary sentinel 502"));
+    }
+
+    #[test]
+    fn suppresses_stale_expired_error_when_local_token_is_valid() {
+        let err = Some("refresh token expired — run `tytus login`".to_string());
+        assert_eq!(effective_last_refresh_error(err, true, true), None);
+    }
+
+    #[test]
+    fn keeps_expired_error_when_local_token_is_not_valid() {
+        let err = Some("refresh token expired — run `tytus login`".to_string());
+        assert_eq!(effective_last_refresh_error(err.clone(), false, true), err);
+    }
+
+    #[test]
+    fn keeps_non_auth_refresh_errors_even_with_valid_token() {
+        let err = Some("temporary sentinel 502".to_string());
+        assert_eq!(effective_last_refresh_error(err.clone(), true, true), err);
+    }
 }
