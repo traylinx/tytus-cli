@@ -52,6 +52,8 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
+use crate::{music_proxy, music_ytdlp, music_ytdlp_setup};
+
 // ── Embedded static assets ────────────────────────────────────
 // `include_bytes!` paths are relative to THIS source file, so the web/
 // directory lives next to src/.
@@ -494,8 +496,17 @@ fn run_tytus_exec_shell(
 ) -> Result<(bool, String, String, bool), String> {
     let bin = resolve_tytus_bin();
     let started = Instant::now();
+    let timeout_secs = timeout.as_secs().clamp(1, 120).to_string();
     let mut child = Command::new(&bin)
-        .args(["exec", "--pod", pod_id, "--", "sh", "-lc", script])
+        .args([
+            "--json",
+            "exec",
+            "--pod",
+            pod_id,
+            "--timeout",
+            &timeout_secs,
+            script,
+        ])
         .env("TYTUS_HEADLESS", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -520,12 +531,28 @@ fn run_tytus_exec_shell(
                 let output = child
                     .wait_with_output()
                     .map_err(|e| format!("failed to collect tytus exec: {}", e))?;
-                return Ok((
-                    output.status.success(),
-                    String::from_utf8_lossy(&output.stdout).to_string(),
-                    String::from_utf8_lossy(&output.stderr).to_string(),
-                    false,
-                ));
+                let stdout_raw = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr_raw = String::from_utf8_lossy(&output.stderr).to_string();
+                if output.status.success() {
+                    let parsed = serde_json::from_str::<serde_json::Value>(&stdout_raw)
+                        .map_err(|e| format!("failed to parse tytus exec json: {}", e))?;
+                    let exit_code = parsed
+                        .get("exit_code")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(1);
+                    let stdout = parsed
+                        .get("stdout")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let stderr = parsed
+                        .get("stderr")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    return Ok((exit_code == 0, stdout, stderr, false));
+                }
+                return Ok((false, stdout_raw, stderr_raw, false));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => return Err(format!("failed to poll tytus exec: {}", e)),
@@ -1522,6 +1549,7 @@ pub fn start() -> Option<u16> {
     // when the *daemon* came up — not when it first served a version
     // request. Idempotent (OnceLock).
     daemon_started_at();
+    music_ytdlp_setup::start_background_install();
 
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
@@ -1618,6 +1646,127 @@ fn port_file() -> Option<PathBuf> {
 fn current_port() -> Option<u16> {
     let raw = std::fs::read_to_string(port_file()?).ok()?;
     raw.trim().parse().ok()
+}
+
+fn handle_music_status(request: Request) {
+    let status = music_ytdlp_setup::status();
+    if !status.ready && !status.installing {
+        music_ytdlp_setup::start_background_install();
+    }
+    respond_json(request, 200, &status);
+}
+
+fn handle_music_search(request: Request, query: &str) {
+    if !music_ytdlp_setup::status().ready {
+        music_ytdlp_setup::start_background_install();
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "error": "music_unavailable",
+                "status": music_ytdlp_setup::status(),
+            }),
+        );
+        return;
+    }
+    let q = match query_value_decoded(query, "q") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            respond_json(request, 400, &serde_json::json!({"error":"query is required"}));
+            return;
+        }
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let limit = query_value(query, "limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(20);
+    match music_ytdlp::search(&q, limit) {
+        Ok(results) => respond_json(request, 200, &serde_json::json!({ "results": results })),
+        Err(e) => respond_json(request, 500, &serde_json::json!({"error": e})),
+    }
+}
+
+fn handle_music_stream(request: Request, query: &str) {
+    if !music_ytdlp_setup::status().ready {
+        music_ytdlp_setup::start_background_install();
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "error": "music_unavailable",
+                "status": music_ytdlp_setup::status(),
+            }),
+        );
+        return;
+    }
+    let video_id = match query_value_decoded(query, "videoId") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            respond_json(request, 400, &serde_json::json!({"error":"videoId is required"}));
+            return;
+        }
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    match music_ytdlp::stream(&video_id) {
+        Ok(info) => {
+            let encoded = music_proxy::encode_proxy_path(&info.stream_url);
+            let proxy_url = current_port()
+                .map(|port| format!("http://127.0.0.1:{port}/api/music/proxy/{encoded}"))
+                .unwrap_or_else(|| format!("/api/music/proxy/{encoded}"));
+            respond_json(
+                request,
+                200,
+                &serde_json::json!({
+                    "videoId": info.video_id,
+                    "proxyUrl": proxy_url,
+                    "durationMs": info.duration_ms,
+                    "title": info.title,
+                    "container": info.container,
+                    "codec": info.codec,
+                }),
+            );
+        }
+        Err(e) => respond_json(request, 500, &serde_json::json!({"error": e})),
+    }
+}
+
+fn handle_music_playlist(request: Request, query: &str) {
+    if !music_ytdlp_setup::status().ready {
+        music_ytdlp_setup::start_background_install();
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "error": "music_unavailable",
+                "status": music_ytdlp_setup::status(),
+            }),
+        );
+        return;
+    }
+    let url = match query_value_decoded(query, "url") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            respond_json(request, 400, &serde_json::json!({"error":"url is required"}));
+            return;
+        }
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let limit = query_value(query, "limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(20);
+    match music_ytdlp::playlist(&url, limit) {
+        Ok(playlist) => respond_json(request, 200, &playlist),
+        Err(e) => respond_json(request, 500, &serde_json::json!({"error": e})),
+    }
 }
 
 // ── Request router ────────────────────────────────────────────
@@ -1750,6 +1899,23 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Get, "/api/version") => {
             handle_version(request);
+        }
+        // ── JULI3TA music search/playback (Nuclear yt-dlp pipeline) ──
+        (Method::Get, "/api/music/status") => {
+            handle_music_status(request);
+        }
+        (Method::Get, "/api/music/search") => {
+            handle_music_search(request, &query);
+        }
+        (Method::Get, "/api/music/stream") => {
+            handle_music_stream(request, &query);
+        }
+        (Method::Get, "/api/music/playlist") => {
+            handle_music_playlist(request, &query);
+        }
+        (Method::Get, p) if p.starts_with("/api/music/proxy/") => {
+            let encoded = p.trim_start_matches("/api/music/proxy/");
+            music_proxy::handle_proxy(request, encoded);
         }
         (Method::Post, "/api/open-external") => {
             handle_open_external(request, &query);
