@@ -7,6 +7,13 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.12] — 2026-05-03
+
+**Strict readiness parser hotfix.**
+
+### Fixed
+- Tolerated warning lines emitted before `tytus --json exec` output so strict readiness no longer marks healthy pods as `starting` when keychain warnings precede the JSON envelope.
+
 ## [0.6.11] — 2026-05-03
 
 **TytusOS pod-readiness consistency hotfix.**

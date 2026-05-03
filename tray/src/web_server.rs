@@ -539,7 +539,7 @@ fn run_tytus_exec_shell(
                 let stdout_raw = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr_raw = String::from_utf8_lossy(&output.stderr).to_string();
                 if output.status.success() {
-                    let parsed = serde_json::from_str::<serde_json::Value>(&stdout_raw)
+                    let parsed = parse_tytus_exec_json_output(&stdout_raw)
                         .map_err(|e| format!("failed to parse tytus exec json: {}", e))?;
                     let exit_code = parsed
                         .get("exit_code")
@@ -561,6 +561,23 @@ fn run_tytus_exec_shell(
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => return Err(format!("failed to poll tytus exec: {}", e)),
+        }
+    }
+}
+
+fn parse_tytus_exec_json_output(raw: &str) -> Result<serde_json::Value, serde_json::Error> {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => return Ok(v),
+        Err(first_err) => {
+            for line in raw.lines() {
+                let candidate = line.trim_start();
+                if candidate.starts_with('{') {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(candidate) {
+                        return Ok(v);
+                    }
+                }
+            }
+            Err(first_err)
         }
     }
 }
@@ -8475,6 +8492,14 @@ mod tests {
     // since it's just a Mutex<HashMap>. The actual probe involves
     // HTTP, which we don't exercise here — handle_pod_ready already
     // covers the probe-classification path and we mirror its logic.
+
+    #[test]
+    fn parse_tytus_exec_json_output_tolerates_warning_prefix() {
+        let raw = "2026-05-03T11:42:35Z  WARN keychain timed out\n{\"exit_code\":0,\"stdout\":\"ok\",\"stderr\":\"\"}\n";
+        let parsed = parse_tytus_exec_json_output(raw).expect("warning-prefixed json parses");
+        assert_eq!(parsed.get("exit_code").and_then(|v| v.as_i64()), Some(0));
+        assert_eq!(parsed.get("stdout").and_then(|v| v.as_str()), Some("ok"));
+    }
 
     #[test]
     fn parse_pod_id_canonicalizes_single_digit_ids() {
