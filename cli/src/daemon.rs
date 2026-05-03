@@ -118,12 +118,27 @@ pub fn pid_file_pid() -> Option<i32> {
         .ok()
 }
 
+#[cfg(unix)]
 pub fn process_alive(pid: i32) -> bool {
     if pid <= 1 {
         return false;
     }
     (unsafe { libc::kill(pid, 0) == 0 })
         || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+pub fn process_alive(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
 }
 
 pub fn pid_is_tytus_daemon(pid: i32) -> bool {
@@ -134,10 +149,12 @@ pub fn pid_is_tytus_daemon(pid: i32) -> bool {
     let output = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     let output = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "args="])
         .output();
+    #[cfg(windows)]
+    return false;
     let Ok(output) = output else {
         return false;
     };
@@ -195,8 +212,7 @@ fn sweep_stale_pids(dir: &Path) {
         // Signal 0: returns 0 iff the process exists AND we have
         // permission to signal it. ESRCH (3) means dead; EPERM (1)
         // means alive (but owned by someone else) — keep those.
-        let alive = unsafe { libc::kill(pid, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        let alive = process_alive(pid);
         if !alive {
             tracing::info!(
                 "sweeping stale pidfile {:?} (pid {} dead)",
@@ -355,6 +371,7 @@ pub async fn run_daemon() {
 
     // Spawn SIGTERM/SIGINT handler
     let signal_tx = shutdown_tx.clone();
+    #[cfg(unix)]
     tokio::spawn(async move {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("Failed to register SIGTERM handler");
@@ -366,6 +383,12 @@ pub async fn run_daemon() {
                 tracing::info!("Daemon received SIGTERM — shutting down");
             }
         }
+        let _ = signal_tx.send(true);
+    });
+    #[cfg(not(unix))]
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Daemon received Ctrl+C — shutting down");
         let _ = signal_tx.send(true);
     });
 

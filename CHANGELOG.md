@@ -7,25 +7,17 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
-## [0.6.7] — 2026-05-02
-
-### Fixed
-
-- Fixed Windows release build by gating Unix-only tunnel daemon reaping (`kill(2)`, `ps`, `sudo tunnel-down`) behind Unix cfgs.
-- Kept Windows release packaging enabled while tunnel reaping remains a safe no-op on Windows.
-
-## [0.6.6] — 2026-05-02
-
-### Fixed
-
-- Fixed Windows release build by avoiding Unix-only TUN interface-name lookup on `x86_64-pc-windows-msvc`.
-
-## [0.6.5] — 2026-05-02
+## [0.6.8] — 2026-05-02
 
 ### Release packaging
 
 - Added the Windows x86_64 release artifact (`tytus-windows-x86_64.zip`) to the manual release workflow.
 - Updated the Windows installer copy so fresh Windows installs can opt into the checksum-verified release binary with `TYTUS_USE_RELEASE=1`, with source-build fallback unchanged.
+
+### Fixed
+
+- Fixed Windows release builds by gating Unix-only process/signal/file-permission paths behind cfgs.
+- Kept Windows-safe fallbacks for tunnel reaping, UI forwarder shutdown, daemon shutdown, and TUN interface naming.
 
 ## [0.6.4] — 2026-05-02
 

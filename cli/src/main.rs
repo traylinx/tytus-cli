@@ -23,6 +23,70 @@ use state::{CliState, PodEntry};
 /// doesn't natively group subcommand variants under headings, so we
 /// prepend a curated TLDR via `before_help`. Power users still get
 /// clap's full alphabetical Commands: list below it.
+
+#[cfg(unix)]
+fn process_alive_cross(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    (unsafe { libc::kill(pid, 0) == 0 })
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_alive_cross(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn terminate_process_cross(pid: i32) -> bool {
+    pid > 1 && unsafe { libc::kill(pid, libc::SIGTERM) == 0 }
+}
+
+#[cfg(windows)]
+fn terminate_process_cross(pid: i32) -> bool {
+    pid > 1
+        && std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn force_kill_process_cross(pid: i32) -> bool {
+    pid > 1 && unsafe { libc::kill(pid, libc::SIGKILL) == 0 }
+}
+
+#[cfg(windows)]
+fn force_kill_process_cross(pid: i32) -> bool {
+    pid > 1
+        && std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn is_root_user() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(windows)]
+fn is_root_user() -> bool {
+    false
+}
+
 const HELP_GROUPS: &str = "\
 Most-used:
   setup        First-time setup — login, allocate pod, test
@@ -1415,13 +1479,13 @@ async fn stop_daemon_for_account_switch() -> bool {
 
     if let Some(pid) = pid {
         if daemon::process_alive(pid) && daemon::pid_is_tytus_daemon(pid) {
-            let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
+            let _ = terminate_process_cross(pid);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while std::time::Instant::now() < deadline && daemon::process_alive(pid) {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
             if daemon::process_alive(pid) && daemon::pid_is_tytus_daemon(pid) {
-                let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+                let _ = force_kill_process_cross(pid);
             }
         }
     }
@@ -1867,7 +1931,7 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
         eprintln!("Activating WireGuard tunnel...");
     }
 
-    let is_root = unsafe { libc::geteuid() == 0 };
+    let is_root = is_root_user();
 
     if is_root {
         // Already root — activate directly
@@ -1988,16 +2052,7 @@ async fn activate_tunnel_elevated(
             std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.pid", target_pod_id))
                 .ok()
                 .and_then(|s| s.trim().parse::<i32>().ok())
-                .filter(|&pid| {
-                    pid > 1
-                        && unsafe {
-                            if libc::kill(pid, 0) == 0 {
-                                true
-                            } else {
-                                std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-                            }
-                        }
-                });
+                .filter(|&pid| process_alive_cross(pid));
         let orphan_pods = tunnel_reap::list_orphan_tunnel_pods();
         pidfile_pid.is_some() || orphan_pods.iter().any(|p| p == target_pod_id)
     };
@@ -2483,6 +2538,7 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
                 &pod_id,
                 Some(&iface),
             );
+            #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&pid_file, std::fs::Permissions::from_mode(0o644));
@@ -2493,6 +2549,7 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
             // ifconfig already, no secrecy value.
             let iface_file = pid_dir.join(format!("tunnel-{}.iface", pod_id));
             let _ = std::fs::write(&iface_file, &iface);
+            #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 let _ =
@@ -2538,32 +2595,57 @@ async fn cmd_tunnel_up(config_file: &str, _json: bool) {
             // macOS sends SIGTERM on system sleep, shutdown, launchd stop, and
             // when sudo's session expires. This was the root cause of silent
             // tunnel deaths during the headless-auth sprint testing.
-            let mut sigterm =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("Failed to register SIGTERM handler");
+            #[cfg(unix)]
+            {
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("Failed to register SIGTERM handler");
 
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    append_log(&log_path_clone, &format!("tunnel-up pod={} pid={} received SIGINT — shutting down cleanly", pod_id, std::process::id()));
-                    handle.cancel_token().cancel();
-                    let _ = (&mut task).await;
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        append_log(&log_path_clone, &format!("tunnel-up pod={} pid={} received SIGINT — shutting down cleanly", pod_id, std::process::id()));
+                        handle.cancel_token().cancel();
+                        let _ = (&mut task).await;
+                    }
+                    _ = sigterm.recv() => {
+                        append_log(&log_path_clone, &format!("tunnel-up pod={} pid={} received SIGTERM — shutting down cleanly", pod_id, std::process::id()));
+                        handle.cancel_token().cancel();
+                        let _ = (&mut task).await;
+                    }
+                    res = &mut task => {
+                        let msg = match res {
+                            Ok(()) => "packet_loop exited unexpectedly (Ok) — TUN device is dropped, tunnel is effectively dead".to_string(),
+                            Err(e) => format!("packet_loop task join failed: {}", e),
+                        };
+                        eprintln!("[tunnel-up] {}", msg);
+                        append_log(&log_path_clone, &format!("FATAL tunnel-up pod={} pid={}: {}", pod_id, std::process::id(), msg));
+                        // Clean up pidfile so disconnect/connect can recover
+                        let _ = std::fs::remove_file(&pid_file);
+                        let _ = std::fs::remove_file(&iface_file);
+                        std::process::exit(2);
+                    }
                 }
-                _ = sigterm.recv() => {
-                    append_log(&log_path_clone, &format!("tunnel-up pod={} pid={} received SIGTERM — shutting down cleanly", pod_id, std::process::id()));
-                    handle.cancel_token().cancel();
-                    let _ = (&mut task).await;
-                }
-                res = &mut task => {
-                    let msg = match res {
-                        Ok(()) => "packet_loop exited unexpectedly (Ok) — TUN device is dropped, tunnel is effectively dead".to_string(),
-                        Err(e) => format!("packet_loop task join failed: {}", e),
-                    };
-                    eprintln!("[tunnel-up] {}", msg);
-                    append_log(&log_path_clone, &format!("FATAL tunnel-up pod={} pid={}: {}", pod_id, std::process::id(), msg));
-                    // Clean up pidfile so disconnect/connect can recover
-                    let _ = std::fs::remove_file(&pid_file);
-                    let _ = std::fs::remove_file(&iface_file);
-                    std::process::exit(2);
+            }
+
+            #[cfg(not(unix))]
+            {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        append_log(&log_path_clone, &format!("tunnel-up pod={} pid={} received Ctrl+C — shutting down cleanly", pod_id, std::process::id()));
+                        handle.cancel_token().cancel();
+                        let _ = (&mut task).await;
+                    }
+                    res = &mut task => {
+                        let msg = match res {
+                            Ok(()) => "packet_loop exited unexpectedly (Ok) — TUN device is dropped, tunnel is effectively dead".to_string(),
+                            Err(e) => format!("packet_loop task join failed: {}", e),
+                        };
+                        eprintln!("[tunnel-up] {}", msg);
+                        append_log(&log_path_clone, &format!("FATAL tunnel-up pod={} pid={}: {}", pod_id, std::process::id(), msg));
+                        let _ = std::fs::remove_file(&pid_file);
+                        let _ = std::fs::remove_file(&iface_file);
+                        std::process::exit(2);
+                    }
                 }
             }
 
@@ -2698,7 +2780,7 @@ fn cmd_tunnel_down(pid: i32) {
     }
 
     // Verify the process still exists (kill -0 = signal 0 = check only)
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    let alive = process_alive_cross(pid);
     if !alive {
         // Stale PID file — clean it up and exit success
         if let Some(p) = matched_path {
@@ -2712,13 +2794,12 @@ fn cmd_tunnel_down(pid: i32) {
     }
 
     // Send SIGTERM
-    let result = unsafe { libc::kill(pid, libc::SIGTERM) };
-    if result == 0 {
+    let result = terminate_process_cross(pid);
+    if result {
         eprintln!("tunnel-down: SIGTERM sent to PID {}", pid);
         std::process::exit(0);
     } else {
-        let err = std::io::Error::last_os_error();
-        eprintln!("tunnel-down: kill({}, SIGTERM) failed: {}", pid, err);
+        eprintln!("tunnel-down: kill({}, SIGTERM) failed", pid);
         std::process::exit(1);
     }
 }
@@ -6408,7 +6489,7 @@ fn cmd_tray(action: TrayAction, json: bool) {
             let running = std::fs::read_to_string("/tmp/tytus/tray.pid")
                 .ok()
                 .and_then(|s| s.trim().parse::<i32>().ok())
-                .map(|pid| unsafe { libc::kill(pid, 0) } == 0)
+                .map(|pid| process_alive_cross(pid))
                 .unwrap_or(false);
             if json {
                 println!(
@@ -6870,7 +6951,7 @@ async fn cmd_ui(
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0);
             let port = v.get("port").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
-            let pid_alive = pid > 0 && unsafe { libc::kill(pid as i32, 0) == 0 };
+            let pid_alive = pid > 0 && process_alive_cross(pid as i32);
             let port_alive = port > 0 && TcpStream::connect(("127.0.0.1", port)).await.is_ok();
             if pid_alive && port_alive {
                 let existing_url = format!("http://localhost:{}/", port);
@@ -7171,15 +7252,28 @@ async fn cmd_ui(
     // "Stop Forwarder" menu item in the tray sends one). Without SIGTERM
     // in the select!, `tytus ui stop` would have to `kill -9` us and the
     // marker file would leak.
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut sigterm = signal(SignalKind::terminate()).ok();
-    tokio::select! {
-        _ = accept_loop => {}
-        _ = tokio::signal::ctrl_c() => {
-            if !json { println!("\n✓ Forwarder stopped."); }
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = accept_loop => {}
+            _ = tokio::signal::ctrl_c() => {
+                if !json { println!("\n✓ Forwarder stopped."); }
+            }
+            _ = async { if let Some(ref mut s) = sigterm { s.recv().await; } else { std::future::pending::<()>().await } } => {
+                if !json { println!("\n✓ Forwarder stopped (SIGTERM)."); }
+            }
         }
-        _ = async { if let Some(ref mut s) = sigterm { s.recv().await; } else { std::future::pending::<()>().await } } => {
-            if !json { println!("\n✓ Forwarder stopped (SIGTERM)."); }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::select! {
+            _ = accept_loop => {}
+            _ = tokio::signal::ctrl_c() => {
+                if !json { println!("\n✓ Forwarder stopped."); }
+            }
         }
     }
 
@@ -7366,10 +7460,8 @@ fn stop_ui_forwarder(pod_id: &str) {
         }
     };
     let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as i32;
-    if pid > 0 && unsafe { libc::kill(pid, 0) } == 0 {
-        unsafe {
-            libc::kill(pid, libc::SIGTERM);
-        }
+    if pid > 0 && process_alive_cross(pid) {
+        let _ = terminate_process_cross(pid);
     }
     // Let cmd_ui clean its own marker on SIGTERM exit. Give it 250 ms;
     // if still there, remove to keep the tray from reusing a zombie.
@@ -8238,18 +8330,16 @@ async fn cmd_ui_stop(pod_id: Option<String>, json: bool) {
             }
         };
         let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as i32;
-        if pid <= 0 || unsafe { libc::kill(pid, 0) } != 0 {
+        if pid <= 0 || !process_alive_cross(pid) {
             let _ = std::fs::remove_file(&path);
             stale.push(pod);
             continue;
         }
-        unsafe {
-            libc::kill(pid, libc::SIGTERM);
-        }
+        let _ = terminate_process_cross(pid);
         // Give it a moment to clean up its own marker; if it's stuck, we
         // remove the file ourselves so the tray doesn't reuse it.
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        if unsafe { libc::kill(pid, 0) } == 0 {
+        if process_alive_cross(pid) {
             let _ = std::fs::remove_file(&path);
         }
         stopped.push((pod, pid));
@@ -8483,14 +8573,7 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
             let pidfile = format!("/tmp/tytus/tunnel-{}.pid", pod.pod_id);
             if let Ok(raw) = std::fs::read_to_string(&pidfile) {
                 if let Ok(pid) = raw.trim().parse::<i32>() {
-                    let alive = pid > 1
-                        && unsafe {
-                            if libc::kill(pid, 0) == 0 {
-                                true
-                            } else {
-                                std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-                            }
-                        };
+                    let alive = process_alive_cross(pid);
                     if alive {
                         tunnel_ok = true;
                     }
@@ -8586,7 +8669,7 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
                     let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as i32;
                     let port = v.get("port").and_then(|x| x.as_u64()).unwrap_or(0);
-                    let alive = pid > 0 && unsafe { libc::kill(pid, 0) == 0 };
+                    let alive = process_alive_cross(pid);
                     if alive {
                         lines.push(format!("pod {} → 127.0.0.1:{} (pid {})", pod, port, pid));
                     } else {
@@ -9292,13 +9375,7 @@ fn reap_dead_tunnels(state: &mut CliState) {
                     // Returns 0 if we have permission, -1 with:
                     //   EPERM = process exists but we can't signal it (it's root) → alive
                     //   ESRCH = no such process → dead
-                    let ret = unsafe { libc::kill(pid as i32, 0) };
-                    if ret == 0 {
-                        return true;
-                    }
-                    // EPERM means "exists but you're not root" — daemon is alive
-                    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                    errno == libc::EPERM
+                    process_alive_cross(pid as i32)
                 })
                 .unwrap_or(false);
 
