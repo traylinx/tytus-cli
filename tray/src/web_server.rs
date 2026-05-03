@@ -3732,6 +3732,12 @@ fn compute_state_snapshot() -> StateSnapshot {
         }
     }
 
+    let last_refresh_error = effective_state_refresh_error(
+        daemon_snap.last_refresh_error,
+        logged_in,
+        daemon_snap.keychain_healthy,
+    );
+
     StateSnapshot {
         connected: true,
         logged_in,
@@ -3744,13 +3750,32 @@ fn compute_state_snapshot() -> StateSnapshot {
         email: daemon_snap.email,
         uptime_secs: daemon_snap.uptime_secs,
         keychain_healthy: daemon_snap.keychain_healthy,
-        last_refresh_error: daemon_snap.last_refresh_error,
+        last_refresh_error,
         daemon_running: daemon_snap.daemon_running,
         daemon_pid: daemon_snap.daemon_pid,
         app_bundle_installed: crate::check_app_bundle_installed(),
         forwarders,
         daemon_version: env!("CARGO_PKG_VERSION").to_string(),
         daemon_started_at: daemon_started_at(),
+    }
+}
+
+fn refresh_error_requires_login(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("refresh token expired")
+        || normalized.contains("run `tytus login`")
+        || normalized.contains("run 'tytus login'")
+        || normalized.contains("no refresh token available")
+}
+
+fn effective_state_refresh_error(
+    error: Option<String>,
+    logged_in: bool,
+    keychain_healthy: bool,
+) -> Option<String> {
+    match error {
+        Some(err) if logged_in && keychain_healthy && refresh_error_requires_login(&err) => None,
+        other => other,
     }
 }
 
@@ -7698,6 +7723,35 @@ mod tests {
             );
         }
         assert!(std::env::var_os("TYTUS_STATE_PATH").is_none());
+    }
+
+    #[test]
+    fn state_refresh_error_classifier_detects_login_required_errors() {
+        assert!(refresh_error_requires_login(
+            "refresh token expired — run `tytus login`"
+        ));
+        assert!(refresh_error_requires_login(
+            "No refresh token available — run 'tytus login'"
+        ));
+        assert!(!refresh_error_requires_login("temporary sentinel 502"));
+    }
+
+    #[test]
+    fn state_snapshot_suppresses_stale_login_error_when_logged_in() {
+        let err = Some("refresh token expired — run `tytus login`".to_string());
+        assert_eq!(effective_state_refresh_error(err, true, true), None);
+    }
+
+    #[test]
+    fn state_snapshot_keeps_login_error_when_not_logged_in() {
+        let err = Some("refresh token expired — run `tytus login`".to_string());
+        assert_eq!(effective_state_refresh_error(err.clone(), false, true), err);
+    }
+
+    #[test]
+    fn state_snapshot_keeps_non_auth_refresh_errors() {
+        let err = Some("temporary sentinel 502".to_string());
+        assert_eq!(effective_state_refresh_error(err.clone(), true, true), err);
     }
 
     #[test]
