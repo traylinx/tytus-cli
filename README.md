@@ -2,7 +2,7 @@
 
 > Private AI pods, TytusOS desktop, and a stable OpenAI-compatible gateway from one local CLI.
 
-Current release: **v0.6.12** (2026-05-03).
+Current release: **v0.6.13** (2026-05-03).
 
 ## Install
 
@@ -22,7 +22,7 @@ curl -fsSL https://get.traylinx.com/install.sh | bash
 tytus setup
 ```
 
-Manual release artifacts are published at GitHub Releases for macOS arm64/x64, Linux x64, and Windows x64. Windows binaries compile and package in v0.6.12, but full Windows daemon/tray/tunnel runtime parity is still preview.
+Manual release artifacts are published at GitHub Releases for macOS arm64/x64, Linux x64, and Windows x64. Windows binaries compile and package in v0.6.13, but full Windows daemon/tray/tunnel runtime parity is still preview.
 
 ## What you get
 

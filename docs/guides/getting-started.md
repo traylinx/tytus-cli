@@ -40,7 +40,7 @@ cargo install --path cli --bin tytus --bin tytus-mcp
 
 ## Platform notes
 
-| Platform | v0.6.12 status |
+| Platform | v0.6.13 status |
 |---|---|
 | macOS | Full CLI + tray + TytusOS. Homebrew and release zip available. |
 | Linux | CLI, daemon, tunnel, MCP, and browser-served TytusOS. Desktop integration can vary by distro. |

@@ -7,6 +7,11 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.13] — 2026-05-03
+
+### Fixed
+- Pod readiness now keeps already-running pods openable when the local Tytus session has expired, instead of marking a healthy public pod as failed. The auth problem is surfaced as degraded bootstrap state while the session UI owns re-authentication.
+
 ## [0.6.12] — 2026-05-03
 
 **Strict readiness parser hotfix.**

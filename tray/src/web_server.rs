@@ -735,16 +735,31 @@ cat .tytus/health.json
             overall: "unknown".to_string(),
             fetched_at: now,
         },
-        Ok((_success, _stdout, stderr, false)) => BootstrapHealthEntry {
-            status: "failed".to_string(),
-            detail: stderr
-                .lines()
-                .next()
-                .unwrap_or("bootstrap pack missing")
-                .to_string(),
-            overall: "failed".to_string(),
-            fetched_at: now,
-        },
+        Ok((_success, stdout, stderr, false)) => {
+            let detail = first_nonempty_line(&stderr)
+                .or_else(|| first_nonempty_line(&stdout))
+                .unwrap_or_else(|| "bootstrap pack missing".to_string());
+            if tytus_exec_output_requires_login(&stdout, &stderr) {
+                BootstrapHealthEntry {
+                    // The user's local Tytus session can expire while the
+                    // already-running pod, public route, and browser agent are
+                    // still healthy. Do not block Open in that state; surface
+                    // the auth problem as degraded and let the session UI own
+                    // re-authentication.
+                    status: "degraded".to_string(),
+                    detail,
+                    overall: "login-required".to_string(),
+                    fetched_at: now,
+                }
+            } else {
+                BootstrapHealthEntry {
+                    status: "failed".to_string(),
+                    detail,
+                    overall: "failed".to_string(),
+                    fetched_at: now,
+                }
+            }
+        }
         Err(e) => BootstrapHealthEntry {
             status: "unknown".to_string(),
             detail: e,
@@ -766,6 +781,21 @@ fn bootstrap_status_allows_open(status: &str) -> bool {
 
 fn bootstrap_status_is_failed(status: &str) -> bool {
     status == "failed"
+}
+
+fn first_nonempty_line(raw: &str) -> Option<String> {
+    raw.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn tytus_exec_output_requires_login(stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    combined.contains("not logged in")
+        || combined.contains("run: tytus login")
+        || combined.contains("re-run `tytus login`")
+        || combined.contains("re-run tytus login")
 }
 
 fn check_pod_shared_storage_stage(pod_id: &str) -> (String, String) {
@@ -6305,6 +6335,7 @@ fn handle_pod_ready(request: Request, query: &str) {
         agent.gateway_token.as_deref(),
         agent.ui_url.as_deref(),
     );
+    let mut bootstrap_probe: Option<BootstrapHealthEntry> = None;
     let mut bootstrap_reason: Option<String> = None;
     if status == AgentStatus::Ready && readiness_strict_enabled() {
         let bootstrap = check_pod_tytus_bootstrap_entry(&pod_id, false);
@@ -6316,13 +6347,23 @@ fn handle_pod_ready(request: Request, query: &str) {
                 bootstrap_stage_detail(&bootstrap)
             ));
         }
+        bootstrap_probe = Some(bootstrap);
     }
     cache_agent_status(&pod_id, status);
     let (ready, status_label, reason) = match status {
         AgentStatus::Ready => (
             true,
             "ready",
-            "API, UI, and Tytus bootstrap are serving".to_string(),
+            bootstrap_probe
+                .as_ref()
+                .filter(|b| b.status == "degraded")
+                .map(|b| {
+                    format!(
+                        "API/UI ready; Tytus bootstrap degraded: {}",
+                        bootstrap_stage_detail(b)
+                    )
+                })
+                .unwrap_or_else(|| "API, UI, and Tytus bootstrap are serving".to_string()),
         ),
         AgentStatus::Starting => (
             false,
@@ -8969,5 +9010,21 @@ mod tests {
             known_count, 4,
             "update SHARED_FOLDER_ALLOWED_ACTIONS + this guard when adding actions"
         );
+    }
+
+    #[test]
+    fn tytus_exec_output_requires_login_detects_cli_auth_failures() {
+        assert!(tytus_exec_output_requires_login(
+            "",
+            "Not logged in. Run: tytus login (smoke overall: failed)"
+        ));
+        assert!(tytus_exec_output_requires_login(
+            "2026-05-03T12:00:03Z WARN keychain get_refresh_token timed out. Re-run `tytus login`.",
+            ""
+        ));
+        assert!(!tytus_exec_output_requires_login(
+            "{\"exit_code\":0,\"stdout\":\"ok\"}",
+            ""
+        ));
     }
 }
