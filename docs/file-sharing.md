@@ -25,6 +25,18 @@ over the already-established WireGuard tunnel. No new infrastructure,
 no new ports, no new daemons. The same auth you use for `tytus chat`
 and `tytus exec` covers file transfer.
 
+
+## TytusOS Files app
+
+The TytusOS Files app is the user-friendly surface on top of these commands. It opens at `~/Tytus` and can browse:
+
+- Tytus Home (`~/Tytus`)
+- `~/Tytus/Shared` and any account-scoped shared-folder bindings
+- Pod workspaces under `/app/workspace`
+- Pod inbox/downloads views
+
+Empty folders should show friendly empty states. Raw command stderr such as `tytus ls: no such path` is diagnostic text, not user copy.
+
 ## Quickstart
 
 ```bash

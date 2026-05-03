@@ -26,7 +26,7 @@ curl -fsSL https://get.traylinx.com/install.sh | bash
 This installs `tytus` and `tytus-mcp` into `~/.local/bin` (or `$TYTUS_INSTALL_DIR`).
 
 **What the installer does:**
-- Downloads the right binary for your OS (macOS / Linux, Intel / ARM)
+- Downloads the right binary for your OS where available (macOS arm64/x64, Linux x64, Windows x64 release zip)
 - Sets up passwordless sudo so tunnels connect without prompting
 - Tells you the next step
 
@@ -36,6 +36,15 @@ git clone https://github.com/traylinx/tytus-cli.git
 cd tytus-cli
 cargo install --path cli --bin tytus --bin tytus-mcp
 ```
+
+
+## Platform notes
+
+| Platform | v0.6.9 status |
+|---|---|
+| macOS | Full CLI + tray + TytusOS. Homebrew and release zip available. |
+| Linux | CLI, daemon, tunnel, MCP, and browser-served TytusOS. Desktop integration can vary by distro. |
+| Windows | Release zip + CLI/MCP packaging. Full daemon/tray/tunnel runtime parity is preview. |
 
 ---
 
@@ -82,11 +91,14 @@ curl -sS "$OPENAI_BASE_URL/chat/completions" \
   -d '{"model":"ail-compound","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-### Using the tray icon
-If you have `tytus-tray` installed, click the **T** icon in your menu bar:
-- See live connection status
-- Open any AI CLI pre-configured with your pod
-- Connect / disconnect with one click
+### Using TytusOS
+Install the tray and open the local desktop:
+```bash
+tytus tray install
+open -a Tytus  # macOS
+```
+
+From TytusOS you can use Pod Inspector, Files, Channels, Settings, Terminal, and app workflows without remembering CLI commands. The tray opens TytusOS by default; legacy Tower is hidden rollback only.
 
 ---
 

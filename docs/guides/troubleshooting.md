@@ -154,8 +154,43 @@ tytus login
 tytus restart
 ```
 
+
+### TytusOS shows "Session expired" but the tray says connected
+
+**What happened:** Your browser/daemon state is stale or your Sentinel refresh session expired. Pods can keep running while the local UI needs re-authentication.
+
+**Fix:**
+```bash
+tytus login
+tytus status
+```
+Then click **Check session** in Settings → Daemon or reload TytusOS. Do not revoke pods for this.
+
 ---
 
+### Pod Inspector says "Not ready" but the agent URL opens
+
+**What happened:** The pod has a public URL, but one readiness layer failed, usually bootstrap smoke health or optional shared storage helper.
+
+**Fix:** Open the pod tab in Pod Inspector and read the readiness rows. If core HTTP/UI is green and only shared storage is degraded, the agent can still be used. If bootstrap smoke is red, run:
+```bash
+tytus doctor --pod NN
+tytus restart --pod NN
+```
+
+---
+
+### Files shows raw `tytus ls: no such path` for inbox
+
+**What happened:** The pod has not created `/app/workspace/inbox` yet. This should render as an empty state in TytusOS.
+
+**Fix:** Create the folder or push the first file:
+```bash
+tytus exec --pod NN "mkdir -p /app/workspace/inbox"
+tytus push ./example.txt --pod NN
+```
+
+---
 ## The Full Diagnostic
 
 When nothing else works:

@@ -1,225 +1,119 @@
 ---
 name: tytus
-description: Use `tytus` by Traylinx — a CLI that gives you on-demand access to the user's private AI pod (a WireGuard-tunneled, OpenAI-compatible LLM gateway running on their Traylinx subscription). Handles auth, pod allocation, tunnel, agent lifecycle, and a stable URL/key pair for local tools.
+description: Use `tytus` by Traylinx — a CLI, tray, and TytusOS desktop for private AI pods, OpenAI-compatible gateway access, pod lifecycle, Files, channels, terminal, and MCP integration.
 ---
 
 # tytus — Agent Instructions
 
-You have access to **Tytus by Traylinx** via the `tytus` CLI on the user's machine. Tytus is a **private AI pod** product: each subscriber gets their own isolated pod they reach through a WireGuard tunnel, with an OpenAI-compatible LLM gateway inside. You drive it through the CLI.
+You have access to **Tytus by Traylinx** via the `tytus` CLI on the user's machine. Tytus is the user's private AI pod ecosystem: CLI + tray daemon + TytusOS browser desktop + OpenAI-compatible gateway.
 
-**Always prefer `tytus` commands over raw curl or hand-crafted network calls.** The CLI knows the current state, the stable endpoint, the per-user key, and handles tunnel elevation transparently.
+Prefer `tytus` commands over raw curl. The CLI knows auth state, stable gateway values, pods, agents, tunnel, and local daemon state.
 
----
-
-## Step 0 — Make sure `tytus` is installed
+## Step 0 — Verify install
 
 ```bash
 command -v tytus >/dev/null && tytus --version
 ```
 
-If the command is missing, install it:
+If missing:
 
 ```bash
 curl -fsSL https://get.traylinx.com/install.sh | bash
 ```
 
-The installer detects the OS, installs `tytus` + `tytus-mcp` to `~/.local/bin` (or `/usr/local/bin` with `sudo`), and verifies the install. After it finishes, **tell the user** to run `tytus setup` for the interactive first-run wizard (browser login, pod allocation, tunnel, sample chat) — or you can drive those steps yourself with the commands below.
-
----
-
-## Step 1 — Load the full reference
+macOS users can also install with Homebrew:
 
 ```bash
-tytus llm-docs
+brew install traylinx/tap/tytus
 ```
 
-That command prints the canonical LLM-facing reference (~320 lines of structured Markdown): every subcommand, the fixed model catalog, plan tiers, agent types, standard recipes, error catalog, and hard rules. **Cache its output in your context for the rest of the session.** It is the source of truth for product behavior — this SKILL.md is the bootstrap document.
+Platform note for v0.6.9: macOS and Linux are the production CLI/daemon path. Windows release binaries exist for CLI/MCP, but full daemon/tray/tunnel runtime parity is preview.
 
----
+## Step 1 — Load fresh references
 
-## Step 2 — Check what the user has
+```bash
+tytus llm-docs   # CLI, models, commands, errors
+tytus os-docs    # TytusOS desktop, Files, Pod Inspector, Settings
+```
+
+Treat those as source of truth for the current installed binary.
+
+## Step 2 — Check state before acting
 
 ```bash
 tytus status --json
 ```
 
-Interpret the response:
-- `logged_in: false` → run `tytus login` (opens browser to `sentinel.traylinx.com`) or guide the user through `tytus setup`.
-- `logged_in: true, pods: []` → the user has a plan but no active pod. Run `tytus connect [--agent nemoclaw|hermes]` to allocate one.
-- `logged_in: true, pods: [...]` → the user has at least one pod. Check `tunnel_iface` to see which (if any) are connected.
+Interpretation:
 
-Also run `tytus doctor` any time anything feels off — it checks state file, auth, subscription, tunnel, and MCP server.
+- not logged in or session expired: run `tytus login`, then re-check status.
+- no pods: run `tytus setup` or `tytus agent install nemoclaw` after user intent is clear.
+- pods present: inspect readiness before claiming they are ready.
 
----
+Use `tytus doctor` for diagnostics. Do not delete pods to fix login/session expiry.
 
-## Step 3 — Get the stable connection pair
-
-After at least one pod is connected:
+## Step 3 — Stable gateway values
 
 ```bash
 eval "$(tytus env --export)"
-echo "$OPENAI_BASE_URL"   # → http://10.42.42.1:18080/v1     (constant forever)
-echo "$OPENAI_API_KEY"    # → sk-tytus-user-<32hex>            (stable per user)
+echo "$OPENAI_BASE_URL"   # http://10.42.42.1:18080/v1
+echo "$OPENAI_API_KEY"    # sk-tytus-user-<32hex>
 ```
 
-**These are the only values you should ever paste into a user-visible config file.** They survive pod revoke/reallocate, agent swaps, and droplet migration. The legacy per-pod values (URL like `http://10.18.X.Y:18080`, key like `sk-c939...`) are behind `tytus env --raw` and should only be used for debugging.
+These are the only values to paste into user configs. Never hardcode per-pod URLs or raw per-pod keys except for debugging.
 
----
+## TytusOS facts
 
-## Product facts (do not guess, do not invent)
+- TytusOS is the primary UI. Legacy Tower is hidden rollback only via `TYTUS_ENABLE_LEGACY_TOWER=1`.
+- Open with `tytus tray install` then `open -a Tytus` on macOS, or open the tray web port.
+- Tytus Home is `~/Tytus` with `Downloads`, `Inbox`, `Logs`, `Outbox`, `Pods`, `Projects`, and `Shared`.
+- Pod Inspector owns readiness, Open, Restart, Doctor, Logs, Env, Uninstall, Revoke.
+- Files owns local Tytus Home, shared folders, pod workspace, inbox, downloads.
+- Terminal is host-backed and should default to Tytus Home.
+- Session expired means re-auth needed. Pods keep running.
 
-### Plans and unit budgets
-| Plan | Unit budget |
+## Plans and units
+
+| Plan | Units |
 |---|---|
 | Explorer | 1 |
 | Creator | 2 |
 | Operator | 4 |
 
-### Agents (runnable INSIDE a pod via `tytus connect --agent <name>`)
-| Agent | Cost | UI port | API port | Description |
-|---|---|---|---|---|
-| `nemoclaw` | 1 unit | 3000 | 3000 | OpenClaw runtime with the NemoClaw sandboxing blueprint; browser chat UI |
-| `hermes`   | 2 units | 9119 | 8642 | Nous Research Hermes; `hermes dashboard` on 9119 + gateway on 8642, tytus forwarder multiplexes |
+| Agent | Cost | UI/API | Notes |
+|---|---:|---|---|
+| `nemoclaw` | 1 | OpenClaw/NemoClaw on port 3000 | Best default autonomous coding pod |
+| `hermes` | 2 | dashboard 9119, gateway 8642 | Nous Hermes dashboard + gateway |
 
-Both agents get zero-config auth: the tytus forwarder auto-injects
-`Authorization: Bearer <per-pod-secret>` so SDK clients and browsers
-never see or paste a token. Run `tytus llm-docs` for full details on
-the overlay files (`config.user.json` / `config.user.yaml`),
-`is_logged_in` AT-only fallback, and the forwarder's path multiplex.
+## Models
 
-### Models on the pod gateway (SwitchAILocal)
-These are the **only** models available. Do not pass any other model id — it will fail.
+Run `tytus llm-docs` for exact current catalog. Default chat is `ail-compound`; image generation is `ail-image`; embeddings are `ail-embed`. Do not invent OpenAI/Claude/Qwen model IDs.
 
-| Model | Backed by | Capabilities |
-|---|---|---|
-| `ail-compound` | MiniMax M2.7 | text, vision, audio (default chat) |
-| `minimax/ail-compound` | MiniMax M2.7 | text |
-| `ail-image` | MiniMax image-01 | image generation |
-| `minimax/ail-image` | MiniMax image-01 | image generation |
-| `ail-embed` | mistral-embed via SwitchAI | embeddings |
-
-### Stable endpoint
-- **URL**: `http://10.42.42.1:18080` (dual-bound WireGuard address, constant per droplet)
-- **Key**: `sk-tytus-user-<32 hex>` (per user, persisted in Scalesys, stable across pod lifecycle)
-
----
-
-## Command cheat sheet
+## Common commands
 
 ```bash
-# Identity
-tytus login                          # browser device-auth via Sentinel
-tytus logout                         # revoke all pods + clear local state
-tytus status [--json]                # plan, pods, units, tunnel state
-tytus doctor                         # full diagnostic
-tytus setup                          # interactive first-run wizard
-
-# Pod lifecycle
-tytus connect [--agent nemoclaw|hermes] [--pod NN]
-tytus disconnect [--pod NN]          # tear down tunnel, keep allocation
-tytus revoke <pod_id>                # DESTRUCTIVE: free units + wipe state
-tytus restart [--pod NN]             # restart agent container
-
-# Use the pod
-tytus env [--export] [--raw]         # connection vars (stable by default)
-tytus test                           # E2E health check
-tytus chat [--model ail-compound]    # interactive REPL
-tytus exec [--pod NN] "<command>"    # shell command inside agent container
-tytus configure                      # interactive overlay editor
-
-# Integration + docs
-tytus link [DIR]                     # drop Tytus integration files into a project
-tytus mcp [--format claude|kilocode|opencode|archon|json]
-tytus bootstrap-prompt               # print the setup prompt to paste into AI tools
-tytus llm-docs                       # full LLM-facing reference (read this first)
+tytus setup
+tytus login
+tytus status --json
+tytus doctor
+tytus tray install
+tytus env --export
+tytus os-docs
+tytus agent catalog
+tytus agent install nemoclaw
+tytus agent install hermes
+tytus agent list
+tytus exec --pod 01 "pwd && ls -la /app/workspace"
+tytus push ./file.pdf --pod 01
+tytus pull /app/workspace/out/result.md --pod 01
+tytus link .
+tytus mcp --format json
 ```
 
----
+## Safety rules
 
-## Standard recipes
-
-### Recipe A — Ensure a working pod, then chat
-```bash
-tytus status --json | jq -e '.pods | length > 0' \
-    || tytus connect --agent nemoclaw
-tytus test                                           # confirm green
-eval "$(tytus env --export)"
-curl -sS "$OPENAI_BASE_URL/chat/completions" \
-    -H "Authorization: Bearer $OPENAI_API_KEY" \
-    -H "Content-Type: application/json" \
-    -d '{"model":"ail-compound","messages":[{"role":"user","content":"hi"}]}'
-```
-
-### Recipe B — Use the pod from a local AI tool (Cursor / Claude Desktop / OpenCode)
-```bash
-tytus connect                        # one-time per boot
-tytus env --export                   # see exactly what to paste
-```
-Then paste into the tool's OpenAI-compatible settings:
-```
-OPENAI_BASE_URL = http://10.42.42.1:18080/v1
-OPENAI_API_KEY  = sk-tytus-user-<32hex>
-```
-These never change. Set once, forget forever.
-
-### Recipe C — Switch a pod's agent from nemoclaw to hermes
-```bash
-tytus disconnect --pod 02            # tear down tunnel only
-tytus revoke 02                      # free units (destroys workspace)
-tytus connect --agent hermes         # hermes (2 units)
-tytus test
-```
-
-### Recipe D — Inspect or edit the agent's config overlay
-```bash
-tytus exec --pod 02 "cat /app/workspace/.openclaw/config.user.json.example"
-tytus exec --pod 02 "cat > /app/workspace/.openclaw/config.user.json <<JSON
-{ \"agents\": { \"defaults\": { \"contextTokens\": 64000, \"timeoutSeconds\": 300 } } }
-JSON"
-tytus restart --pod 02
-```
-
-### Recipe E — Link a project so other AI CLIs in that repo also know about Tytus
-```bash
-tytus link ~/projects/my-app                          # drops CLAUDE.md, AGENTS.md, .mcp.json, etc.
-tytus link ~/projects/my-app --only claude,agents     # filter what gets dropped
-```
-
----
-
-## Error catalog
-
-| Message | Cause | Fix |
-|---|---|---|
-| `No pods. Run: tytus connect` | No allocation | Run `tytus connect` (or `tytus setup` for the wizard) |
-| `Tunnel daemon already running` | Stale PID file from previous session | `tytus disconnect` then retry |
-| `403 plan_limit_reached` | Unit budget would be exceeded | Ask the user to revoke an existing pod or upgrade their plan |
-| `401 Invalid API key` from gateway | Stable key map sync race, or wrong key | Wait 2s and retry; check `tytus env`; if persistent, run `tytus restart` |
-| `503 no_capacity` | All droplets full | Backend issue — tell the user to wait or contact support |
-| `Allocation failed` (unspecific) | Network or auth | Run `tytus doctor` first |
-
----
-
-## Hard rules for AI agents driving Tytus
-
-1. **Never invent models.** Only the five in the table above exist on this product. If the user asks for `gpt-4`, `claude-3`, `qwen3-8b`, etc., say it's not available on Tytus and offer `ail-compound` (the MiniMax M2.7 default).
-2. **Never hardcode per-pod IPs** like `10.18.X.Y` — they change. Always use `10.42.42.1` from `tytus env`.
-3. **Never paste raw per-pod keys into source files.** Always read `OPENAI_API_KEY` freshly from `tytus env --export` at runtime.
-4. **`tytus revoke` and `tytus logout` are destructive.** Always confirm with the user before running them — they wipe the pod's workspace state (sessions, skills, memories, config overlays).
-5. **Never call `sudo` directly to manipulate the tunnel.** `tytus connect` handles elevation transparently via osascript / `sudo -n` / interactive sudo. If elevation fails, troubleshoot through `tytus doctor`.
-6. **Read fresh each session.** If another process revoked or rotated the user's pod, cached env values are wrong. Start by calling `tytus status`.
-7. **Prefer `tytus` commands over raw HTTP when possible.** The CLI knows the stable endpoint, the current state, the agent type, and handles errors uniformly.
-8. **Treat `tytus llm-docs` as the authoritative reference.** This file is the bootstrap; `tytus llm-docs` is the complete picture.
-
----
-
-## What Tytus is NOT
-
-- It is not OpenAI, Claude, or any public LLM service. It's the user's private pod.
-- It is not free — the user pays Traylinx for their plan.
-- It is not a replacement for Cursor / Claude Code / etc. — those are clients; Tytus is the backend.
-- No customer LLM traffic ever traverses Traylinx Cloud — prompts and responses go user ↔ pod via WireGuard only. Treat any request as private to the user.
-
----
-
-If anything in this document is unclear, run `tytus llm-docs` for the full 320-line reference with deeper detail.
+1. `tytus revoke`, `tytus logout`, uninstall, and destructive file deletes require explicit user confirmation.
+2. Never fix session expiry by revoking pods.
+3. Never treat a public URL as readiness. Check Pod Inspector/readiness/doctor.
+4. Never expose secrets in chat or docs. Redact keys unless the user explicitly asks to reveal them.
+5. Prefer friendly user actions: open TytusOS, run `tytus login`, run `tytus doctor`, inspect readiness.

@@ -1,127 +1,53 @@
 # tytus-cli
 
-> Your private AI, on a private connection. From any terminal.
+> Private AI pods, TytusOS desktop, and a stable OpenAI-compatible gateway from one local CLI.
+
+Current release: **v0.6.9** (2026-05-02).
 
 ## Install
+
+macOS with Homebrew:
+
+```bash
+brew install traylinx/tap/tytus
+tytus setup
+tytus tray install
+open -a Tytus
+```
+
+Universal installer:
 
 ```bash
 curl -fsSL https://get.traylinx.com/install.sh | bash
 tytus setup
 ```
 
-That's it. `tytus setup` runs an interactive wizard — sign in, pick your AI,
-and send your first chat. About 60 seconds end to end.
+Manual release artifacts are published at GitHub Releases for macOS arm64/x64, Linux x64, and Windows x64. Windows binaries compile and package in v0.6.9, but full Windows daemon/tray/tunnel runtime parity is still preview.
 
 ## What you get
 
-- **Your own AI** running on a Traylinx pod, reachable at a stable URL +
-  stable API key that never change. Paste them into Cursor / Claude Desktop /
-  OpenCode / any OpenAI-compatible tool — the pair survives pod rotation,
-  droplet migration, and agent swaps.
-- **A private connection.** Prompts and responses go straight from your
-  laptop to your pod over WireGuard. Traylinx Cloud never sees the contents
-  of your conversations.
-- **A menu-bar app** (macOS) and **TytusOS**, the local web shell for
-  managing pods, files, channels, settings, and agent install flows without
-  opening a terminal — `tytus tray install` enables them after `tytus setup`.
+- **Stable gateway:** `http://10.42.42.1:18080/v1` plus a per-user key from `tytus env --export`. Paste once into Cursor, Claude Desktop, OpenCode, Codex, Aider, Vibe, or any OpenAI-compatible SDK.
+- **TytusOS:** the local browser desktop served by the tray. It is the primary UI for pods, files, channels, settings, terminal, and app workflows. Legacy Tower is hidden rollback only via `TYTUS_ENABLE_LEGACY_TOWER=1`.
+- **Private pods:** OpenClaw/NemoClaw and Hermes agent runtimes inside isolated pod slots, reachable through the Tytus forwarder.
+- **Tytus Home:** `~/Tytus` with `Downloads`, `Inbox`, `Logs`, `Outbox`, `Pods`, `Projects`, and `Shared`, used by Files and Terminal.
+- **MCP + skills:** `tytus-mcp`, `tytus llm-docs`, and `tytus os-docs` give AI agents the exact product contract.
 
 ```bash
 eval "$(tytus env --export)"
-echo $OPENAI_BASE_URL    # http://10.42.42.1:18080/v1   (constant forever)
-echo $OPENAI_API_KEY     # sk-tytus-user-<32hex>          (per user, persistent)
+echo $OPENAI_BASE_URL    # http://10.42.42.1:18080/v1
+echo $OPENAI_API_KEY     # sk-tytus-user-<32hex>
 ```
 
-`tytus setup` provisions a **default pod** (agent-less, zero plan units)
-automatically, and brings the tunnel up. AIL gateway access at
-`http://10.42.42.1:18080` works immediately — no agent install required,
-no plan units spent.
+## Documentation
 
-```bash
-eval "$(tytus env --export)"
-echo $OPENAI_BASE_URL    # http://10.42.42.1:18080/v1   (constant forever)
-echo $OPENAI_API_KEY     # sk-tytus-user-<32hex>          (per user, persistent)
-```
-
-Need a specific agent runtime (NemoClaw, Hermes) on top? Install one
-separately — pod allocation and agent deployment are decoupled:
-
-```bash
-tytus agent catalog              # list installable agents
-tytus agent install nemoclaw     # allocate a pod slot + deploy NemoClaw
-tytus agent list                 # see what's running where
-```
-
-Or `tytus setup` walks you through login + default pod + agent picker in
-one interactive wizard.
-
----
-
-## What is Tytus?
-
-Tytus is a **private AI pod** product. Each Traylinx subscriber gets their own
-isolated slice of a droplet — a WireGuard sidecar plus a containerised AI
-agent (OpenClaw or Hermes) — and an OpenAI-compatible LLM gateway
-(`SwitchAILocal`) that proxies to upstream providers.
-
-```
-your laptop ── WireGuard tunnel ── pod sidecar ── agent container
-                                       └── SwitchAILocal (OpenAI-compatible)
-                                             └── upstream LLM (MiniMax)
-```
-
-**No customer LLM traffic ever traverses Traylinx Cloud.** Prompts and
-responses go directly between your laptop and your pod over WireGuard. The
-Traylinx control plane (auth, billing, allocation) only sees that you have
-a pod — never the contents of your conversations.
-
----
-
-## Install (early access)
-
-```bash
-curl -fsSL https://get.traylinx.com/install.sh | bash
-```
-
-> **Early access.** Tytus is under active development. The installer builds
-> from source against `main` so every fix reaches you immediately. Prebuilt
-> binaries and `brew install traylinx/tap/tytus` will return once the CLI is
-> stable. Requires a Rust toolchain (the installer can install it for you).
-
-What the installer does:
-
-1. Detects your OS and architecture (macOS / Linux / Windows, x86_64 / aarch64)
-2. Ensures a Rust toolchain is present — offers to install rustup if missing
-3. Builds `tytus` and `tytus-mcp` from the `main` branch via
-   `cargo install --git` (~3 minutes first build)
-4. Sets up a tightly-scoped passwordless sudoers entry so `tytus connect`
-   never prompts you for a password (opt-out with `TYTUS_SKIP_SUDOERS=1`)
-5. Verifies and prints next steps
-
-### Desktop UI status by platform
-
-| Platform | Fresh install result |
+| Doc | Audience |
 |---|---|
-| macOS | `tytus tray install` installs `/Applications/Tytus.app`; the tray opens TytusOS at `http://127.0.0.1:<tray-port>/`. |
-| Linux | CLI, auth, daemon, MCP, project linking, and AI gateway workflows are supported. Desktop tray/browser packaging is tracked separately. |
-| Windows | CLI, auth, MCP, and project linking are supported. Tunnel + tray/browser UI parity depends on the Windows networking/packaging sprint. |
-
-Legacy Tytus Tower remains embedded only as a hidden rollback path until the
-2026-05-13+ cutover gate. Normal tray/menu/dashboard actions open TytusOS.
-
-Override the install location with `TYTUS_INSTALL_DIR=/opt/tytus/bin` if you
-want it somewhere other than `~/.cargo/bin`.
-
-If you already have a release from before we switched back to source-only,
-you can force that path with `TYTUS_USE_RELEASE=1` — but you'll miss any
-fixes that landed on `main` since that tag.
-
-### From source
-
-```bash
-git clone https://github.com/traylinx/tytus-cli.git
-cd tytus-cli
-cargo install --path cli --bin tytus --bin tytus-mcp
-```
+| [docs/guides/tytus-ecosystem.md](docs/guides/tytus-ecosystem.md) | Users, support, and agents who need the full ecosystem map |
+| [docs/guides/getting-started.md](docs/guides/getting-started.md) | Fresh install and first pod |
+| [docs/guides/use-with-ai-tools.md](docs/guides/use-with-ai-tools.md) | Cursor, Claude, OpenCode, Codex, Aider, SDKs |
+| [docs/file-sharing.md](docs/file-sharing.md) | Files, pod inbox/outbox, shared folders |
+| `tytus llm-docs` | CLI contract for AI agents |
+| `tytus os-docs` | TytusOS contract for AI agents |
 
 ---
 

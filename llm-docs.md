@@ -40,6 +40,19 @@ only — they never see prompts or responses.
 | Stable URL | `http://10.42.42.1:18080` — constant per-droplet endpoint |
 | Stable user key | `sk-tytus-user-<32hex>` — per-user, persistent across pods |
 
+
+## 2b. TytusOS and tray desktop
+
+TytusOS is the primary user-facing desktop served by the local tray daemon. It replaces visible Tower flows. Legacy Tower is only a hidden rollback path behind `TYTUS_ENABLE_LEGACY_TOWER=1`.
+
+Use `tytus os-docs` for the bundled TytusOS manual. Key facts:
+
+- TytusOS opens from the tray or `http://127.0.0.1:<tray-web-port>/`.
+- Pod Inspector is the source of truth for readiness, actions, logs, env, and destructive confirmations.
+- Files lands at `~/Tytus` and can browse local Tytus Home, shared folders, and pod workspaces.
+- Terminal is host-backed and defaults to Tytus Home.
+- Session expiry is fixed by `tytus login`; pods stay online. Never revoke pods to refresh a session.
+
 ## 3. Plans and unit budgets
 
 | Plan | Units |
@@ -412,34 +425,29 @@ tytus tray start                   Open /Applications/Tytus.app (or fall
                                    back to ~/bin/tytus-tray). Useful from
                                    scripts after a `quit`.
 
-NOTE — Tower in-page actions (tray-driven). When the tray is running,
+NOTE — TytusOS in-page actions (tray-driven). When the tray is running,
 most non-interactive menu items (Run Health Test, Doctor, per-pod
 Restart / Uninstall / Revoke / Stop forwarder, Channels catalog, Add
-channel) deep-link the user's browser into the local Tower web UI at
-`http://127.0.0.1:<port>/tower#/<route>` and stream subprocess output
-there via SSE — no Terminal window opens. Sudo-bearing commands
-(`tytus connect`, `tytus tray install`), browser-auth flows
-(`tytus login`), and interactive wizards (`tytus configure`) still
-open a Terminal because they need a TTY. Hash routes recognized by
-Tower:
+channel, Files, Settings) deep-link the user's browser into TytusOS at
+`http://127.0.0.1:<port>/#/<route>` and stream subprocess output there
+via SSE. Sudo-bearing commands (`tytus connect`, `tytus tray install`),
+browser-auth flows (`tytus login`), and interactive wizards that need a
+real TTY may still open a native terminal. TytusOS routes to know:
 
-  #/run/test                       — POST /api/test (global health probe)
-  #/run/doctor                     — POST /api/doctor (also opens
-                                     the Troubleshoot disclosure)
-  #/run/channels-catalog           — POST /api/channels/catalog
-  #/pod/<NN>                       — pod subpage, Overview tab
-  #/pod/<NN>/<tab>                 — overview | output | channels
+  #/run/test                       — global health probe
+  #/run/doctor                     — daemon/pod diagnostics
+  #/channels                       — channel binding UI
+  #/files                          — Files app, Tytus Home + pods + shared folders
+  #/settings/daemon                — daemon/session status and re-auth card
+  #/settings/sharing               — account-scoped shared folder controls
+  #/pod/<NN>                       — Pod Inspector detail tab
   #/pod/<NN>/<action>              — restart | revoke | uninstall |
-                                     stop-forwarder. Runs the action
-                                     via POST /api/pod/<NN>/run-streamed
-                                     and streams output in the Output
-                                     tab. One streamed action per pod
-                                     at a time (concurrent attempts
-                                     return 409 Conflict).
-  #/pod/<NN>/channels?action=add&type=<channel>
-                                   — opens the in-page <dialog> token
-                                     modal for adding a messenger.
+                                     stop-forwarder, streamed through the
+                                     tray backend with one active job per pod.
 
+Legacy Tower may still be present only as rollback when
+`TYTUS_ENABLE_LEGACY_TOWER=1`; do not direct users there in normal docs
+or support flows.
 tytus ui [--pod NN] [-P PORT] [--no-open]
                                    Start a 127.0.0.1 → pod agent TCP
                                    forwarder so the browser sees the

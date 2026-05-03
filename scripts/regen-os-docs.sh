@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Regenerates os-docs.md by concatenating Tytus OS user-manual sources.
+# Regenerates os-docs.md by concatenating TytusOS user-manual sources.
 # Run from the tytus-cli repo root whenever ../tytus-os/docs/user-manual/
 # changes. The result is bundled into the tytus binary via include_str!
 # and exposed as `tytus os-docs` and the `tytus_os_docs` MCP tool.
@@ -35,13 +35,13 @@ ORDER=(
 )
 
 {
-    echo "# Tytus OS — User Manual (LLM-facing reference)"
+    echo "# TytusOS — User Manual (LLM-facing reference)"
     echo
     echo "> You are an AI agent (Claude Code, OpenCode, KiloCode, Gemini, Codex,"
-    echo "> Cursor, Vibe, etc.) running on a user's machine that has Tytus OS"
+    echo "> Cursor, Vibe, etc.) running on a user's machine that has TytusOS"
     echo "> installed. This document is the complete user manual, concatenated"
     echo "> from the source-of-truth markdown in the tytus-os repository. Read"
-    echo "> it BEFORE answering any question about how Tytus OS looks, behaves,"
+    echo "> it BEFORE answering any question about how TytusOS looks, behaves,"
     echo "> or what its keyboard shortcuts / settings panels / apps do."
     echo ">"
     echo "> The companion reference for the \`tytus\` CLI itself is \`tytus llm-docs\`."

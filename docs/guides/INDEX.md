@@ -11,12 +11,14 @@ Welcome to Tytus — your private AI pod, driven from any terminal.
 | [Plans, Agents, and Models](plans-and-agents.md) | Subscription tiers, nemoclaw vs hermes, available models |
 | [Auto-Start and Daemon](autostart-and-daemon.md) | Survive reboots, background token refresh, tray icon |
 | [Common Use Cases](common-use-cases.md) | Copy-paste recipes for real-world scenarios |
+| [Tytus Ecosystem](tytus-ecosystem.md) | CLI, tray, TytusOS, Files, pods, session state, and install matrix |
 | [Troubleshooting](troubleshooting.md) | Fix common issues in 30 seconds |
 
 ## Quick Reference
 
 ```bash
 tytus setup          # First-time setup wizard
+tytus os-docs        # TytusOS manual for AI agents
 tytus connect        # Connect to your pod
 tytus status         # Check connection
 tytus chat           # Interactive AI chat
