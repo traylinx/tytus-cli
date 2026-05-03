@@ -7,7 +7,7 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
-## [0.6.8] — 2026-05-02
+## [0.6.9] — 2026-05-02
 
 ### Release packaging
 
@@ -18,6 +18,7 @@ bumps are allowed to break compat.
 
 - Fixed Windows release builds by gating Unix-only process/signal/file-permission paths behind cfgs.
 - Kept Windows-safe fallbacks for tunnel reaping, UI forwarder shutdown, daemon shutdown, and TUN interface naming.
+- Added a Windows daemon stub so CLI/MCP release binaries compile while the Unix-socket tray daemon remains macOS/Linux-only.
 
 ## [0.6.4] — 2026-05-02
 

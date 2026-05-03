@@ -2,7 +2,12 @@ mod account;
 mod channels;
 mod channels_store;
 mod cmd_transfer;
+#[cfg(unix)]
 mod daemon;
+#[cfg(windows)]
+mod daemon_windows;
+#[cfg(windows)]
+use daemon_windows as daemon;
 mod state;
 mod transfer;
 #[allow(dead_code)]
