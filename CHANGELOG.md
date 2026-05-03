@@ -7,6 +7,17 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+## [0.6.11] — 2026-05-03
+
+**TytusOS pod-readiness consistency hotfix.**
+
+### Changed
+- Bundled TytusOS dist refreshed from `tytus-os` main (`a430e7c`) so released tray assets include canonical pod-id readiness calls.
+
+### Fixed
+- Canonicalized pod ids across tray readiness endpoints and UI daemon client calls (`1` → `01`) so Pod Inspector, Settings, and Open actions agree on one pod identity.
+- Added regression coverage for single-digit pod ids in both the TytusOS daemon client and the tray web server.
+
 ## [0.6.9] — 2026-05-02
 
 ### Release packaging

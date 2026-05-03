@@ -3889,15 +3889,23 @@ fn handle_open_external(request: Request, query: &str) {
 // before shelling out — we never pass a user-supplied pod id through
 // to a subprocess without a whitelist check.
 
+fn canonical_pod_id(raw: &str) -> Option<String> {
+    let pod = raw.trim();
+    if !valid_pod_id(pod) {
+        return None;
+    }
+    if pod.len() == 1 {
+        Some(format!("0{}", pod))
+    } else {
+        Some(pod.to_string())
+    }
+}
+
 fn parse_pod_id(query: &str) -> Option<String> {
     let raw = query
         .split('&')
         .find_map(|kv| kv.strip_prefix("pod=").map(|v| v.to_string()))?;
-    if raw.chars().all(|c| c.is_ascii_digit()) && !raw.is_empty() {
-        Some(raw)
-    } else {
-        None
-    }
+    canonical_pod_id(&raw)
 }
 
 /// Confirm the pod id exists in local state (defense-in-depth — parse_pod_id
@@ -6332,11 +6340,12 @@ fn handle_pod_ready(request: Request, query: &str) {
 }
 
 fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
-    let pod_id = if valid_pod_id(pod_id_raw) {
-        pod_id_raw.to_string()
-    } else {
-        respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
-        return;
+    let pod_id = match canonical_pod_id(pod_id_raw) {
+        Some(p) => p,
+        None => {
+            respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
+            return;
+        }
     };
 
     let snap = compute_state_snapshot();
@@ -7416,11 +7425,7 @@ fn normalize_pod_id_for_query(raw: &str) -> Option<String> {
         .strip_prefix("wannolot-")
         .or_else(|| raw.trim().strip_prefix("tytus-"))
         .unwrap_or_else(|| raw.trim());
-    if valid_pod_id(pod) {
-        Some(pod.to_string())
-    } else {
-        None
-    }
+    canonical_pod_id(pod)
 }
 
 fn parse_channel_query(query: &str) -> (Option<String>, Option<String>) {
@@ -8470,6 +8475,24 @@ mod tests {
     // since it's just a Mutex<HashMap>. The actual probe involves
     // HTTP, which we don't exercise here — handle_pod_ready already
     // covers the probe-classification path and we mirror its logic.
+
+    #[test]
+    fn parse_pod_id_canonicalizes_single_digit_ids() {
+        assert_eq!(parse_pod_id("pod=1").as_deref(), Some("01"));
+        assert_eq!(parse_pod_id("pod=01").as_deref(), Some("01"));
+        assert_eq!(parse_pod_id("pod=10").as_deref(), Some("10"));
+        assert_eq!(parse_pod_id("pod=p01"), None);
+    }
+
+    #[test]
+    fn normalize_pod_id_for_query_canonicalizes_prefixed_ids() {
+        assert_eq!(
+            normalize_pod_id_for_query("wannolot-1").as_deref(),
+            Some("01")
+        );
+        assert_eq!(normalize_pod_id_for_query("tytus-2").as_deref(), Some("02"));
+        assert_eq!(normalize_pod_id_for_query("04").as_deref(), Some("04"));
+    }
 
     #[test]
     fn agent_status_serializes_lowercase() {

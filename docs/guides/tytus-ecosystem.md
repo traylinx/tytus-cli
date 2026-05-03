@@ -1,6 +1,6 @@
 # Tytus ecosystem guide
 
-Last updated: 2026-05-03. Applies to `tytus` v0.6.10.
+Last updated: 2026-05-03. Applies to `tytus` v0.6.11.
 
 Tytus is three pieces that should feel like one product:
 
@@ -10,7 +10,7 @@ Tytus is three pieces that should feel like one product:
 
 ## Current release status
 
-| Surface | Status in v0.6.10 |
+| Surface | Status in v0.6.11 |
 |---|---|
 | macOS | Full CLI + tray + TytusOS path. Homebrew and release zip available. |
 | Linux | CLI, daemon, tunnel, MCP, TytusOS browser path, and release zip available. Desktop shell integration varies by distro. |
@@ -47,7 +47,7 @@ open "http://127.0.0.1:$(cat /tmp/tytus/tray-web.port)/" 2>/dev/null || xdg-open
 
 ### Windows
 
-Download `tytus-windows-x86_64.zip` from the GitHub release or use the installer with `TYTUS_USE_RELEASE=1` when instructed. CLI/MCP packaging is present in v0.6.10; full daemon/tray/tunnel runtime is not yet production-complete on Windows.
+Download `tytus-windows-x86_64.zip` from the GitHub release or use the installer with `TYTUS_USE_RELEASE=1` when instructed. CLI/MCP packaging is present in v0.6.11; full daemon/tray/tunnel runtime is not yet production-complete on Windows.
 
 ## First-run flow
 
