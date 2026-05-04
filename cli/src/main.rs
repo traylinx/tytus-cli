@@ -262,6 +262,51 @@ enum AgentAction {
 }
 
 #[derive(Subcommand, Debug)]
+enum AppAction {
+    /// Show the Featured user-app catalog. Fetches the same JSON the
+    /// Tytus OS App Store fetches at boot — adding a featured app
+    /// doesn't require a Tytus OS rebuild.
+    Catalog {
+        /// Override the catalog URL (advanced — point at a fork or
+        /// a self-hosted catalog for testing).
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+    },
+    /// Alias for `catalog` — lists Featured user apps with their ids,
+    /// versions, and install URLs.
+    List {
+        /// Override the catalog URL.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+    },
+    /// Print the manifest URL for an app + open the App Store ready for
+    /// install. Accepts either a Featured catalog id (e.g. `text-editor`)
+    /// or a fully-qualified `https://...tytus-app.json` URL.
+    ///
+    /// The CLI cannot reach into the running browser's SQLite directly,
+    /// so it delegates to the App Store UI: it copies the install URL to
+    /// stdout (and clipboard if available), and opens the App Store
+    /// Install-from-URL flow on http://localhost:4242.
+    Install {
+        /// Featured id (e.g. `text-editor`) OR full https manifest URL.
+        target: String,
+        /// Skip opening the browser; just print the URL.
+        #[arg(long)]
+        no_open: bool,
+        /// Override the catalog URL when resolving a Featured id.
+        #[arg(long, value_name = "URL")]
+        catalog_url: Option<String>,
+    },
+    /// Print uninstall instructions for an app id. The CLI cannot mutate
+    /// the App Store's SQLite directly today; this command surfaces the
+    /// click-path the user should take.
+    Uninstall {
+        /// App id to uninstall (e.g. `text-editor`).
+        id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum ChannelsAction {
     /// Configure a new chat channel for the pod's agent. Stores
     /// credentials in the OS keychain, writes them to the pod's
@@ -358,6 +403,16 @@ enum Commands {
     Agent {
         #[command(subcommand)]
         action: AgentAction,
+    },
+    /// Manage Tytus OS user apps (the things in the App Store): browse the
+    /// curated catalog, copy a manifest URL for one-click install in the
+    /// shell, list what's available. The CLI does not touch the in-browser
+    /// SQLite directly — install/uninstall are surfaced through the App
+    /// Store UI. Use `tytus app catalog` to discover, then either click
+    /// Install in the App Store or paste the URL into "Install from URL".
+    App {
+        #[command(subcommand)]
+        action: AppAction,
     },
     /// Clear stale tunnel state (tunnels are stopped via Ctrl+C in connect)
     Disconnect {
@@ -790,6 +845,7 @@ async fn main() {
             }
         }
         Some(Commands::Agent { action }) => cmd_agent(&http, action, cli.json).await,
+        Some(Commands::App { action }) => cmd_app(action, cli.json).await,
         Some(Commands::Disconnect { pod }) => cmd_disconnect(pod, cli.json).await,
         Some(Commands::Revoke { pod }) => cmd_revoke(&http, &pod, cli.json).await,
         Some(Commands::Logout { all }) => cmd_logout(&http, cli.json, all).await,
@@ -3865,6 +3921,224 @@ async fn cmd_exec(
 //   - `services/wannolot-infrastructure/agent-manager/app.py` — DAM's
 //     reader that merges channels.json into container env_vars
 //   - `services/tytus-cli/dev/design/2026-04-20-unblock-openclaw-channels.md`
+
+// ─────────────────────────────────────────────────────────────────────
+// `tytus app` — surface the Tytus OS App Store catalog from the CLI
+// ─────────────────────────────────────────────────────────────────────
+//
+// Phase 2.5 of SPRINT-TYTUS-APP-SYSTEM-V1. The CLI cannot mutate the
+// running browser's SQLite directly today (it lives in opfs/wasm), so
+// these commands surface URLs + instructions: catalog/list fetches the
+// shared remote catalog at github.com/traylinx/tytus-app-catalog,
+// install resolves a target id to a manifest URL and opens the
+// App Store ready-to-paste, uninstall prints the click-path. Real
+// in-place mutation lands once a daemon endpoint is wired (post-v0.1).
+
+const FEATURED_CATALOG_URL: &str =
+    "https://cdn.jsdelivr.net/gh/traylinx/tytus-app-catalog@v0.2.0/featured.json";
+const APP_STORE_URL: &str = "http://localhost:4242/?app=app-store";
+
+#[derive(serde::Deserialize, Debug)]
+struct CatalogEntry {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    category: String,
+    #[serde(rename = "manifestUrl")]
+    manifest_url: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct CatalogPayload {
+    #[serde(default)]
+    apps: Vec<CatalogEntry>,
+}
+
+async fn fetch_app_catalog(url: &str) -> Result<Vec<CatalogEntry>, String> {
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("fetch failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("catalog returned HTTP {}", resp.status()));
+    }
+    let body: CatalogPayload = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse failed: {}", e))?;
+    Ok(body.apps)
+}
+
+async fn cmd_app(action: AppAction, json: bool) {
+    match action {
+        AppAction::Catalog { url } | AppAction::List { url } => {
+            cmd_app_catalog(url.as_deref(), json).await;
+        }
+        AppAction::Install {
+            target,
+            no_open,
+            catalog_url,
+        } => cmd_app_install(target, no_open, catalog_url.as_deref(), json).await,
+        AppAction::Uninstall { id } => cmd_app_uninstall(&id, json),
+    }
+}
+
+async fn cmd_app_catalog(url_override: Option<&str>, json: bool) {
+    let url = url_override.unwrap_or(FEATURED_CATALOG_URL);
+    let apps = match fetch_app_catalog(url).await {
+        Ok(a) => a,
+        Err(e) => {
+            if json {
+                println!("{}", serde_json::json!({ "error": e, "url": url }));
+            } else {
+                eprintln!("failed to fetch catalog: {}", e);
+                eprintln!("url: {}", url);
+            }
+            return;
+        }
+    };
+
+    if json {
+        let payload: Vec<serde_json::Value> = apps
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "id": a.id,
+                    "name": a.name,
+                    "category": a.category,
+                    "description": a.description,
+                    "manifestUrl": a.manifest_url,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::json!({ "apps": payload }));
+        return;
+    }
+
+    if apps.is_empty() {
+        println!("No apps in catalog at {}", url);
+        return;
+    }
+    println!(
+        "{:<20} {:<24} {:<14} {}",
+        "ID", "NAME", "CATEGORY", "MANIFEST URL"
+    );
+    println!("{}", "─".repeat(80));
+    for a in &apps {
+        println!(
+            "{:<20} {:<24} {:<14} {}",
+            a.id, a.name, a.category, a.manifest_url
+        );
+    }
+    println!();
+    println!("Install:  tytus app install <id>");
+    println!("Open URL: tytus app install <id> --no-open  (just prints the URL)");
+}
+
+async fn cmd_app_install(
+    target: String,
+    no_open: bool,
+    catalog_url: Option<&str>,
+    json: bool,
+) {
+    // Target can be either a Featured id OR a fully-qualified manifest URL.
+    let manifest_url = if target.starts_with("https://") {
+        target
+    } else {
+        // Look up by id in the catalog.
+        let url = catalog_url.unwrap_or(FEATURED_CATALOG_URL);
+        let apps = match fetch_app_catalog(url).await {
+            Ok(a) => a,
+            Err(e) => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "error": e, "target": target })
+                    );
+                } else {
+                    eprintln!("failed to fetch catalog: {}", e);
+                    eprintln!("(falling back: pass a fully-qualified https:// URL instead of an id)");
+                }
+                return;
+            }
+        };
+        match apps.into_iter().find(|a| a.id == target) {
+            Some(a) => a.manifest_url,
+            None => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "error": "id not in catalog",
+                            "id": target,
+                            "catalog_url": url,
+                        })
+                    );
+                } else {
+                    eprintln!("'{}' is not in the Featured catalog.", target);
+                    eprintln!("Run `tytus app catalog` to see available ids,");
+                    eprintln!("or pass the full https://...tytus-app.json URL.");
+                }
+                return;
+            }
+        }
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "manifestUrl": manifest_url,
+                "appStoreUrl": APP_STORE_URL,
+                "instruction": "Paste manifestUrl into App Store → Install from URL.",
+            })
+        );
+    } else {
+        println!("📦 Tytus App Install");
+        println!();
+        println!("   Manifest URL:");
+        println!("     {}", manifest_url);
+        println!();
+        println!("   In Tytus OS App Store:");
+        println!("     1. Open App Store → Tytus Apps tab");
+        println!("     2. Click \"Install from URL\"");
+        println!("     3. Paste the URL above and Install");
+        println!();
+        if no_open {
+            println!("   (--no-open passed; not opening browser.)");
+        } else {
+            println!("   Opening App Store at {} …", APP_STORE_URL);
+            if let Err(e) = open::that(APP_STORE_URL) {
+                eprintln!("   (failed to open browser: {} — copy the URL manually.)", e);
+            }
+        }
+    }
+}
+
+fn cmd_app_uninstall(id: &str, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "id": id,
+                "appStoreUrl": APP_STORE_URL,
+                "instruction": "Open App Store → Tytus Apps → find this id → Uninstall.",
+            })
+        );
+    } else {
+        println!("🗑  Tytus App Uninstall");
+        println!();
+        println!("   App id: {}", id);
+        println!();
+        println!("   In Tytus OS App Store:");
+        println!("     1. Open App Store → Tytus Apps tab");
+        println!("     2. Find the row for `{}`", id);
+        println!("     3. Click Uninstall (then Confirm uninstall)");
+        println!();
+        println!("   App Store URL: {}", APP_STORE_URL);
+    }
+}
 
 async fn cmd_channels(http: &atomek_core::HttpClient, action: ChannelsAction, json: bool) {
     match action {
