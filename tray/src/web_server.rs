@@ -2618,6 +2618,14 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/files/open-downloads") => {
             handle_files_open_downloads(request, &query);
         }
+        // Native clipboard bridge. Text-only by design; images/files stay in
+        // browser Clipboard API until the daemon has a richer pasteboard model.
+        (Method::Get, "/api/clipboard/text") => {
+            handle_clipboard_text_get(request);
+        }
+        (Method::Post, "/api/clipboard/text") => {
+            handle_clipboard_text_set(request);
+        }
         (Method::Post, "/api/workspace/open") => {
             handle_workspace_open(request);
         }
@@ -6024,6 +6032,146 @@ fn handle_workspace_open(request: Request) {
             "path": path.to_string_lossy(),
         }),
     );
+}
+
+const MAX_CLIPBOARD_TEXT_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct ClipboardTextBody {
+    text: String,
+}
+
+fn handle_clipboard_text_get(request: Request) {
+    match read_system_clipboard_text() {
+        Ok(text) => respond_json(request, 200, &serde_json::json!({"text": text})),
+        Err(e) => respond_json(request, 503, &serde_json::json!({"error": e})),
+    }
+}
+
+fn handle_clipboard_text_set(mut request: Request) {
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: ClipboardTextBody = match serde_json::from_str(&buf) {
+        Ok(v) => v,
+        Err(_) => {
+            respond_json(request, 400, &serde_json::json!({"error":"bad json"}));
+            return;
+        }
+    };
+    if body.text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+        respond_json(request, 413, &serde_json::json!({"error":"clipboard text exceeds 2 MiB"}));
+        return;
+    }
+    match write_system_clipboard_text(&body.text) {
+        Ok(()) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 503, &serde_json::json!({"error": e})),
+    }
+}
+
+fn read_system_clipboard_text() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("pbpaste")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err("pbpaste failed".to_string());
+        }
+        return String::from_utf8(out.stdout).map_err(|e| e.to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for (bin, args) in [
+            ("wl-paste", &["--no-newline"][..]),
+            ("xclip", &["-selection", "clipboard", "-o"][..]),
+            ("xsel", &["--clipboard", "--output"][..]),
+        ] {
+            if let Ok(out) = Command::new(bin).args(args).stdout(Stdio::piped()).stderr(Stdio::null()).output() {
+                if out.status.success() {
+                    return String::from_utf8(out.stdout).map_err(|e| e.to_string());
+                }
+            }
+        }
+        return Err("no clipboard reader found (install wl-clipboard, xclip, or xsel)".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err("Get-Clipboard failed".to_string());
+        }
+        return String::from_utf8(out.stdout).map_err(|e| e.to_string());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err("system clipboard not supported on this platform".to_string())
+    }
+}
+
+fn write_system_clipboard_text(text: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        write_to_command("pbcopy", &[], text)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for (bin, args) in [
+            ("wl-copy", &[][..]),
+            ("xclip", &["-selection", "clipboard"][..]),
+            ("xsel", &["--clipboard", "--input"][..]),
+        ] {
+            if write_to_command(bin, args, text).is_ok() {
+                return Ok(());
+            }
+        }
+        Err("no clipboard writer found (install wl-clipboard, xclip, or xsel)".to_string())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut child = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Set-Clipboard"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        }
+        let status = child.wait().map_err(|e| e.to_string())?;
+        if status.success() { Ok(()) } else { Err("Set-Clipboard failed".to_string()) }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = text;
+        Err("system clipboard not supported on this platform".to_string())
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn write_to_command(bin: &str, args: &[&str], text: &str) -> Result<(), String> {
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() { Ok(()) } else { Err(format!("{} failed", bin)) }
 }
 
 /// POST /api/shared-folders/open-cache — opens
