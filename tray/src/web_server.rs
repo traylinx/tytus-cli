@@ -1658,6 +1658,37 @@ pub fn open_os() {
 /// the current call sites do this; this is a future-maintainer warning.
 pub fn open_os_at(fragment: &str) {
     let fragment = canonical_os_fragment(fragment);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    // Override — when TYTUS_OS_URL is set, route every "Open TytusOS"
+    // shortcut through that base URL instead of the tray's dynamic
+    // tray-web.port. Useful for pinning the tray to a fixed dev URL
+    // (e.g. the Vite dev server at http://localhost:4242/) so menubar
+    // clicks always land on the same origin as the developer's open
+    // tabs. Set via `launchctl setenv TYTUS_OS_URL http://localhost:4242/`
+    // for it to reach the GUI app launched from the Dock / menubar.
+    if let Ok(raw) = std::env::var("TYTUS_OS_URL") {
+        let base = raw.trim().trim_end_matches('/');
+        if !base.is_empty() {
+            // Match the dynamic-port branch's nonce policy: no nonce on
+            // the bare base URL (lets the browser focus the existing tab
+            // on repeat "Open TytusOS" clicks); nonce only when a
+            // fragment is present, so successive deep-link clicks
+            // re-fire hashchange.
+            let url = if fragment.is_empty() {
+                format!("{}/", base)
+            } else {
+                let sep = if fragment.contains('?') { '&' } else { '?' };
+                format!("{}/{}{}n={:x}", base, fragment, sep, nonce)
+            };
+            open_url(&url);
+            return;
+        }
+    }
+
     let port = match current_port() {
         Some(p) => p,
         None => {
@@ -1665,10 +1696,6 @@ pub fn open_os_at(fragment: &str) {
             return;
         }
     };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
     let url = if fragment.is_empty() {
         format!("http://127.0.0.1:{}/", port)
     } else {
@@ -1698,9 +1725,32 @@ fn open_url(url: &str) {
     {
         let _ = Command::new("xdg-open").arg(&url).spawn();
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = url;
+    }
+}
+
+fn open_path(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(path).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("xdg-open").arg(path).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("explorer").arg(path).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = path;
     }
 }
 
@@ -2546,6 +2596,9 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Post, "/api/files/delete") => {
             handle_files_delete(request);
+        }
+        (Method::Post, "/api/files/trash") => {
+            handle_files_trash(request);
         }
         (Method::Post, "/api/files/copy") => {
             handle_files_copy(request);
@@ -5187,6 +5240,17 @@ fn handle_files_list(request: Request, query: &str) {
                 )
             })
         }
+        source if user_file_source_root(source).is_some() => {
+            let (label, root) = user_file_source_root(source).expect("checked above");
+            let _ = fs::create_dir_all(&root);
+            list_local_dir(&root, &rel).map(|rows| {
+                (
+                    label.to_string(),
+                    root.to_string_lossy().to_string(),
+                    rows,
+                )
+            })
+        }
         "shared" => {
             let idx = match query_value_decoded(query, "binding") {
                 Ok(Some(v)) => v.parse::<usize>().ok(),
@@ -5299,9 +5363,41 @@ fn safe_file_name(raw: Option<String>) -> Result<String, String> {
     Ok(name)
 }
 
+fn user_file_source_root(source: &str) -> Option<(&'static str, PathBuf)> {
+    let home = || dirs::home_dir().unwrap_or_else(|| std::env::temp_dir());
+    match source {
+        "user-documents" => Some((
+            "Documents",
+            dirs::document_dir().unwrap_or_else(|| home().join("Documents")),
+        )),
+        "user-desktop" => Some((
+            "Desktop",
+            dirs::desktop_dir().unwrap_or_else(|| home().join("Desktop")),
+        )),
+        "user-downloads" => Some((
+            "Downloads",
+            dirs::download_dir().unwrap_or_else(|| home().join("Downloads")),
+        )),
+        "user-music" => Some((
+            "Music",
+            dirs::audio_dir().unwrap_or_else(|| home().join("Music")),
+        )),
+        "user-pictures" => Some((
+            "Pictures",
+            dirs::picture_dir().unwrap_or_else(|| home().join("Pictures")),
+        )),
+        _ => None,
+    }
+}
+
 fn local_files_root(source: &str, binding: Option<usize>) -> Result<PathBuf, String> {
     match source {
         "tytus-home" => Ok(crate::workspace::ensure_tytus_home()),
+        source if user_file_source_root(source).is_some() => {
+            let (_label, root) = user_file_source_root(source).expect("checked above");
+            fs::create_dir_all(&root).map_err(|e| format!("user folder is not accessible: {}", e))?;
+            Ok(root)
+        }
         "shared" => {
             let Some(idx) = binding else {
                 return Err("missing binding index".to_string());
@@ -5502,6 +5598,68 @@ fn handle_files_delete(mut request: Request) {
     };
     match result {
         Ok(_) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+fn handle_files_trash(mut request: Request) {
+    let body = match read_file_mutation_body(&mut request) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let root = match writable_files_root(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let rel = match safe_relative_path(body.path.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let target = match anchored_existing_entry(&root, &rel) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    if !target.exists() {
+        respond_json(request, 404, &serde_json::json!({"error":"not found"}));
+        return;
+    }
+    let trash_root = crate::workspace::ensure_tytus_home().join(".Trash");
+    if let Err(e) = fs::create_dir_all(&trash_root) {
+        respond_json(request, 500, &serde_json::json!({"error": e.to_string()}));
+        return;
+    }
+    let name = rel
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("item")
+        .replace(['/', '\\', '\0'], "_");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dest = trash_root.join(format!("{}_{}", stamp, name));
+    match fs::rename(&target, &dest) {
+        Ok(_) => respond_json(
+            request,
+            200,
+            &serde_json::json!({
+                "ok": true,
+                "trash_path": dest.to_string_lossy(),
+                "original_path": rel.to_string_lossy(),
+            }),
+        ),
         Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
     }
 }
@@ -5843,11 +6001,7 @@ fn handle_files_open_downloads(request: Request, query: &str) {
     };
     let path = crate::workspace::ensure_download_dir_for_pod(&pod);
     let legacy_path = crate::workspace::legacy_download_dir_for_pod(&pod);
-    let _ = Command::new("open")
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    open_path(&path);
     respond_json(
         request,
         200,
@@ -5861,11 +6015,7 @@ fn handle_files_open_downloads(request: Request, query: &str) {
 
 fn handle_workspace_open(request: Request) {
     let path = crate::workspace::ensure_tytus_home();
-    let _ = Command::new("open")
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    open_path(&path);
     respond_json(
         request,
         200,
@@ -5883,11 +6033,7 @@ fn handle_shared_folders_open_cache(request: Request) {
         .map(|h| format!("{}/.cache/garagetytus", h))
         .unwrap_or_else(|_| "/tmp".to_string());
     let _ = std::fs::create_dir_all(&path);
-    let _ = Command::new("open")
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    open_path(Path::new(&path));
     respond_json(request, 200, &serde_json::json!({"ok": true}));
 }
 
