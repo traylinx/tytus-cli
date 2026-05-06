@@ -10,7 +10,7 @@
 //   - platform file/folder picker ("Push file…")
 //   - terminal drop-in for pod listing ("List inbox")
 //   - local download dir opener ("Open download folder")
-//   - notification helper with "Reveal in Finder" action
+//   - notification helper with platform reveal action
 //
 // All ops shell out to the `tytus` CLI binary so the CLI stays
 // the single source of truth for how sharing behaves.
@@ -59,23 +59,18 @@ pub enum PickerKind {
     Folder,
 }
 
-// ── Notification with Reveal in Finder ───────────────────────
+// ── Notification with platform reveal ───────────────────────
 
-/// Notify the user of a completed transfer. Adds a "Reveal in
-/// Finder" action when a local path is given.
+/// Notify the user of a completed transfer and reveal the local path in the
+/// platform file manager when one is given.
 #[cfg(target_os = "macos")]
 pub fn notify_transfer(title: &str, body: &str, reveal: Option<&std::path::Path>) {
     let _ = atomek_core::platform::dialog::notify(title, body);
     if let Some(path) = reveal {
-        // Brief pause so the notification banner appears before
-        // Finder steals focus. Purely cosmetic.
+        // Brief pause so the notification banner appears before the file
+        // manager steals focus. Purely cosmetic.
         std::thread::sleep(std::time::Duration::from_millis(400));
-        let _ = std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let _ = atomek_core::platform::open::reveal_path(path);
     }
 }
 
