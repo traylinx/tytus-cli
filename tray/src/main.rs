@@ -1995,18 +1995,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 "Tytus Tray v{}\\n\\nPrivate AI pod for your terminal.\\nTraylinx / Makakoo.",
                 version
             );
-            // macOS: display via osascript; everywhere else: println.
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("osascript")
-                    .arg("-e")
-                    .arg(format!(
-                        "display dialog \"{}\" with title \"About Tytus\" buttons {{\"OK\"}} default button 1 with icon note",
-                        msg
-                    ))
-                    .status();
-            }
-            #[cfg(not(target_os = "macos"))]
+            if atomek_core::platform::dialog::show_info("About Tytus", &msg)
+                .map(|a| a == atomek_core::platform::dialog::DialogAnswer::Unsupported)
+                .unwrap_or(true)
             {
                 println!("{}", msg);
             }
@@ -2335,13 +2326,13 @@ fn open_pod_via_forwarder(pod_id: &str) {
                 return;
             }
         }
-        let _ = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(format!(
-                "display notification \"Forwarder for pod {} didn't come up in 3s — opening Terminal for diagnostics.\" with title \"Tytus\"",
+        let _ = atomek_core::platform::dialog::notify(
+            "Tytus",
+            &format!(
+                "Forwarder for pod {} didn't come up in 3s — opening Terminal for diagnostics.",
                 pod_for_poll
-            ))
-            .spawn();
+            ),
+        );
     });
 }
 
@@ -2591,51 +2582,25 @@ fn run_silent_with_notify<F>(
     });
 }
 
-/// Native yes/no dialog via osascript. Returns true iff the user clicked OK.
+/// Native yes/no dialog. Returns true iff the user clicked OK.
 /// Used to gate destructive actions (Sign Out, future pod revocation).
-#[cfg(target_os = "macos")]
 fn confirm_dialog(title: &str, body: &str) -> bool {
-    let script = format!(
-        "display dialog \"{}\" with title \"{}\" buttons {{\"Cancel\", \"OK\"}} default button \"Cancel\" cancel button \"Cancel\" with icon caution",
-        body.replace('"', "\\\"").replace('\n', " "),
-        title.replace('"', "\\\""),
-    );
-    std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn confirm_dialog(_title: &str, _body: &str) -> bool {
-    // On Linux we can't guarantee a GUI confirm dialog is available (no
-    // osascript equivalent everywhere). Skip confirmation — the terminal
-    // window that actually runs the destructive command will prompt.
-    true
+    match atomek_core::platform::dialog::ask_permission(title, body) {
+        Ok(atomek_core::platform::dialog::DialogAnswer::Accepted) => true,
+        Ok(atomek_core::platform::dialog::DialogAnswer::Unsupported) => {
+            // On Linux we can't guarantee a GUI confirm dialog is available.
+            // Skip confirmation — the terminal window that actually runs the
+            // destructive command will prompt.
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Show a notification in the menu bar / notification center.
-#[cfg(target_os = "macos")]
 fn notify(title: &str, body: &str) {
-    let script = format!(
-        "display notification \"{}\" with title \"{}\"",
-        body.replace('"', "\\\""),
-        title.replace('"', "\\\""),
-    );
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let _ = atomek_core::platform::dialog::notify(title, body);
 }
-
-#[cfg(not(target_os = "macos"))]
-fn notify(_title: &str, _body: &str) {}
 
 /// User-facing recovery dialog when Connect fails to bring the gateway
 /// up within the 60s verification window. Three buttons:
