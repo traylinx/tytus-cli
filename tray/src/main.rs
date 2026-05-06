@@ -1952,9 +1952,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             notify("Tytus", "Config JSON copied to clipboard.");
         }
         "open_mcp_guide" => {
-            let _ = std::process::Command::new("open")
-                .arg("https://github.com/traylinx/tytus-cli#connect-from-claude-cursor-opencode")
-                .status();
+            let _ = atomek_core::platform::open::open_url(
+                "https://github.com/traylinx/tytus-cli#connect-from-claude-cursor-opencode",
+            );
         }
         "test" => {
             // TytusOS streams `tytus test` in-page via /api/test. Deep-link
@@ -1987,7 +1987,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             });
         }
         "docs" => {
-            let _ = std::process::Command::new("open").arg(DOCS_URL).status();
+            let _ = atomek_core::platform::open::open_url(DOCS_URL);
         }
         "about" => {
             let version = env!("CARGO_PKG_VERSION");
@@ -2057,7 +2057,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 Some(url) => {
                     // Direct browser open — no forwarder spawn, no tunnel
                     // reachability check needed.
-                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                    let _ = atomek_core::platform::open::open_url(&url);
                     notify("Tytus", &format!("Opening pod {} via public edge", pod_id));
                 }
                 None => open_pod_via_forwarder(&pod_id),
@@ -2322,9 +2322,7 @@ fn short_basename(path: &str) -> String {
 /// poll the marker for ~3s before launching the browser.
 fn open_pod_via_forwarder(pod_id: &str) {
     if let Some(existing_url) = existing_ui_forwarder(pod_id) {
-        let _ = std::process::Command::new("open")
-            .arg(&existing_url)
-            .spawn();
+        let _ = atomek_core::platform::open::open_url(&existing_url);
         return;
     }
     spawn_detached_ui(pod_id);
@@ -2333,7 +2331,7 @@ fn open_pod_via_forwarder(pod_id: &str) {
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(100));
             if let Some(url) = existing_ui_forwarder(&pod_for_poll) {
-                let _ = std::process::Command::new("open").arg(&url).spawn();
+                let _ = atomek_core::platform::open::open_url(&url);
                 return;
             }
         }

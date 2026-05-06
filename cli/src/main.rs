@@ -20,7 +20,7 @@ mod wizard;
 // main.rs can reference it as `tunnel_reap::...` unchanged.
 use atomek_cli::tunnel_pidfile;
 use atomek_cli::tunnel_reap;
-use atomek_core::platform::process;
+use atomek_core::platform::{open as platform_open, process};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use state::{CliState, PodEntry};
@@ -7106,7 +7106,6 @@ async fn cmd_ui(
     no_open: bool,
     json: bool,
 ) {
-    use std::process::Command;
     use tokio::net::{TcpListener, TcpStream};
 
     let state = CliState::load();
@@ -7277,10 +7276,7 @@ async fn cmd_ui(
                     println!("  Reusing it — close the other Terminal window to stop it.");
                 }
                 if !no_open {
-                    #[cfg(target_os = "macos")]
-                    let _ = Command::new("open").arg(&existing_url).spawn();
-                    #[cfg(target_os = "linux")]
-                    let _ = Command::new("xdg-open").arg(&existing_url).spawn();
+                    let _ = platform_open::open_url(&existing_url);
                 }
                 return;
             } else {
@@ -7388,12 +7384,9 @@ async fn cmd_ui(
         println!("Press Ctrl+C to stop.");
     }
 
-    // Open the browser unless --no-open. On macOS use `open`, on Linux `xdg-open`.
+    // Open the browser unless --no-open.
     if !no_open {
-        #[cfg(target_os = "macos")]
-        let _ = Command::new("open").arg(&url).spawn();
-        #[cfg(target_os = "linux")]
-        let _ = Command::new("xdg-open").arg(&url).spawn();
+        let _ = platform_open::open_url(&url);
     }
 
     // A1: upstream health monitor. TCP-probe the upstream every 10s and

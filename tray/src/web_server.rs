@@ -4027,14 +4027,7 @@ fn handle_pod_open(request: Request, query: &str) {
         .and_then(|a| a.ui_url.clone().or_else(|| a.public_url.clone()));
     match url {
         Some(u) => {
-            #[cfg(target_os = "macos")]
-            {
-                let _ = Command::new("open").arg(&u).spawn();
-            }
-            #[cfg(target_os = "linux")]
-            {
-                let _ = Command::new("xdg-open").arg(&u).spawn();
-            }
+            open_url(&u);
             respond_json(request, 200, &serde_json::json!({"ok": true, "url": u}));
         }
         None => {
@@ -7158,31 +7151,7 @@ fn handle_login(request: Request) {
 }
 
 fn open_verification_url(url: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = url;
-        false
-    }
+    atomek_core::platform::open::open_url(url).is_ok()
 }
 
 async fn persist_device_login(
