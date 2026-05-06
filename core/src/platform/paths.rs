@@ -121,6 +121,10 @@ pub fn daemon_pid_file() -> PathBuf {
     runtime_dir().join("daemon.pid")
 }
 
+pub fn tray_pid_file() -> PathBuf {
+    runtime_dir().join("tray.pid")
+}
+
 pub fn tray_web_port_file() -> PathBuf {
     runtime_dir().join("tray-web.port")
 }
@@ -189,6 +193,7 @@ mod tests {
         assert!(control_file().ends_with("control.json"));
         assert!(control_token_file().ends_with("control.token"));
         assert!(daemon_pid_file().ends_with("daemon.pid"));
+        assert!(tray_pid_file().ends_with("tray.pid"));
         assert!(tray_web_port_file().ends_with("tray-web.port"));
     }
 

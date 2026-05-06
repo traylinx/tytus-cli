@@ -7,10 +7,11 @@
 //! - Sign in / Settings / Doctor / About
 //! - Daemon controls
 //!
-//! Single-instance: enforced via a pidfile at /tmp/tytus/tray.pid. Launching
+//! Single-instance: enforced via the platform runtime pidfile. Launching
 //! a second tray pops focus on the existing one and exits.
 //!
-//! Talks to tytus-daemon via Unix socket at /tmp/tytus/daemon.sock.
+//! Talks to tytus-daemon via localhost control plane, with legacy Unix socket
+//! fallback during migration.
 
 use std::sync::{Arc, Mutex};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};

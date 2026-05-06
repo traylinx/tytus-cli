@@ -48,6 +48,38 @@ fn force_kill_process_cross(pid: i32) -> bool {
         .is_some_and(|p| process::force_terminate_process(p).is_ok())
 }
 
+fn daemon_alive_cross() -> bool {
+    if daemon::pid_file_pid().is_some_and(daemon::process_alive) {
+        return true;
+    }
+    if let Ok(control) =
+        atomek_core::platform::ipc::read_control_file(&atomek_core::platform::paths::control_file())
+    {
+        if process::process_exists(control.pid) {
+            return true;
+        }
+    }
+    #[cfg(unix)]
+    {
+        atomek_core::platform::paths::legacy_daemon_socket().exists()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+fn path_with_legacy_fallback(
+    primary: std::path::PathBuf,
+    legacy: std::path::PathBuf,
+) -> std::path::PathBuf {
+    if primary.exists() || !legacy.exists() {
+        primary
+    } else {
+        legacy
+    }
+}
+
 #[cfg(unix)]
 fn is_root_user() -> bool {
     unsafe { libc::geteuid() == 0 }
@@ -6749,10 +6781,15 @@ fn cmd_tray(action: TrayAction, json: bool) {
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false);
-            // Probe /tmp/tytus/tray.pid (the tray's single-instance lock)
-            // and verify the pid is actually alive. More reliable than pgrep,
-            // which has different process names for bundle vs raw binary.
-            let running = std::fs::read_to_string("/tmp/tytus/tray.pid")
+            // Probe the tray single-instance lock and verify the pid is
+            // actually alive. More reliable than pgrep, which has different
+            // process names for bundle vs raw binary. Keep legacy fallback for
+            // trays launched before the platform-runtime migration.
+            let tray_pid_path = path_with_legacy_fallback(
+                atomek_core::platform::paths::tray_pid_file(),
+                atomek_core::platform::paths::legacy_runtime_dir().join("tray.pid"),
+            );
+            let running = std::fs::read_to_string(tray_pid_path)
                 .ok()
                 .and_then(|s| s.trim().parse::<i32>().ok())
                 .map(|pid| process_alive_cross(pid))
@@ -8770,7 +8807,7 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
     // so we hint at both paths: if the daemon's alive and reachable, it's
     // probably transient; if not, re-login.
     let token_valid = state.has_valid_token();
-    let daemon_alive = std::path::Path::new("/tmp/tytus/daemon.sock").exists();
+    let daemon_alive = daemon_alive_cross();
     checks.push((
         "token_valid",
         token_valid,

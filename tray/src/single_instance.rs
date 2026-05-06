@@ -15,12 +15,8 @@
 //!   - Easy to `tail` or `cat` for debugging.
 
 use std::io::Write;
-use std::path::PathBuf;
-
-const PID_FILE: &str = "tray.pid";
-
-fn pidfile_path() -> PathBuf {
-    atomek_core::platform::paths::runtime_dir().join(PID_FILE)
+fn pidfile_path() -> std::path::PathBuf {
+    atomek_core::platform::paths::tray_pid_file()
 }
 
 /// Acquire the single-instance lock. Returns Err with a user-facing message

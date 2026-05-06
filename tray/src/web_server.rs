@@ -15,7 +15,7 @@
 //!   concurrent install job at a time — the UI only lets the user click
 //!   one card. Parallel installs would overspend units anyway.
 //! - Port bound at startup to `127.0.0.1:0` (kernel picks). Written to
-//!   `<tmp>/tytus/tray-web.port` so `open_os()` can read it.
+//!   the platform runtime `tray-web.port` so `open_os()` can read it.
 //! - Lifecycle: server thread owns the `tiny_http::Server` and parks on
 //!   `recv()`. On tray quit we drop the `Arc<Server>` and the kernel
 //!   tears down the listener.
