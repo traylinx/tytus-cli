@@ -2972,62 +2972,8 @@ fn log_file_with_legacy(
 }
 
 /// Open a shell command in a new terminal window.
-///
-/// Uses a `.command` file opened via `open(1)` on macOS — macOS launches
-/// Terminal.app for `.command` files through LaunchServices, which does NOT
-/// require Automation permission (unlike `osascript tell "Terminal" to do
-/// script ...`, which silently fails if the user hasn't granted it).
-///
-/// This is why clicking Doctor did nothing before: tytus-tray had no
-/// Automation entitlement for Terminal.app, so the AppleScript was rejected
-/// with no visible prompt.
-#[cfg(target_os = "macos")]
 pub(crate) fn open_in_terminal_simple(cmd: &str) {
-    let _ = std::fs::create_dir_all("/tmp/tytus");
-    // Unique path per invocation so rapid clicks don't race on the same file.
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let script_path = format!("/tmp/tytus/launch-{}.command", nonce);
-
-    // Why the PATH prepend: `tytus` lives in ~/bin and the user's login shell
-    // only picks it up from .zshrc. A freshly-spawned Terminal window runs a
-    // login shell that sources .zshrc, so usually PATH is correct — but we
-    // prepend defensively so the menu works even on minimal shell configs.
-    // The .command file also self-deletes at the end so /tmp doesn't fill up.
-    let script = format!(
-        "#!/bin/bash\n\
-         export PATH=\"$HOME/bin:/usr/local/bin:/opt/homebrew/bin:$PATH\"\n\
-         cd \"$HOME\"\n\
-         {cmd}\n\
-         rm -f \"{path}\"\n",
-        cmd = cmd,
-        path = script_path,
-    );
-
-    if std::fs::write(&script_path, &script).is_err() {
-        return;
-    }
-
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
-
-    let _ = atomek_core::platform::open::open_path(std::path::Path::new(&script_path));
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn open_in_terminal_simple(cmd: &str) {
-    // Best-effort: try common Linux terminals.
-    for term in &["gnome-terminal", "konsole", "xterm"] {
-        if std::process::Command::new(term)
-            .args(["--", "sh", "-c", cmd])
-            .spawn()
-            .is_ok()
-        {
-            return;
-        }
-    }
+    let _ = atomek_core::platform::terminal::open_shell_command(cmd);
 }
 
 /// Get the current pod connection info from the daemon.

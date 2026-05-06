@@ -12,3 +12,4 @@ pub mod open;
 pub mod paths;
 pub mod process;
 pub mod service;
+pub mod terminal;
