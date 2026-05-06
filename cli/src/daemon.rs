@@ -13,12 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
-/// Default socket path. Lives next to PID files so cleanup is easy.
-const SOCKET_DIR: &str = "/tmp/tytus";
 const SOCKET_NAME: &str = "daemon.sock";
-
-/// Daemon PID file for liveness detection by the CLI.
-const PID_FILE: &str = "daemon.pid";
 
 // ── Protocol types ──────────────────────────────────────────
 
@@ -103,11 +98,11 @@ pub enum DaemonStatus {
 // ── Socket path helpers ─────────────────────────────────────
 
 pub fn socket_path() -> PathBuf {
-    PathBuf::from(SOCKET_DIR).join(SOCKET_NAME)
+    atomek_core::platform::paths::runtime_dir().join(SOCKET_NAME)
 }
 
 pub fn pid_path() -> PathBuf {
-    PathBuf::from(SOCKET_DIR).join(PID_FILE)
+    atomek_core::platform::paths::daemon_pid_file()
 }
 
 pub fn pid_file_pid() -> Option<i32> {
@@ -176,7 +171,7 @@ pub fn daemon_pid_is_fresh(max_age: std::time::Duration) -> bool {
 }
 
 /// Remove PID files whose recorded PID is no longer a live process.
-/// Targets `daemon.pid`, `tray.pid`, and `tunnel-*.pid` in SOCKET_DIR.
+/// Targets `daemon.pid`, `tray.pid`, and `tunnel-*.pid` in the runtime dir.
 /// Safe to call at startup — the daemon hasn't written its own pidfile
 /// yet. Uses `kill -0` semantics (signal 0 = check only, does not kill).
 fn sweep_stale_pids(dir: &Path) {
@@ -250,8 +245,9 @@ pub async fn run_daemon() {
         return;
     }
 
-    let sock_dir = Path::new(SOCKET_DIR);
-    let _ = std::fs::create_dir_all(sock_dir);
+    let sock_dir = atomek_core::platform::paths::runtime_dir();
+    let sock_dir = sock_dir.as_path();
+    let _ = atomek_core::platform::paths::ensure_private_dir(sock_dir);
     // Security: tighten /tmp/tytus/ to owner-only. See PENTEST finding E5.
     #[cfg(unix)]
     {
@@ -328,6 +324,32 @@ pub async fn run_daemon() {
 
     // Shutdown signal: watch channel (false = running, true = shutting down)
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    match crate::daemon_http::spawn_control_plane(ctx.clone(), shutdown_tx.clone()) {
+        Ok(http) => {
+            let control =
+                atomek_core::platform::ipc::ControlFile::new(http.port, std::process::id());
+            if let Err(e) = atomek_core::platform::ipc::write_control_token_file(
+                &control.token_file,
+                &http.token,
+            ) {
+                eprintln!("tytus: failed to write HTTP control token: {}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = atomek_core::platform::ipc::write_control_file(
+                &atomek_core::platform::paths::control_file(),
+                &control,
+            ) {
+                eprintln!("tytus: failed to write HTTP control file: {}", e);
+                std::process::exit(1);
+            }
+            tracing::info!("HTTP control plane listening on 127.0.0.1:{}", http.port);
+        }
+        Err(e) => {
+            eprintln!("tytus: failed to start HTTP control plane: {}", e);
+            std::process::exit(1);
+        }
+    }
 
     tracing::info!(
         "tytus-daemon started (pid {}), listening on {}",
@@ -424,6 +446,8 @@ pub async fn run_daemon() {
     // Cleanup
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_file(&pid_file);
+    let _ = std::fs::remove_file(atomek_core::platform::paths::control_file());
+    let _ = std::fs::remove_file(atomek_core::platform::paths::control_token_file());
     tracing::info!("Daemon exited cleanly");
 }
 
@@ -470,7 +494,7 @@ async fn handle_connection(
 
 // ── Command dispatch ────────────────────────────────────────
 
-async fn dispatch_command(
+pub(crate) async fn dispatch_command(
     req: &Request,
     ctx: &std::sync::Arc<DaemonCtx>,
     shutdown_tx: &watch::Sender<bool>,
@@ -892,6 +916,10 @@ pub async fn send_command_timeout(
     args: serde_json::Value,
     timeout: std::time::Duration,
 ) -> Option<Response> {
+    if let Some(resp) = send_http_command(cmd, args.clone(), timeout).await {
+        return Some(resp);
+    }
+
     tokio::time::timeout(timeout, async move {
         let sock = socket_path();
         if !sock.exists() && daemon_pid_is_fresh(std::time::Duration::from_secs(30)) {
@@ -913,4 +941,29 @@ pub async fn send_command_timeout(
     .await
     .ok()
     .flatten()
+}
+
+async fn send_http_command(
+    cmd: &str,
+    args: serde_json::Value,
+    timeout: std::time::Duration,
+) -> Option<Response> {
+    let control = atomek_core::platform::ipc::read_control_file(
+        &atomek_core::platform::paths::control_file(),
+    )
+    .ok()?;
+    if control.port == 0 || !control.bind.is_loopback() {
+        return None;
+    }
+    let token = atomek_core::platform::ipc::read_control_token_file(&control.token_file).ok()?;
+    let url = format!("http://{}:{}/v1/command", control.bind, control.port);
+    let client = reqwest::Client::builder().timeout(timeout).build().ok()?;
+    let resp = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&serde_json::json!({"cmd": cmd, "args": args}))
+        .send()
+        .await
+        .ok()?;
+    resp.json::<Response>().await.ok()
 }

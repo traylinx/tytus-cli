@@ -4,6 +4,8 @@ mod channels_store;
 mod cmd_transfer;
 #[cfg(unix)]
 mod daemon;
+#[cfg(unix)]
+mod daemon_http;
 #[cfg(windows)]
 mod daemon_windows;
 #[cfg(windows)]

@@ -1,7 +1,8 @@
 //! Build a `TrayState` snapshot from three independent signals:
 //!
 //!   1. **Gateway probe** (source of truth for "is my pod reachable?")
-//!   2. **Daemon socket** (`/tmp/tytus/daemon.sock` — rich status if alive)
+//!   2. **Daemon control plane** (localhost HTTP via `control.json`, falling
+//!      back to legacy `/tmp/tytus/daemon.sock` on Unix)
 //!   3. **State file** (`~/Library/Application Support/tytus/state.json` —
 //!      fallback for email / tier / pods / agent types when the daemon is offline)
 //!
@@ -21,8 +22,6 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use super::PodInfo;
-
-const SOCKET_PATH: &str = "/tmp/tytus/daemon.sock";
 
 /// Derive the per-pod gateway auth token — the same sha256 the edge
 /// plugin + openclaw startup use — so the tray menu and the install
@@ -354,7 +353,12 @@ fn daemon_status() -> Option<DaemonSnap> {
 
 #[cfg(unix)]
 fn send_command(cmd: &str) -> Option<serde_json::Value> {
-    let mut stream = UnixStream::connect(SOCKET_PATH).ok()?;
+    if let Some(v) = send_http_command(cmd) {
+        return Some(v);
+    }
+
+    let socket_path = atomek_core::platform::paths::runtime_dir().join("daemon.sock");
+    let mut stream = UnixStream::connect(socket_path).ok()?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(3)))
         .ok()?;
@@ -372,8 +376,32 @@ fn send_command(cmd: &str) -> Option<serde_json::Value> {
 }
 
 #[cfg(not(unix))]
-fn send_command(_cmd: &str) -> Option<serde_json::Value> {
-    None
+fn send_command(cmd: &str) -> Option<serde_json::Value> {
+    send_http_command(cmd)
+}
+
+fn send_http_command(cmd: &str) -> Option<serde_json::Value> {
+    let control = atomek_core::platform::ipc::read_control_file(
+        &atomek_core::platform::paths::control_file(),
+    )
+    .ok()?;
+    if control.port == 0 || !control.bind.is_loopback() {
+        return None;
+    }
+    let token = atomek_core::platform::ipc::read_control_token_file(&control.token_file).ok()?;
+    let url = format!("http://{}:{}/v1/command", control.bind, control.port);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+    client
+        .post(url)
+        .bearer_auth(token)
+        .json(&serde_json::json!({"cmd": cmd, "args": serde_json::Value::Null}))
+        .send()
+        .ok()?
+        .json::<serde_json::Value>()
+        .ok()
 }
 
 // ── State.json fallback ─────────────────────────────────────
