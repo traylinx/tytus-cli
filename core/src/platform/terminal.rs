@@ -1,8 +1,8 @@
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 #[cfg(not(target_os = "macos"))]
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{open, paths};
 
@@ -22,10 +22,7 @@ pub fn open_shell_command(command: &str) -> io::Result<()> {
 fn write_launch_script(command: &str) -> io::Result<PathBuf> {
     let dir = paths::runtime_dir().join("launch");
     paths::ensure_private_dir(&dir)?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nonce = random_nonce_hex()?;
 
     #[cfg(windows)]
     let path = dir.join(format!("launch-{nonce}.cmd"));
@@ -33,13 +30,28 @@ fn write_launch_script(command: &str) -> io::Result<PathBuf> {
     let path = dir.join(format!("launch-{nonce}.command"));
 
     let body = script_body(command);
-    std::fs::write(&path, body)?;
+    write_private_script(&path, body.as_bytes())?;
+    Ok(path)
+}
+
+fn random_nonce_hex() -> io::Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    Ok(hex::encode(bytes))
+}
+
+fn write_private_script(path: &Path, body: &[u8]) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o700);
     }
-    Ok(path)
+    let mut file = options.open(path)?;
+    file.write_all(body)?;
+    file.sync_all()?;
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -136,7 +148,7 @@ fn launch_script(_path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::script_body;
+    use super::{random_nonce_hex, script_body};
 
     #[test]
     fn unix_script_self_deletes_before_running_command() {
@@ -158,5 +170,12 @@ mod tests {
             assert!(body.contains("echo ok"));
             assert!(body.starts_with("@echo off"));
         }
+    }
+
+    #[test]
+    fn launch_script_nonce_is_128_bit_hex() {
+        let nonce = random_nonce_hex().expect("nonce");
+        assert_eq!(nonce.len(), 32);
+        assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
