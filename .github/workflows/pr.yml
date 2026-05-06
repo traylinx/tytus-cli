@@ -54,9 +54,11 @@ jobs:
         run: cargo metadata --no-deps --format-version 1
 
       - name: Cargo check all targets
+        timeout-minutes: 15
         run: cargo check --workspace --all-targets
 
       - name: Cargo test all targets
+        timeout-minutes: 15
         run: cargo test --workspace --all-targets
 
   tytus-os-dist:
