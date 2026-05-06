@@ -3452,42 +3452,14 @@ fn agent_units_for(agent_type: &str) -> u32 {
     }
 }
 
-#[cfg(unix)]
 fn terminate_process(pid: u32) -> Result<(), String> {
-    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error().to_string())
-    }
+    atomek_core::platform::process::terminate_process(pid).map_err(|e| e.to_string())
 }
 
-#[cfg(windows)]
-fn terminate_process(pid: u32) -> Result<(), String> {
-    let status = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .status()
-        .map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("taskkill exited with {}", status))
-    }
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn terminate_process(_pid: u32) -> Result<(), String> {
-    Err("process termination is unsupported on this platform".to_string())
-}
-
-#[cfg(unix)]
 fn process_exists(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-fn process_exists(_pid: i32) -> bool {
-    false
+    u32::try_from(pid)
+        .ok()
+        .is_some_and(atomek_core::platform::process::process_exists)
 }
 
 /// POST /api/jobs/<id>/cancel — SIGTERM the job's child process.
@@ -7571,12 +7543,11 @@ fn handle_daemon_lifecycle(request: Request, action: DaemonAction) {
 }
 
 fn handle_daemon_status(request: Request) {
-    // Canonical liveness check: read /tmp/tytus/daemon.pid + `kill -0`
-    // probe. `kill -0 pid` returns Ok if the process exists and the
-    // sender has permission to signal it; Err(ESRCH) if it's gone.
+    // Canonical liveness check: read the platform daemon pidfile and
+    // probe with the shared process substrate.
     // Matches the CLI's `tytus daemon status` logic so results agree
     // between surfaces.
-    let pid_path = PathBuf::from("/tmp/tytus/daemon.pid");
+    let pid_path = atomek_core::platform::paths::daemon_pid_file();
     let pid: Option<i32> = std::fs::read_to_string(&pid_path)
         .ok()
         .and_then(|s| s.trim().parse().ok());

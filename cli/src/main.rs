@@ -20,6 +20,7 @@ mod wizard;
 // main.rs can reference it as `tunnel_reap::...` unchanged.
 use atomek_cli::tunnel_pidfile;
 use atomek_cli::tunnel_reap;
+use atomek_core::platform::process;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use state::{CliState, PodEntry};
@@ -31,57 +32,20 @@ use state::{CliState, PodEntry};
 /// prepend a curated TLDR via `before_help`. Power users still get
 /// clap's full alphabetical Commands: list below it.
 
-#[cfg(unix)]
 fn process_alive_cross(pid: i32) -> bool {
-    if pid <= 1 {
-        return false;
-    }
-    (unsafe { libc::kill(pid, 0) == 0 })
-        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    u32::try_from(pid).ok().is_some_and(process::process_exists)
 }
 
-#[cfg(windows)]
-fn process_alive_cross(pid: i32) -> bool {
-    if pid <= 1 {
-        return false;
-    }
-    std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-        .output()
+fn terminate_process_cross(pid: i32) -> bool {
+    u32::try_from(pid)
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-        .unwrap_or(false)
+        .is_some_and(|p| process::terminate_process(p).is_ok())
 }
 
-#[cfg(unix)]
-fn terminate_process_cross(pid: i32) -> bool {
-    pid > 1 && unsafe { libc::kill(pid, libc::SIGTERM) == 0 }
-}
-
-#[cfg(windows)]
-fn terminate_process_cross(pid: i32) -> bool {
-    pid > 1
-        && std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-}
-
-#[cfg(unix)]
 fn force_kill_process_cross(pid: i32) -> bool {
-    pid > 1 && unsafe { libc::kill(pid, libc::SIGKILL) == 0 }
-}
-
-#[cfg(windows)]
-fn force_kill_process_cross(pid: i32) -> bool {
-    pid > 1
-        && std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+    u32::try_from(pid)
+        .ok()
+        .is_some_and(|p| process::force_terminate_process(p).is_ok())
 }
 
 #[cfg(unix)]

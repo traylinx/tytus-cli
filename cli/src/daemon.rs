@@ -113,27 +113,10 @@ pub fn pid_file_pid() -> Option<i32> {
         .ok()
 }
 
-#[cfg(unix)]
 pub fn process_alive(pid: i32) -> bool {
-    if pid <= 1 {
-        return false;
-    }
-    (unsafe { libc::kill(pid, 0) == 0 })
-        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(windows)]
-pub fn process_alive(pid: i32) -> bool {
-    if pid <= 1 {
-        return false;
-    }
-    std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-        .output()
+    u32::try_from(pid)
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-        .unwrap_or(false)
+        .is_some_and(atomek_core::platform::process::process_exists)
 }
 
 pub fn pid_is_tytus_daemon(pid: i32) -> bool {

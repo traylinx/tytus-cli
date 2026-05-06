@@ -1,6 +1,6 @@
 //! Single-instance guard for tytus-tray.
 //!
-//! Uses a PID file at /tmp/tytus/tray.pid. On startup:
+//! Uses a PID file in the platform runtime dir. On startup:
 //!   1. If no pidfile → take the lock, write our pid, return Ok.
 //!   2. If pidfile exists and that pid is alive → return Err (caller exits).
 //!   3. If pidfile exists but the pid is dead (stale) → overwrite, take lock.
@@ -17,17 +17,17 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-const PID_DIR: &str = "/tmp/tytus";
 const PID_FILE: &str = "tray.pid";
 
 fn pidfile_path() -> PathBuf {
-    PathBuf::from(PID_DIR).join(PID_FILE)
+    atomek_core::platform::paths::runtime_dir().join(PID_FILE)
 }
 
 /// Acquire the single-instance lock. Returns Err with a user-facing message
 /// if another tray is already running.
 pub fn acquire() -> Result<(), String> {
-    let _ = std::fs::create_dir_all(PID_DIR);
+    atomek_core::platform::paths::ensure_private_dir(&atomek_core::platform::paths::runtime_dir())
+        .map_err(|e| format!("cannot create runtime dir: {}", e))?;
     let path = pidfile_path();
 
     // If a pidfile exists, check whether the owning process is actually alive.
@@ -75,22 +75,8 @@ pub fn release() {
     }
 }
 
-/// kill(pid, 0) probes existence without sending a signal.
-/// Returns true if the process exists (even if we can't signal it — EPERM
-/// means it's alive but owned by another user / different privilege level).
 fn is_process_alive(pid: i32) -> bool {
-    #[cfg(unix)]
-    {
-        let ret = unsafe { libc::kill(pid, 0) };
-        if ret == 0 {
-            return true;
-        }
-        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        errno == libc::EPERM
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
+    u32::try_from(pid)
+        .ok()
+        .is_some_and(atomek_core::platform::process::process_exists)
 }
