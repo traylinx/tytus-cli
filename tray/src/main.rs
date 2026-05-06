@@ -3013,7 +3013,7 @@ pub(crate) fn open_in_terminal_simple(cmd: &str) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
 
-    let _ = std::process::Command::new("open").arg(&script_path).spawn();
+    let _ = atomek_core::platform::open::open_path(std::path::Path::new(&script_path));
 }
 
 #[cfg(not(target_os = "macos"))]
