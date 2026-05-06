@@ -1,6 +1,7 @@
 pub mod device;
 pub mod error;
 pub mod http;
+pub mod platform;
 pub mod redact;
 pub mod token;
 
