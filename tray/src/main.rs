@@ -2617,48 +2617,48 @@ fn notify(title: &str, body: &str) {
 #[cfg(target_os = "macos")]
 fn show_connect_failure_help() {
     let body = "I can't tell if your tunnel came up within 60 seconds. This usually means one of:\n\n• Your network just changed (WiFi switch, VPN toggle)\n• The droplet is momentarily unreachable\n• A stale tunnel process is blocking a clean retry\n\nTry Again will disconnect cleanly and reconnect. Copy Diag puts a short diagnostic on your clipboard you can share.";
-    let script = format!(
-        "display dialog \"{}\" with title \"Tytus — connection trouble\" \
-         buttons {{\"Copy Diag\", \"Cancel\", \"Try Again\"}} \
-         default button \"Try Again\" cancel button \"Cancel\" with icon caution",
-        body.replace('"', "\\\"").replace('\n', "\\n"),
-    );
-    let out = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output();
-    let stdout = match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-        Err(_) => return,
-    };
-    if stdout.contains("Try Again") {
-        // Disconnect first (reaps the stale tunnel), then reconnect.
-        // Run in a Terminal so sudo can prompt for the reconnect pass.
-        busy_set("Retrying connection…");
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            busy_clear();
-        });
-        open_in_terminal_simple(
-            "tytus disconnect 2>/dev/null; tytus connect && exit; echo; echo 'Retry failed — see above.'; echo 'Press Enter to close…'; read _"
-        );
-    } else if stdout.contains("Copy Diag") {
-        let diag = build_diag_summary();
-        // Write to pbcopy via stdin pipe.
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(stdin) = child.stdin.as_mut() {
-                use std::io::Write;
-                let _ = stdin.write_all(diag.as_bytes());
-            }
-            let _ = child.wait();
+    let choice = atomek_core::platform::dialog::choose_button(
+        "Tytus — connection trouble",
+        body,
+        &["Copy Diag", "Cancel", "Try Again"],
+        "Try Again",
+        Some("Cancel"),
+        "caution",
+    )
+    .ok()
+    .flatten();
+    match choice.as_deref() {
+        Some("Try Again") => {
+            // Disconnect first (reaps the stale tunnel), then reconnect.
+            // Run in a Terminal so sudo can prompt for the reconnect pass.
+            busy_set("Retrying connection…");
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                busy_clear();
+            });
+            open_in_terminal_simple(
+                "tytus disconnect 2>/dev/null; tytus connect && exit; echo; echo 'Retry failed — see above.'; echo 'Press Enter to close…'; read _"
+            );
         }
-        notify(
-            "Tytus",
-            "Diagnostic copied to clipboard — paste it when asking for help.",
-        );
+        Some("Copy Diag") => {
+            let diag = build_diag_summary();
+            // Write to pbcopy via stdin pipe.
+            if let Ok(mut child) = std::process::Command::new("pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(diag.as_bytes());
+                }
+                let _ = child.wait();
+            }
+            notify(
+                "Tytus",
+                "Diagnostic copied to clipboard — paste it when asking for help.",
+            );
+        }
+        _ => {}
     }
 }
 

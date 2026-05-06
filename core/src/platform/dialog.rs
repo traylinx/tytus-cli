@@ -105,6 +105,54 @@ pub fn notify(title: &str, message: &str) -> io::Result<DialogAnswer> {
     }
 }
 
+pub fn choose_button(
+    title: &str,
+    message: &str,
+    buttons: &[&str],
+    default_button: &str,
+    cancel_button: Option<&str>,
+    icon: &str,
+) -> io::Result<Option<String>> {
+    #[cfg(target_os = "macos")]
+    {
+        let button_list = buttons
+            .iter()
+            .map(|button| applescript_quote(button))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cancel_clause = cancel_button
+            .map(|button| format!(" cancel button {}", applescript_quote(button)))
+            .unwrap_or_default();
+        let script = format!(
+            "set r to display dialog {} with title {} buttons {{{}}} default button {}{} with icon {}
+button returned of r",
+            applescript_quote(message),
+            applescript_quote(title),
+            button_list,
+            applescript_quote(default_button),
+            cancel_clause,
+            icon,
+        );
+        let output = Command::new("osascript")
+            .args(["-e", &script])
+            .stdin(Stdio::null())
+            .output()?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok(if value.is_empty() { None } else { Some(value) });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (title, message, buttons, default_button, cancel_button, icon);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "button dialog unsupported on this platform",
+        ))
+    }
+}
+
 pub fn prompt_text(
     title: &str,
     message: &str,
