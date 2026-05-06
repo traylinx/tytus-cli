@@ -7550,10 +7550,7 @@ fn handle_log_tail(request: Request, query: &str) {
             }
         }
     }
-    let path = match name {
-        "startup" => PathBuf::from("/tmp/tytus/autostart.log"),
-        _ => PathBuf::from("/tmp/tytus/daemon.log"),
-    };
+    let path = log_file_with_legacy(name);
     let meta = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(_) => {
@@ -7613,6 +7610,24 @@ fn handle_log_tail(request: Request, query: &str) {
             "missing": false,
         }),
     );
+}
+
+fn log_file_with_legacy(name: &str) -> PathBuf {
+    let (primary, legacy) = match name {
+        "startup" => (
+            atomek_core::platform::logging::autostart_log_file(),
+            atomek_core::platform::logging::legacy_autostart_log_file(),
+        ),
+        _ => (
+            atomek_core::platform::logging::daemon_log_file(),
+            atomek_core::platform::logging::legacy_daemon_log_file(),
+        ),
+    };
+    if primary.exists() || !legacy.exists() {
+        primary
+    } else {
+        legacy
+    }
 }
 
 // ── TytusOS Wave 3b: launch in editor ────────────────────────────

@@ -13,6 +13,14 @@ pub fn autostart_log_file() -> PathBuf {
     paths::logs_dir().join("autostart.log")
 }
 
+pub fn legacy_daemon_log_file() -> PathBuf {
+    paths::legacy_runtime_dir().join("daemon.log")
+}
+
+pub fn legacy_autostart_log_file() -> PathBuf {
+    paths::legacy_runtime_dir().join("autostart.log")
+}
+
 pub fn support_bundle_dir() -> PathBuf {
     paths::visible_home().join("Logs").join("Support Bundles")
 }
@@ -26,6 +34,8 @@ mod tests {
         assert!(daemon_log_file().ends_with("daemon.log"));
         assert!(tray_log_file().ends_with("tray.log"));
         assert!(autostart_log_file().ends_with("autostart.log"));
+        assert!(legacy_daemon_log_file().ends_with("daemon.log"));
+        assert!(legacy_autostart_log_file().ends_with("autostart.log"));
         assert!(support_bundle_dir()
             .to_string_lossy()
             .contains("Support Bundles"));

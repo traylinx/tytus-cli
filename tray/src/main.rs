@@ -1961,10 +1961,16 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             web_server::open_os_at("#/run/test");
         }
         "view_daemon_log" => {
-            open_log_file("/tmp/tytus/daemon.log");
+            open_log_file(&log_file_with_legacy(
+                atomek_core::platform::logging::daemon_log_file(),
+                atomek_core::platform::logging::legacy_daemon_log_file(),
+            ));
         }
         "view_startup_log" => {
-            open_log_file("/tmp/tytus/autostart.log");
+            open_log_file(&log_file_with_legacy(
+                atomek_core::platform::logging::autostart_log_file(),
+                atomek_core::platform::logging::legacy_autostart_log_file(),
+            ));
         }
         "doctor" => {
             // TytusOS streams `tytus doctor` in-page via /api/doctor.
@@ -2947,18 +2953,22 @@ fn copy_connection_info(state: &Arc<Mutex<TrayState>>) {
 
 /// Open a log file in the system's default viewer. On macOS that's the
 /// Console app for .log files, which gives live tail + search for free.
-fn open_log_file(path: &str) {
-    if !std::path::Path::new(path).exists() {
-        notify("Tytus", &format!("Log not found yet: {}", path));
+fn open_log_file(path: &std::path::Path) {
+    if !path.exists() {
+        notify("Tytus", &format!("Log not found yet: {}", path.display()));
         return;
     }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(path).spawn();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    let _ = atomek_core::platform::open::open_path(path);
+}
+
+fn log_file_with_legacy(
+    primary: std::path::PathBuf,
+    legacy: std::path::PathBuf,
+) -> std::path::PathBuf {
+    if primary.exists() || !legacy.exists() {
+        primary
+    } else {
+        legacy
     }
 }
 

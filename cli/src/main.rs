@@ -6116,6 +6116,14 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/unknown".to_string());
         let plist_dir = std::path::PathBuf::from(&home).join("Library/LaunchAgents");
+        let autostart_log = atomek_core::platform::logging::autostart_log_file();
+        let daemon_log = atomek_core::platform::logging::daemon_log_file();
+        if let Some(parent) = autostart_log.parent() {
+            let _ = atomek_core::platform::paths::ensure_private_dir(parent);
+        }
+        if let Some(parent) = daemon_log.parent() {
+            let _ = atomek_core::platform::paths::ensure_private_dir(parent);
+        }
         // Two agents: one oneshot that brings the tunnel up at login, one
         // persistent daemon that keeps refreshing tokens 24/7 so the RT never
         // expires server-side. Both are managed atomically by this subcommand.
@@ -6150,9 +6158,9 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     <key>KeepAlive</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/tmp/tytus/autostart.log</string>
+    <string>{autostart_log}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/tytus/autostart.log</string>
+    <string>{autostart_log}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
@@ -6164,7 +6172,8 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     </dict>
 </dict>
 </plist>
-"#
+"#,
+                    autostart_log = autostart_log.display()
                 );
                 if let Err(e) = std::fs::write(&plist_path, plist) {
                     eprintln!("Failed to write plist: {}", e);
@@ -6200,9 +6209,9 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>/tmp/tytus/daemon.log</string>
+    <string>{daemon_log}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/tytus/daemon.log</string>
+    <string>{daemon_log}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
@@ -6214,7 +6223,8 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     </dict>
 </dict>
 </plist>
-"#
+"#,
+                    daemon_log = daemon_log.display()
                 );
                 if let Err(e) = std::fs::write(&daemon_plist_path, daemon_plist) {
                     eprintln!("Failed to write daemon plist: {}", e);
@@ -6242,7 +6252,9 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                             "plist_path": plist_path.to_string_lossy(),
                             "daemon_plist_path": daemon_plist_path.to_string_lossy(),
                             "loaded": ok_connect,
-                            "daemon_loaded": ok_daemon
+                            "daemon_loaded": ok_daemon,
+                            "autostart_log": autostart_log.to_string_lossy(),
+                            "daemon_log": daemon_log.to_string_lossy()
                         })
                     );
                 } else {
@@ -6347,6 +6359,14 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
         let unit_dir = std::path::PathBuf::from(&home).join(".config/systemd/user");
         let unit_path = unit_dir.join("tytus.service");
         let daemon_unit_path = unit_dir.join("tytus-daemon.service");
+        let autostart_log = atomek_core::platform::logging::autostart_log_file();
+        let daemon_log = atomek_core::platform::logging::daemon_log_file();
+        if let Some(parent) = autostart_log.parent() {
+            let _ = atomek_core::platform::paths::ensure_private_dir(parent);
+        }
+        if let Some(parent) = daemon_log.parent() {
+            let _ = atomek_core::platform::paths::ensure_private_dir(parent);
+        }
         let exe = std::env::current_exe()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
@@ -6359,7 +6379,8 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                     std::process::exit(1);
                 }
                 let unit = format!(
-                    "[Unit]\nDescription=Tytus private AI pod tunnel (auto-start on login)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart={exe} connect\nRemainAfterExit=yes\nEnvironment=TYTUS_HEADLESS=1\nStandardOutput=append:/tmp/tytus/autostart.log\nStandardError=append:/tmp/tytus/autostart.log\n\n[Install]\nWantedBy=default.target\n"
+                    "[Unit]\nDescription=Tytus private AI pod tunnel (auto-start on login)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart={exe} connect\nRemainAfterExit=yes\nEnvironment=TYTUS_HEADLESS=1\nStandardOutput=append:{autostart_log}\nStandardError=append:{autostart_log}\n\n[Install]\nWantedBy=default.target\n",
+                    autostart_log = autostart_log.display()
                 );
                 if let Err(e) = std::fs::write(&unit_path, unit) {
                     eprintln!("Failed to write unit: {}", e);
@@ -6367,7 +6388,8 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                 }
                 // Persistent token-refresh daemon — restart forever on crash.
                 let daemon_unit = format!(
-                    "[Unit]\nDescription=Tytus token-refresh daemon (background)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={exe} daemon run\nRestart=always\nRestartSec=30\nEnvironment=TYTUS_HEADLESS=1\nStandardOutput=append:/tmp/tytus/daemon.log\nStandardError=append:/tmp/tytus/daemon.log\n\n[Install]\nWantedBy=default.target\n"
+                    "[Unit]\nDescription=Tytus token-refresh daemon (background)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={exe} daemon run\nRestart=always\nRestartSec=30\nEnvironment=TYTUS_HEADLESS=1\nStandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n[Install]\nWantedBy=default.target\n",
+                    daemon_log = daemon_log.display()
                 );
                 if let Err(e) = std::fs::write(&daemon_unit_path, daemon_unit) {
                     eprintln!("Failed to write daemon unit: {}", e);
@@ -6392,7 +6414,9 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                             "unit_path":unit_path.to_string_lossy(),
                             "daemon_unit_path":daemon_unit_path.to_string_lossy(),
                             "enabled":ok,
-                            "daemon_enabled":ok_daemon
+                            "daemon_enabled":ok_daemon,
+                            "autostart_log": autostart_log.to_string_lossy(),
+                            "daemon_log": daemon_log.to_string_lossy()
                         })
                     );
                 } else {
@@ -9636,11 +9660,13 @@ fn reap_dead_tunnels(state: &mut CliState) {
     }
 }
 
-/// Append a timestamped line to /tmp/tytus/autostart.log for headless diagnostics.
+/// Append a timestamped line to the platform autostart log for headless diagnostics.
 fn append_autostart_log(msg: &str) {
     use std::io::Write;
-    let dir = secure_tytus_tmp_dir();
-    let log_path = dir.join("autostart.log");
+    let log_path = atomek_core::platform::logging::autostart_log_file();
+    if let Some(parent) = log_path.parent() {
+        let _ = atomek_core::platform::paths::ensure_private_dir(parent);
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
