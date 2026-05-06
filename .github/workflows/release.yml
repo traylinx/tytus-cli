@@ -1,22 +1,26 @@
 name: Release
 
-# Early-access policy: releases are manual-only while the CLI is under
-# active development. Users install from source via `cargo install --git`
-# through install.sh — every fix lands for them instantly without a tag.
-# Flip this back to `push: tags: ['v*']` when the CLI is stable.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build (e.g. v0.4.0). Must already exist.'
+        description: 'Release tag to build (e.g. v0.7.0-rc1). Must already exist.'
+        required: true
+        type: string
+      tytus_os_ref:
+        description: 'Immutable tytus-os tag or commit SHA to build and embed'
         required: true
         type: string
 
 permissions:
   contents: write
 
+env:
+  TYTUS_OS_REF: ${{ inputs.tytus_os_ref }}
+
 jobs:
   build:
+    name: Build ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
@@ -37,56 +41,91 @@ jobs:
             os: windows-latest
             name: tytus-windows-x86_64
             archive: zip
-          # aarch64-linux via cross needs libdbus-1-dev inside the container
-          # which requires a Cross.toml pre-install step. Deferred until v0.3.1
-          # to avoid blocking the initial launch — install.sh falls back to
-          # cargo install --git on unsupported architectures.
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+
+      - name: Validate immutable tytus-os ref
+        shell: bash
+        run: |
+          if [[ -z "${TYTUS_OS_REF}" ]]; then
+            echo "tytus_os_ref is required for deterministic releases" >&2
+            exit 1
+          fi
+          if [[ "${TYTUS_OS_REF}" == "main" || "${TYTUS_OS_REF}" == feature/* ]]; then
+            echo "release tytus_os_ref must be an immutable tag or commit SHA, not moving branch: ${TYTUS_OS_REF}" >&2
+            exit 1
+          fi
+
+      - name: Checkout tytus-cli
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag }}
+          path: tytus-cli
 
-      # The Linux keyring backend (keyring crate with
-      # linux-native-sync-persistent + sync-secret-service) links libdbus-1
-      # via libdbus-sys's build.rs. The dev header package is not in the
-      # default ubuntu-latest image, so add it.
-      - name: Install libdbus-1-dev (Linux only)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Checkout tytus-os
+        uses: actions/checkout@v4
+        with:
+          repository: traylinx/tytus-os
+          ref: ${{ env.TYTUS_OS_REF }}
+          path: tytus-os
+
+      - name: Install Linux native deps
+        if: runner.os == 'Linux'
+        working-directory: tytus-cli
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          sudo apt-get install -y \
+            pkg-config \
+            libdbus-1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Check vendored TytusOS bundle
-        run: scripts/check-tytus-os-dist.sh
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tytus-os/package-lock.json
+
+      - name: Build TytusOS dist
+        working-directory: tytus-os
+        run: |
+          npm ci
+          npm run build:packages
+          npm run typecheck
+          npm run build
+          npm run test
+
+      - name: Embed TytusOS dist
+        working-directory: tytus-cli
+        env:
+          TYTUS_OS_SOURCE: ${{ github.workspace }}/tytus-os
+        run: scripts/sync-tytus-os-dist.sh --sync
         shell: bash
 
-      - name: Build CLI
+      - name: Build Rust binaries
+        working-directory: tytus-cli
         run: |
           cargo build --release -p atomek-cli --target ${{ matrix.target }}
           cargo build --release -p tytus-mcp --target ${{ matrix.target }}
-          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            cargo build --release -p tytus-tray --target ${{ matrix.target }}
-          fi
+          cargo build --release -p tytus-tray --target ${{ matrix.target }}
         shell: bash
 
       - name: Package
+        working-directory: tytus-cli
         run: |
           cd target/${{ matrix.target }}/release
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
-            powershell -NoProfile -Command "Compress-Archive -Force -Path tytus.exe,tytus-mcp.exe -DestinationPath ../../../${{ matrix.name }}.zip"
+            powershell -NoProfile -Command "Compress-Archive -Force -Path tytus.exe,tytus-mcp.exe,tytus-tray.exe -DestinationPath ../../../${{ matrix.name }}.zip"
           else
-            files="tytus tytus-mcp"
-            if [[ -f tytus-tray ]]; then
-              files="${files} tytus-tray"
-            fi
-            tar czf ../../../${{ matrix.name }}.tar.gz ${files}
+            tar czf ../../../${{ matrix.name }}.tar.gz tytus tytus-mcp tytus-tray
           fi
           cd ../../..
         shell: bash
@@ -95,7 +134,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: ${{ matrix.name }}.${{ matrix.archive }}
+          path: tytus-cli/${{ matrix.name }}.${{ matrix.archive }}
 
   release:
     needs: build

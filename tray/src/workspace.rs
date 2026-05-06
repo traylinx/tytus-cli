@@ -81,14 +81,17 @@ mod tests {
     #[test]
     fn download_dir_includes_pod_id_under_tytus_home() {
         let p = download_dir_for_pod("02");
-        assert!(p.to_string_lossy().contains("Tytus"));
-        assert!(p.to_string_lossy().ends_with("Downloads/pod-02"));
+        assert!(p.starts_with(tytus_home()));
+        assert!(p.ends_with(std::path::Path::new("Downloads").join("pod-02")));
     }
 
     #[test]
     fn legacy_download_dir_remains_old_downloads_location() {
         let p = legacy_download_dir_for_pod("02");
-        assert!(p.to_string_lossy().contains("Downloads/tytus"));
-        assert!(p.to_string_lossy().ends_with("pod-02"));
+        assert!(p.ends_with(
+            std::path::Path::new("Downloads")
+                .join("tytus")
+                .join("pod-02")
+        ));
     }
 }

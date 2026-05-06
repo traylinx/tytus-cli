@@ -14,7 +14,9 @@
 //! The gateway probe runs on every poll (2s timeout, rarely >100ms on a
 //! healthy tunnel). State-file reads are cheap (a few KB, warm cache).
 
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
@@ -350,6 +352,7 @@ fn daemon_status() -> Option<DaemonSnap> {
     })
 }
 
+#[cfg(unix)]
 fn send_command(cmd: &str) -> Option<serde_json::Value> {
     let mut stream = UnixStream::connect(SOCKET_PATH).ok()?;
     stream
@@ -366,6 +369,11 @@ fn send_command(cmd: &str) -> Option<serde_json::Value> {
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     serde_json::from_str(&line).ok()
+}
+
+#[cfg(not(unix))]
+fn send_command(_cmd: &str) -> Option<serde_json::Value> {
+    None
 }
 
 // ── State.json fallback ─────────────────────────────────────

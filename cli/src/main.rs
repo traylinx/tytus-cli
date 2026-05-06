@@ -4036,12 +4036,7 @@ async fn cmd_app_catalog(url_override: Option<&str>, json: bool) {
     println!("Open URL: tytus app install <id> --no-open  (just prints the URL)");
 }
 
-async fn cmd_app_install(
-    target: String,
-    no_open: bool,
-    catalog_url: Option<&str>,
-    json: bool,
-) {
+async fn cmd_app_install(target: String, no_open: bool, catalog_url: Option<&str>, json: bool) {
     // Target can be either a Featured id OR a fully-qualified manifest URL.
     let manifest_url = if target.starts_with("https://") {
         target
@@ -4052,13 +4047,12 @@ async fn cmd_app_install(
             Ok(a) => a,
             Err(e) => {
                 if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({ "error": e, "target": target })
-                    );
+                    println!("{}", serde_json::json!({ "error": e, "target": target }));
                 } else {
                     eprintln!("failed to fetch catalog: {}", e);
-                    eprintln!("(falling back: pass a fully-qualified https:// URL instead of an id)");
+                    eprintln!(
+                        "(falling back: pass a fully-qualified https:// URL instead of an id)"
+                    );
                 }
                 return;
             }
@@ -4110,7 +4104,10 @@ async fn cmd_app_install(
         } else {
             println!("   Opening App Store at {} …", APP_STORE_URL);
             if let Err(e) = open::that(APP_STORE_URL) {
-                eprintln!("   (failed to open browser: {} — copy the URL manually.)", e);
+                eprintln!(
+                    "   (failed to open browser: {} — copy the URL manually.)",
+                    e
+                );
             }
         }
     }

@@ -209,6 +209,7 @@ fn is_safe_pod_num_accepts_expected_and_rejects_malicious() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn alive_pid_reaped_via_self_exiting_child() {
     init_base_dir();

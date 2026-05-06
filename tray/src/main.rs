@@ -2351,6 +2351,7 @@ fn open_pod_via_forwarder(pod_id: &str) {
 /// We trust the marker only when the pid is alive AND the port still
 /// accepts a TCP connect. Anything else = stale → return None and let
 /// the caller spawn a fresh forwarder.
+#[cfg(unix)]
 pub(crate) fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
     let path = format!("/tmp/tytus/ui-{}.port", pod_id);
     let raw = std::fs::read_to_string(&path).ok()?;
@@ -2373,6 +2374,11 @@ pub(crate) fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
     }
 }
 
+#[cfg(not(unix))]
+pub(crate) fn existing_ui_forwarder(_pod_id: &str) -> Option<String> {
+    None
+}
+
 /// True if a WireGuard tunnel is currently up for this pod. We check
 /// `/tmp/tytus/tunnel-<pod>.pid` — written by cmd_tunnel_up under the
 /// elevated helper — AND verify the pid is actually alive. The pidfile
@@ -2386,6 +2392,7 @@ pub(crate) fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
 /// 2026-04-19 smoke test: tray always labelled pod rows "Connect & Open
 /// in Browser" because this function returned false even with utun4
 /// actively routing packets.
+#[cfg(unix)]
 fn tunnel_reaches_pod(pod_id: &str) -> bool {
     let path = format!("/tmp/tytus/tunnel-{}.pid", pod_id);
     let raw = match std::fs::read_to_string(&path) {
@@ -2406,8 +2413,12 @@ fn tunnel_reaches_pod(pod_id: &str) -> bool {
     }
     // libc::kill failed. Alive-but-EPERM means the daemon is running
     // under a different uid (root), which is the normal happy path.
-    let errno = unsafe { *libc::__error() };
-    errno == libc::EPERM
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn tunnel_reaches_pod(_pod_id: &str) -> bool {
+    false
 }
 
 /// Start `tytus ui --pod <pod_id> --no-open` as a fully detached

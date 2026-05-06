@@ -265,7 +265,7 @@ fn open_in_terminal(shell_command: &str) {
             .unwrap_or(false)
         {
             let mut cmd = Command::new(term);
-            for a in &args {
+            for a in args {
                 cmd.arg(a);
             }
             cmd.arg(shell_command);

@@ -1738,15 +1738,27 @@ fn open_url(url: &str) {
 fn open_path(path: &Path) {
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("open").arg(path).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        let _ = Command::new("open")
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("xdg-open").arg(path).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        let _ = Command::new("xdg-open")
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("explorer").arg(path).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        let _ = Command::new("explorer")
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -3440,6 +3452,44 @@ fn agent_units_for(agent_type: &str) -> u32 {
     }
 }
 
+#[cfg(unix)]
+fn terminate_process(pid: u32) -> Result<(), String> {
+    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().to_string())
+    }
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32) -> Result<(), String> {
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("taskkill exited with {}", status))
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn terminate_process(_pid: u32) -> Result<(), String> {
+    Err("process termination is unsupported on this platform".to_string())
+}
+
+#[cfg(unix)]
+fn process_exists(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_exists(_pid: i32) -> bool {
+    false
+}
+
 /// POST /api/jobs/<id>/cancel — SIGTERM the job's child process.
 ///
 /// Idempotent and safe to call against a finished job (returns
@@ -3484,15 +3534,13 @@ fn handle_job_cancel(request: Request, registry: &Registry, job_id: &str) {
         &job,
         JobEvent::Log(format!("[cancel] sending SIGTERM to PID {}", pid)),
     );
-    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-    if rc != 0 {
-        let errno = std::io::Error::last_os_error();
+    if let Err(reason) = terminate_process(pid) {
         respond_json(
             request,
             500,
             &serde_json::json!({
                 "cancelled": false,
-                "reason": format!("kill failed: {}", errno),
+                "reason": format!("kill failed: {}", reason),
             }),
         );
         return;
@@ -5251,13 +5299,8 @@ fn handle_files_list(request: Request, query: &str) {
         source if user_file_source_root(source).is_some() => {
             let (label, root) = user_file_source_root(source).expect("checked above");
             let _ = fs::create_dir_all(&root);
-            list_local_dir(&root, &rel).map(|rows| {
-                (
-                    label.to_string(),
-                    root.to_string_lossy().to_string(),
-                    rows,
-                )
-            })
+            list_local_dir(&root, &rel)
+                .map(|rows| (label.to_string(), root.to_string_lossy().to_string(), rows))
         }
         "shared" => {
             let idx = match query_value_decoded(query, "binding") {
@@ -5403,7 +5446,8 @@ fn local_files_root(source: &str, binding: Option<usize>) -> Result<PathBuf, Str
         "tytus-home" => Ok(crate::workspace::ensure_tytus_home()),
         source if user_file_source_root(source).is_some() => {
             let (_label, root) = user_file_source_root(source).expect("checked above");
-            fs::create_dir_all(&root).map_err(|e| format!("user folder is not accessible: {}", e))?;
+            fs::create_dir_all(&root)
+                .map_err(|e| format!("user folder is not accessible: {}", e))?;
             Ok(root)
         }
         "shared" => {
@@ -6062,7 +6106,11 @@ fn handle_clipboard_text_set(mut request: Request) {
         }
     };
     if body.text.len() > MAX_CLIPBOARD_TEXT_BYTES {
-        respond_json(request, 413, &serde_json::json!({"error":"clipboard text exceeds 2 MiB"}));
+        respond_json(
+            request,
+            413,
+            &serde_json::json!({"error":"clipboard text exceeds 2 MiB"}),
+        );
         return;
     }
     match write_system_clipboard_text(&body.text) {
@@ -6091,7 +6139,12 @@ fn read_system_clipboard_text() -> Result<String, String> {
             ("xclip", &["-selection", "clipboard", "-o"][..]),
             ("xsel", &["--clipboard", "--output"][..]),
         ] {
-            if let Ok(out) = Command::new(bin).args(args).stdout(Stdio::piped()).stderr(Stdio::null()).output() {
+            if let Ok(out) = Command::new(bin)
+                .args(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+            {
                 if out.status.success() {
                     return String::from_utf8(out.stdout).map_err(|e| e.to_string());
                 }
@@ -6146,10 +6199,16 @@ fn write_system_clipboard_text(text: &str) -> Result<(), String> {
             .spawn()
             .map_err(|e| e.to_string())?;
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|e| e.to_string())?;
         }
         let status = child.wait().map_err(|e| e.to_string())?;
-        if status.success() { Ok(()) } else { Err("Set-Clipboard failed".to_string()) }
+        if status.success() {
+            Ok(())
+        } else {
+            Err("Set-Clipboard failed".to_string())
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -6168,10 +6227,16 @@ fn write_to_command(bin: &str, args: &[&str], text: &str) -> Result<(), String> 
         .spawn()
         .map_err(|e| e.to_string())?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| e.to_string())?;
     }
     let status = child.wait().map_err(|e| e.to_string())?;
-    if status.success() { Ok(()) } else { Err(format!("{} failed", bin)) }
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} failed", bin))
+    }
 }
 
 /// POST /api/shared-folders/open-cache — opens
@@ -7516,7 +7581,7 @@ fn handle_daemon_status(request: Request) {
         .ok()
         .and_then(|s| s.trim().parse().ok());
     let running = match pid {
-        Some(p) => unsafe { libc::kill(p, 0) == 0 },
+        Some(p) => process_exists(p),
         None => false,
     };
     respond_json(
@@ -9065,7 +9130,8 @@ mod tests {
         assert!(defaults.sharing_globally_enabled);
         assert!(defaults.default_auto_sync);
         assert_eq!(defaults.default_bucket, "shared");
-        assert!(defaults.default_local_root.ends_with("/Tytus/Shared"));
+        assert!(std::path::Path::new(&defaults.default_local_root)
+            .ends_with(std::path::Path::new("Tytus").join("Shared")));
     }
 
     #[test]

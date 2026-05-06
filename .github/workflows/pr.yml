@@ -1,0 +1,98 @@
+name: PR truth
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  workflow_dispatch:
+    inputs:
+      tytus_os_ref:
+        description: 'tytus-os ref to build for dist embedding checks'
+        required: false
+        default: '265c2fb85343b9a96171e044d3d6a7117a77f7cd'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || '265c2fb85343b9a96171e044d3d6a7117a77f7cd' }}
+
+jobs:
+  rust:
+    name: Rust ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: ubuntu-latest
+          - os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux native deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libdbus-1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            xdotool \
+            librsvg2-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo metadata
+        run: cargo metadata --no-deps --format-version 1
+
+      - name: Cargo check all targets
+        run: cargo check --workspace --all-targets
+
+      - name: Cargo test all targets
+        run: cargo test --workspace --all-targets
+
+  tytus-os-dist:
+    name: TytusOS dist embedding
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tytus-cli
+        uses: actions/checkout@v4
+        with:
+          path: tytus-cli
+
+      - name: Checkout tytus-os
+        uses: actions/checkout@v4
+        with:
+          repository: traylinx/tytus-os
+          ref: ${{ env.TYTUS_OS_REF }}
+          path: tytus-os
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tytus-os/package-lock.json
+
+      - name: Build and test TytusOS
+        working-directory: tytus-os
+        run: |
+          npm ci
+          npm run build:packages
+          npm run typecheck
+          npm run build
+          npm run test
+
+      - name: Verify vendored TytusOS dist
+        working-directory: tytus-cli
+        env:
+          TYTUS_OS_SOURCE: ${{ github.workspace }}/tytus-os
+        run: scripts/sync-tytus-os-dist.sh --check
