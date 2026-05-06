@@ -32,7 +32,7 @@ jobs:
           - os: ubuntu-latest
           - os: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Linux native deps
         if: runner.os == 'Linux'
@@ -64,19 +64,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tytus-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: tytus-cli
 
       - name: Checkout tytus-os
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: traylinx/tytus-os
           ref: ${{ env.TYTUS_OS_REF }}
           path: tytus-os
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
