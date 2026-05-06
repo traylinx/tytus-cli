@@ -4748,8 +4748,8 @@ fn handle_shared_folders_run_streamed(request: Request, registry: &Registry, que
 }
 
 /// POST /api/shared-folders/open — body `{"local_path":"..."}`. Opens
-/// the path in Finder via macOS `open`. Returns 400 if the path
-/// doesn't exist (orphan sidecar) so the UI can flag the binding.
+/// the path with the platform default file manager. Returns 400 if
+/// the path doesn't exist (orphan sidecar) so the UI can flag the binding.
 fn handle_shared_folders_open(mut request: Request) {
     #[derive(serde::Deserialize)]
     struct Body {
@@ -4778,11 +4778,7 @@ fn handle_shared_folders_open(mut request: Request) {
         );
         return;
     }
-    let _ = Command::new("open")
-        .arg(&body.local_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    open_path(std::path::Path::new(&body.local_path));
     respond_json(request, 200, &serde_json::json!({"ok": true}));
 }
 
