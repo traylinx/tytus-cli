@@ -2642,21 +2642,14 @@ fn show_connect_failure_help() {
         }
         Some("Copy Diag") => {
             let diag = build_diag_summary();
-            // Write to pbcopy via stdin pipe.
-            if let Ok(mut child) = std::process::Command::new("pbcopy")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(stdin) = child.stdin.as_mut() {
-                    use std::io::Write;
-                    let _ = stdin.write_all(diag.as_bytes());
-                }
-                let _ = child.wait();
+            if copy_to_clipboard(&diag) {
+                notify(
+                    "Tytus",
+                    "Diagnostic copied to clipboard — paste it when asking for help.",
+                );
+            } else {
+                notify("Tytus", "Couldn't copy diagnostic to clipboard.");
             }
-            notify(
-                "Tytus",
-                "Diagnostic copied to clipboard — paste it when asking for help.",
-            );
         }
         _ => {}
     }
@@ -2798,40 +2791,8 @@ fn connection_pair(state: &Arc<Mutex<TrayState>>) -> (String, Option<String>) {
 /// Put arbitrary text on the system clipboard. Factored out so individual
 /// menu items can copy URL / key / JSON independently rather than always
 /// dumping the full export block.
-fn copy_to_clipboard(text: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        use std::io::Write;
-        for (bin, args) in [
-            ("xclip", &["-selection", "clipboard"][..]),
-            ("xsel", &["--clipboard", "--input"][..]),
-        ] {
-            if let Ok(mut child) = std::process::Command::new(bin)
-                .args(args)
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                let _ = child.wait();
-                return;
-            }
-        }
-    }
+fn copy_to_clipboard(text: &str) -> bool {
+    atomek_core::platform::clipboard::write_text(text).is_ok()
 }
 
 /// Put the stable OpenAI-compatible env-var block on the clipboard.
@@ -2876,42 +2837,16 @@ fn copy_connection_info(state: &Arc<Mutex<TrayState>>) {
         key = key,
     );
 
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-            notify("Tytus", "Connection info copied to clipboard.");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        // Best-effort: try xclip, then xsel.
-        use std::io::Write;
-        for (bin, args) in [
-            ("xclip", &["-selection", "clipboard"][..]),
-            ("xsel", &["--clipboard", "--input"][..]),
-        ] {
-            if let Ok(mut child) = std::process::Command::new(bin)
-                .args(args)
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                let _ = child.wait();
-                return;
-            }
-        }
+    if copy_to_clipboard(&text) {
+        notify("Tytus", "Connection info copied to clipboard.");
+    } else {
         // Fallback: dump to a temp file so the user can read it.
+        let _ = std::fs::create_dir_all("/tmp/tytus");
         let _ = std::fs::write("/tmp/tytus/connection-info.sh", &text);
+        notify(
+            "Tytus",
+            "Clipboard unavailable — wrote /tmp/tytus/connection-info.sh",
+        );
     }
 }
 

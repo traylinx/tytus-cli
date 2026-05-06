@@ -4,6 +4,7 @@
 //! `/tmp/tytus`, Unix sockets, `osascript`, `kill(2)`, launchd/systemd, or
 //! Windows-specific process/service behavior directly.
 
+pub mod clipboard;
 pub mod dialog;
 pub mod firewall_policy;
 pub mod ipc;
