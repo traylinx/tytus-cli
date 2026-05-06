@@ -3906,24 +3906,22 @@ fn handle_open_external(request: Request, query: &str) {
 
     match target.as_str() {
         "health-test" => {
-            // Open Terminal running `tytus test`. Reuse the existing tray
-            // helper by shelling out to `open` on macOS.
-            #[cfg(target_os = "macos")]
-            {
-                let script = "tell application \"Terminal\" to do script \"tytus test\"";
-                let _ = Command::new("osascript").args(["-e", script]).spawn();
+            // Open a platform terminal running `tytus test`. The terminal
+            // substrate owns macOS/Linux/Windows launch details.
+            match atomek_core::platform::terminal::open_shell_command("tytus test") {
+                Ok(()) => respond_json(request, 200, &serde_json::json!({ "ok": true })),
+                Err(e) => respond_json(
+                    request,
+                    500,
+                    &serde_json::json!({"error": format!("terminal launch failed: {}", e)}),
+                ),
             }
-            #[cfg(not(target_os = "macos"))]
-            { /* linux: rely on user's preferred terminal — not implemented */ }
-            respond_json(request, 200, &serde_json::json!({ "ok": true }));
         }
         "channel-setup" => {
-            // Open Terminal running `tytus channels add <channel> --pod <NN>`.
+            // Open a platform terminal running `tytus channels add <channel> --pod <NN>`.
             // The CLI prompts interactively for the token so we never handle
-            // secrets inside the wizard's HTTP layer. Whitelist channel names
-            // + digit-only pod so the osascript we build is safe. Everything
-            // goes through double-quoted heredoc-style strings in AppleScript
-            // — shell escaping is belt-and-suspenders.
+            // secrets inside the wizard's HTTP layer. Channel names and pod
+            // ids are whitelisted before entering the terminal command string.
             let channel = query
                 .split('&')
                 .find_map(|kv| kv.strip_prefix("channel=").map(|v| v.to_string()))
@@ -3945,19 +3943,15 @@ fn handle_open_external(request: Request, query: &str) {
                 respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
                 return;
             }
-            #[cfg(target_os = "macos")]
-            {
-                // The CLI prompts for each credential interactively when
-                // --token is omitted. That keeps the user copying the token
-                // directly into Terminal, never into an HTTP payload.
-                let cmd = format!("tytus channels add {} --pod {}", channel, pod);
-                let script = format!(
-                    "tell application \"Terminal\" to do script \"{}\"",
-                    cmd.replace('"', "\\\"")
-                );
-                let _ = Command::new("osascript").args(["-e", &script]).spawn();
+            let cmd = format!("tytus channels add {} --pod {}", channel, pod);
+            match atomek_core::platform::terminal::open_shell_command(&cmd) {
+                Ok(()) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+                Err(e) => respond_json(
+                    request,
+                    500,
+                    &serde_json::json!({"error": format!("terminal launch failed: {}", e)}),
+                ),
             }
-            respond_json(request, 200, &serde_json::json!({"ok": true}));
         }
         _ => respond_json(
             request,
