@@ -6169,42 +6169,24 @@ fn handle_shared_folders_open_cache(request: Request) {
     respond_json(request, 200, &serde_json::json!({"ok": true}));
 }
 
-/// POST /api/shared-folders/pick-folder — calls macOS osascript to
-/// open a native folder picker and returns the chosen POSIX path.
-/// Returns `{cancelled: true}` if the user dismissed the dialog.
-/// macOS-only; non-macOS returns 501.
+/// POST /api/shared-folders/pick-folder — opens a native folder picker and
+/// returns the chosen POSIX path. Returns `{cancelled: true}` if the user
+/// dismissed the dialog. macOS-only; non-macOS returns 501.
 #[cfg(target_os = "macos")]
 fn handle_shared_folders_pick_folder(request: Request) {
-    let script = "POSIX path of (choose folder with prompt \
-                  \"Pick a Mac folder to share with your pods\")";
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if path.is_empty() {
-                respond_json(request, 200, &serde_json::json!({"cancelled": true}));
-            } else {
-                respond_json(request, 200, &serde_json::json!({"path": path}));
-            }
-        }
-        Ok(_) => {
-            // osascript exits non-zero when user cancels. Distinguish
-            // from real failure by treating any non-zero as "cancelled"
-            // — the picker doesn't fail in any other realistic way.
-            respond_json(request, 200, &serde_json::json!({"cancelled": true}));
-        }
-        Err(e) => {
-            respond_json(
-                request,
-                500,
-                &serde_json::json!({
-                    "error": format!("osascript failed: {}", e),
-                }),
-            );
-        }
+    match atomek_core::platform::dialog::pick_path(
+        atomek_core::platform::dialog::PickKind::Folder,
+        "Pick a Mac folder to share with your pods",
+    ) {
+        Ok(Some(path)) => respond_json(request, 200, &serde_json::json!({"path": path})),
+        Ok(None) => respond_json(request, 200, &serde_json::json!({"cancelled": true})),
+        Err(e) => respond_json(
+            request,
+            500,
+            &serde_json::json!({
+                "error": format!("folder picker failed: {}", e),
+            }),
+        ),
     }
 }
 
@@ -6214,7 +6196,7 @@ fn handle_shared_folders_pick_folder(request: Request) {
         request,
         501,
         &serde_json::json!({
-            "error": "folder picker is macOS-only (osascript)",
+            "error": "folder picker is macOS-only",
         }),
     );
 }
