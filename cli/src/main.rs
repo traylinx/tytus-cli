@@ -6264,18 +6264,11 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                 }
                 // (Re)load both agents.
                 for p in [&plist_path, &daemon_plist_path] {
-                    let _ = std::process::Command::new("launchctl")
-                        .args(["unload", p.to_str().unwrap_or_default()])
-                        .output();
+                    let _ = atomek_core::platform::service::launchd_unload_agent(p, false);
                 }
-                let load_connect = std::process::Command::new("launchctl")
-                    .args(["load", "-w", plist_path.to_str().unwrap_or_default()])
-                    .output();
-                let load_daemon = std::process::Command::new("launchctl")
-                    .args(["load", "-w", daemon_plist_path.to_str().unwrap_or_default()])
-                    .output();
-                let ok_connect = load_connect.map(|o| o.status.success()).unwrap_or(false);
-                let ok_daemon = load_daemon.map(|o| o.status.success()).unwrap_or(false);
+                let ok_connect = atomek_core::platform::service::launchd_load_agent(&plist_path);
+                let ok_daemon =
+                    atomek_core::platform::service::launchd_load_agent(&daemon_plist_path);
                 if json {
                     println!(
                         "{}",
@@ -6305,9 +6298,7 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
             }
             AutostartAction::Uninstall => {
                 for p in [&plist_path, &daemon_plist_path] {
-                    let _ = std::process::Command::new("launchctl")
-                        .args(["unload", "-w", p.to_str().unwrap_or_default()])
-                        .output();
+                    let _ = atomek_core::platform::service::launchd_unload_agent(p, true);
                     let _ = std::fs::remove_file(p);
                 }
                 if json {
@@ -6326,16 +6317,10 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
             AutostartAction::Status => {
                 let installed = plist_path.exists();
                 let daemon_installed = daemon_plist_path.exists();
-                let loaded = std::process::Command::new("launchctl")
-                    .args(["list", "com.traylinx.tytus"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                let daemon_loaded = std::process::Command::new("launchctl")
-                    .args(["list", "com.traylinx.tytus.daemon"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
+                let names = atomek_core::platform::service::service_names();
+                let loaded = atomek_core::platform::service::launchd_agent_loaded(names.connect);
+                let daemon_loaded =
+                    atomek_core::platform::service::launchd_agent_loaded(names.daemon);
                 if json {
                     println!(
                         "{}",
@@ -6427,17 +6412,10 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                     eprintln!("Failed to write daemon unit: {}", e);
                     std::process::exit(1);
                 }
-                let _ = std::process::Command::new("systemctl")
-                    .args(["--user", "daemon-reload"])
-                    .output();
-                let r = std::process::Command::new("systemctl")
-                    .args(["--user", "enable", "--now", "tytus.service"])
-                    .output();
-                let rd = std::process::Command::new("systemctl")
-                    .args(["--user", "enable", "--now", "tytus-daemon.service"])
-                    .output();
-                let ok = r.map(|o| o.status.success()).unwrap_or(false);
-                let ok_daemon = rd.map(|o| o.status.success()).unwrap_or(false);
+                let _ = atomek_core::platform::service::systemd_user_daemon_reload();
+                let ok = atomek_core::platform::service::systemd_user_enable_now("tytus.service");
+                let ok_daemon =
+                    atomek_core::platform::service::systemd_user_enable_now("tytus-daemon.service");
                 if json {
                     println!(
                         "{}",
@@ -6461,12 +6439,10 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                 }
             }
             AutostartAction::Uninstall => {
-                let _ = std::process::Command::new("systemctl")
-                    .args(["--user", "disable", "--now", "tytus.service"])
-                    .output();
-                let _ = std::process::Command::new("systemctl")
-                    .args(["--user", "disable", "--now", "tytus-daemon.service"])
-                    .output();
+                let _ = atomek_core::platform::service::systemd_user_disable_now("tytus.service");
+                let _ = atomek_core::platform::service::systemd_user_disable_now(
+                    "tytus-daemon.service",
+                );
                 let _ = std::fs::remove_file(&unit_path);
                 let _ = std::fs::remove_file(&daemon_unit_path);
                 if json {
@@ -6485,16 +6461,9 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
             AutostartAction::Status => {
                 let installed = unit_path.exists();
                 let daemon_installed = daemon_unit_path.exists();
-                let active = std::process::Command::new("systemctl")
-                    .args(["--user", "is-enabled", "tytus.service"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                let daemon_active = std::process::Command::new("systemctl")
-                    .args(["--user", "is-enabled", "tytus-daemon.service"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
+                let active = atomek_core::platform::service::systemd_user_enabled("tytus.service");
+                let daemon_active =
+                    atomek_core::platform::service::systemd_user_enabled("tytus-daemon.service");
                 if json {
                     println!(
                         "{}",
@@ -6669,9 +6638,7 @@ fn cmd_tray(action: TrayAction, json: bool) {
 
             // Poke LaunchServices so Spotlight picks up the bundle immediately
             // instead of after the next mds re-scan (which can take minutes).
-            let _ = std::process::Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
-                .args(["-f", app_path.to_str().unwrap_or_default()])
-                .output();
+            let _ = atomek_core::platform::service::macos_register_launch_services(&app_path);
 
             // LaunchAgent: open Tytus.app at login. Using `open -a` lets
             // launchd reuse a running instance instead of racing against
@@ -6712,19 +6679,11 @@ fn cmd_tray(action: TrayAction, json: bool) {
                 eprintln!("Failed to write tray plist: {}", e);
                 std::process::exit(1);
             }
-            let _ = std::process::Command::new("launchctl")
-                .args(["unload", tray_plist_path.to_str().unwrap_or_default()])
-                .output();
-            let loaded = std::process::Command::new("launchctl")
-                .args(["load", "-w", tray_plist_path.to_str().unwrap_or_default()])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let _ = atomek_core::platform::service::launchd_unload_agent(&tray_plist_path, false);
+            let loaded = atomek_core::platform::service::launchd_load_agent(&tray_plist_path);
 
             // Start the tray right now so the user sees the T immediately.
-            let _ = std::process::Command::new("/usr/bin/open")
-                .args(["-a", app_path.to_str().unwrap_or_default()])
-                .status();
+            let _ = atomek_core::platform::service::macos_open_app(&app_path);
 
             if json {
                 println!(
@@ -6754,9 +6713,7 @@ fn cmd_tray(action: TrayAction, json: bool) {
             }
         }
         TrayAction::Uninstall => {
-            let _ = std::process::Command::new("launchctl")
-                .args(["unload", "-w", tray_plist_path.to_str().unwrap_or_default()])
-                .output();
+            let _ = atomek_core::platform::service::launchd_unload_agent(&tray_plist_path, true);
             let _ = std::fs::remove_file(&tray_plist_path);
             let _ = std::fs::remove_dir_all(&app_path);
             // Best-effort: kill any running tray so /Applications/Tytus.app
@@ -6764,9 +6721,7 @@ fn cmd_tray(action: TrayAction, json: bool) {
             let _ = std::process::Command::new("pkill")
                 .args(["-f", "tytus-tray"])
                 .status();
-            let _ = std::process::Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
-                .args(["-u", app_path.to_str().unwrap_or_default()])
-                .output();
+            let _ = atomek_core::platform::service::macos_unregister_launch_services(&app_path);
             if json {
                 println!("{}", serde_json::json!({"action":"uninstall"}));
             } else {
@@ -6776,11 +6731,9 @@ fn cmd_tray(action: TrayAction, json: bool) {
         TrayAction::Status => {
             let app_installed = app_path.exists();
             let plist_installed = tray_plist_path.exists();
-            let loaded = std::process::Command::new("launchctl")
-                .args(["list", "com.traylinx.tytus.tray"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let loaded = atomek_core::platform::service::launchd_agent_loaded(
+                atomek_core::platform::service::service_names().tray,
+            );
             // Probe the tray single-instance lock and verify the pid is
             // actually alive. More reliable than pgrep, which has different
             // process names for bundle vs raw binary. Keep legacy fallback for
