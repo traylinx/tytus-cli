@@ -220,34 +220,7 @@ pub fn open_download_dir(pod_id: &str) {
 }
 
 fn open_path(path: &std::path::Path) {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg(path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("explorer")
-            .arg(path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        let _ = path;
-    }
+    let _ = atomek_core::platform::open::open_path(path);
 }
 
 // ── Menu-id helpers (keep ids in one place) ────────────────

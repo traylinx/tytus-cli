@@ -334,11 +334,7 @@ pub fn open_binding_in_finder(safe_name: &str) {
         .find(|b| b.safe_name == safe_name)
     {
         if std::path::Path::new(&b.local_path).is_dir() {
-            let _ = std::process::Command::new("open")
-                .arg(&b.local_path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            let _ = atomek_core::platform::open::open_path(std::path::Path::new(&b.local_path));
         }
     }
 }
@@ -351,11 +347,7 @@ pub fn open_cache_dir() {
         .unwrap_or_else(|_| "/tmp".to_string());
     // Make sure it exists so Finder doesn't bounce
     let _ = std::fs::create_dir_all(&path);
-    let _ = std::process::Command::new("open")
-        .arg(&path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let _ = atomek_core::platform::open::open_path(std::path::Path::new(&path));
 }
 
 // ── Helpers ──────────────────────────────────────────────────

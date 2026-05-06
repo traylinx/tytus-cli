@@ -1717,53 +1717,11 @@ fn canonical_os_fragment(fragment: &str) -> String {
 }
 
 fn open_url(url: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = Command::new("open").arg(&url).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = Command::new("xdg-open").arg(&url).spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        let _ = url;
-    }
+    let _ = atomek_core::platform::open::open_url(url);
 }
 
 fn open_path(path: &Path) {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = Command::new("open")
-            .arg(path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = Command::new("xdg-open")
-            .arg(path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = Command::new("explorer")
-            .arg(path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        let _ = path;
-    }
+    let _ = atomek_core::platform::open::open_path(path);
 }
 
 fn legacy_tower_enabled() -> bool {
@@ -1773,7 +1731,7 @@ fn legacy_tower_enabled() -> bool {
 }
 
 fn port_file() -> Option<PathBuf> {
-    Some(PathBuf::from("/tmp/tytus/tray-web.port"))
+    Some(atomek_core::platform::paths::tray_web_port_file())
 }
 
 fn current_port() -> Option<u16> {
