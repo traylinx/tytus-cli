@@ -11,6 +11,20 @@ on:
         description: 'Immutable tytus-os tag or commit SHA to build and embed'
         required: true
         type: string
+      release_tier:
+        description: 'Release trust tier. Production is fail-closed until signed/notarized package publishing is wired.'
+        required: true
+        default: 'internal-dry-run'
+        type: choice
+        options:
+          - internal-dry-run
+          - private-beta
+          - production
+      publish_release:
+        description: 'Actually create/update a public GitHub Release. Leave false for internal dry-runs.'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -19,6 +33,122 @@ env:
   TYTUS_OS_REF: ${{ inputs.tytus_os_ref }}
 
 jobs:
+  check-nonproduction-release-policy:
+    name: Check non-production release policy
+    if: ${{ inputs.release_tier != 'production' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate non-production publish policy
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.publish_release }}" = "true" ] && [ "${{ inputs.release_tier }}" = "internal-dry-run" ]; then
+            echo "Refusing to publish an internal dry-run as a public GitHub Release." >&2
+            exit 1
+          fi
+          echo "Non-production release policy passed for release_tier=${{ inputs.release_tier }} publish_release=${{ inputs.publish_release }}."
+
+  check-production-signing-secrets:
+    name: Check production signing secrets
+    if: ${{ inputs.release_tier == 'production' }}
+    environment: release-production
+    runs-on: ubuntu-latest
+    outputs:
+      macos_signing_available: ${{ steps.detect.outputs.macos_signing_available }}
+      windows_signing_available: ${{ steps.detect.outputs.windows_signing_available }}
+      linux_signing_available: ${{ steps.detect.outputs.linux_signing_available }}
+      update_signing_available: ${{ steps.detect.outputs.update_signing_available }}
+    steps:
+      - name: Detect production signing secrets without printing values
+        id: detect
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION_CERT_P12: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_P12 }}
+          APPLE_DEVELOPER_ID_INSTALLER_CERT_P12: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          APPLE_NOTARY_APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
+          WINDOWS_CODESIGN_CERT_PFX: ${{ secrets.WINDOWS_CODESIGN_CERT_PFX }}
+          WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+          LINUX_GPG_KEY_ID: ${{ secrets.LINUX_GPG_KEY_ID }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+          UPDATE_MANIFEST_ED25519_PRIVATE_KEY: ${{ secrets.UPDATE_MANIFEST_ED25519_PRIVATE_KEY }}
+          UPDATE_MANIFEST_KEY_ID: ${{ secrets.UPDATE_MANIFEST_KEY_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          present() { [ -n "${1:-}" ]; }
+          require() {
+            local name="$1"
+            local value="${2:-}"
+            if ! present "$value"; then
+              missing+=("$name")
+            fi
+          }
+
+          require APPLE_DEVELOPER_ID_APPLICATION_CERT_P12 "$APPLE_DEVELOPER_ID_APPLICATION_CERT_P12"
+          require APPLE_DEVELOPER_ID_INSTALLER_CERT_P12 "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12"
+          require APPLE_CERT_PASSWORD "$APPLE_CERT_PASSWORD"
+          require APPLE_NOTARY_APPLE_ID "$APPLE_NOTARY_APPLE_ID"
+          require APPLE_NOTARY_TEAM_ID "$APPLE_NOTARY_TEAM_ID"
+          require APPLE_NOTARY_APP_PASSWORD "$APPLE_NOTARY_APP_PASSWORD"
+          require WINDOWS_CODESIGN_CERT_PFX "$WINDOWS_CODESIGN_CERT_PFX"
+          require WINDOWS_CODESIGN_PASSWORD "$WINDOWS_CODESIGN_PASSWORD"
+          require LINUX_GPG_PRIVATE_KEY "$LINUX_GPG_PRIVATE_KEY"
+          require LINUX_GPG_KEY_ID "$LINUX_GPG_KEY_ID"
+          require LINUX_GPG_PASSPHRASE "$LINUX_GPG_PASSPHRASE"
+          require UPDATE_MANIFEST_ED25519_PRIVATE_KEY "$UPDATE_MANIFEST_ED25519_PRIVATE_KEY"
+          require UPDATE_MANIFEST_KEY_ID "$UPDATE_MANIFEST_KEY_ID"
+
+          if present "$APPLE_DEVELOPER_ID_APPLICATION_CERT_P12" \
+            && present "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12" \
+            && present "$APPLE_CERT_PASSWORD" \
+            && present "$APPLE_NOTARY_APPLE_ID" \
+            && present "$APPLE_NOTARY_TEAM_ID" \
+            && present "$APPLE_NOTARY_APP_PASSWORD"; then
+            echo "macos_signing_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "macos_signing_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if present "$WINDOWS_CODESIGN_CERT_PFX" \
+            && present "$WINDOWS_CODESIGN_PASSWORD"; then
+            echo "windows_signing_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "windows_signing_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if present "$LINUX_GPG_PRIVATE_KEY" \
+            && present "$LINUX_GPG_KEY_ID" \
+            && present "$LINUX_GPG_PASSPHRASE"; then
+            echo "linux_signing_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "linux_signing_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if present "$UPDATE_MANIFEST_ED25519_PRIVATE_KEY" \
+            && present "$UPDATE_MANIFEST_KEY_ID"; then
+            echo "update_signing_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "update_signing_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Production release blocked: missing required signing secrets:' >&2
+            printf ' %s' "${missing[@]}" >&2
+            printf '\n' >&2
+            exit 1
+          fi
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## Production signing secret contract check
+
+          `release-production` environment approval passed. All required
+          signing/update secrets are present. This job reports booleans only and
+          never prints secret values. Exact secret names live in
+          `docs/release/signing-secret-contract.md`.
+          SUMMARY
+
   build:
     name: Build ${{ matrix.name }}
     strategy:
@@ -155,7 +285,17 @@ jobs:
           retention-days: 7
 
   release:
-    needs: build
+    needs:
+      - check-nonproduction-release-policy
+      - check-production-signing-secrets
+      - build
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (
+        (inputs.release_tier == 'production' && needs['check-production-signing-secrets'].result == 'success') ||
+        (inputs.release_tier != 'production' && needs['check-nonproduction-release-policy'].result == 'success')
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
@@ -184,13 +324,59 @@ jobs:
           echo "── SHA256SUMS ──"
           cat SHA256SUMS
 
+      - name: Signing readiness summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
+          ## Release signing readiness
+
+          - release_tier: `${{ inputs.release_tier }}`
+          - publish_release: `${{ inputs.publish_release }}`
+          - macOS signing available: `${{ needs['check-production-signing-secrets'].outputs.macos_signing_available || 'not checked for non-production' }}`
+          - Windows signing available: `${{ needs['check-production-signing-secrets'].outputs.windows_signing_available || 'not checked for non-production' }}`
+          - Linux signing available: `${{ needs['check-production-signing-secrets'].outputs.linux_signing_available || 'not checked for non-production' }}`
+          - Update manifest signing available: `${{ needs['check-production-signing-secrets'].outputs.update_signing_available || 'not checked for non-production' }}`
+
+          Production publishing is fail-closed until signed/notarized package
+          publishing is implemented and verified.
+          SUMMARY
+
+      - name: Enforce release tier policy
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.publish_release }}" = "true" ] && [ "${{ inputs.release_tier }}" = "internal-dry-run" ]; then
+            echo "Refusing to publish an internal dry-run as a public GitHub Release." >&2
+            exit 1
+          fi
+
+          if [ "${{ inputs.release_tier }}" = "production" ]; then
+            if [ "${{ needs['check-production-signing-secrets'].outputs.macos_signing_available }}" != "true" ] \
+              || [ "${{ needs['check-production-signing-secrets'].outputs.windows_signing_available }}" != "true" ] \
+              || [ "${{ needs['check-production-signing-secrets'].outputs.linux_signing_available }}" != "true" ] \
+              || [ "${{ needs['check-production-signing-secrets'].outputs.update_signing_available }}" != "true" ]; then
+              echo "Production release blocked: all platform/update signing secrets must be available." >&2
+              exit 1
+            fi
+            echo "Production release blocked: signed/notarized package publishing steps are not implemented yet." >&2
+            echo "This fail-closed guard prevents unsigned artifacts from being labeled production." >&2
+            exit 1
+          fi
+
+          echo "Release tier policy passed for non-production workflow run."
+
       - name: Create Release
+        if: ${{ inputs.publish_release }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag }}
+          prerelease: ${{ inputs.release_tier != 'production' }}
           files: |
             dist/*.tar.gz
             dist/*.zip
             dist/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: false
+
+      - name: Skip public release
+        if: ${{ !inputs.publish_release }}
+        run: |
+          echo "publish_release=false — artifacts and SHA256SUMS were validated but no public GitHub Release was created."

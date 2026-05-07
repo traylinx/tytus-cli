@@ -65,19 +65,39 @@ git add -A && git commit -m "release: v0.3.0"
 git tag v0.3.0
 git push origin main v0.3.0
 
-# 3. Wait for release.yml to finish (~10 min)
+# 3. Dry-run release.yml first (no public release)
+gh workflow run release.yml \
+  -f tag=v0.3.0 \
+  -f tytus_os_ref=<immutable-tytus-os-sha-or-tag> \
+  -f release_tier=internal-dry-run \
+  -f publish_release=false
+
+# 4. For trusted tester/private beta only, publish a prerelease
+gh workflow run release.yml \
+  -f tag=v0.3.0 \
+  -f tytus_os_ref=<immutable-tytus-os-sha-or-tag> \
+  -f release_tier=private-beta \
+  -f publish_release=true
+
+# 5. Wait for release.yml to finish (~10 min)
 #    → builds macos-{x86_64,aarch64}, linux-{x86_64,aarch64}
 #    → generates SHA256SUMS
-#    → publishes GitHub release
+#    → publishes GitHub prerelease only if publish_release=true
 
-# 4. homebrew.yml fires automatically on release:published
+# 6. homebrew.yml fires automatically on release:published
 #    → renders formula with real SHAs
 #    → pushes to traylinx/homebrew-tap
 #    → brew install traylinx/tap/tytus immediately gets the new version
 
-# 5. Cloudflare Pages rebuilds on main push (step 2)
+# 7. Cloudflare Pages rebuilds on main push (step 2)
 #    → new install.sh propagates in ~30 seconds
 ```
+
+Production release tier is intentionally fail-closed until signed/notarized
+package publishing is implemented and the protected `release-production`
+environment secrets in `docs/release/signing-secret-contract.md` are present.
+Internal dry-runs and private beta runs do not request production signing
+secrets or environment approval.
 
 ## One-time setup required
 

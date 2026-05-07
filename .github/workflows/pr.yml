@@ -61,7 +61,23 @@ jobs:
           assert "Build unsigned macOS pkg dry-run" in release
           assert "unsigned-DO-NOT-DISTRIBUTE-pkg" in release
           assert "Assert unsigned pkg artifacts are not public release payload" in release
+          assert "Check production signing secrets" in release
+          assert "Check non-production release policy" in release
+          assert "environment: release-production" in release
+          assert "release_tier" in release
+          assert "publish_release" in release
+          assert "Production release blocked" in release
           assert "dist/*.pkg" not in release
+
+          signing_doc = Path("docs/release/signing-secret-contract.md").read_text()
+          for secret_name in [
+              "APPLE_DEVELOPER_ID_APPLICATION_CERT_P12",
+              "APPLE_DEVELOPER_ID_INSTALLER_CERT_P12",
+              "WINDOWS_CODESIGN_CERT_PFX",
+              "LINUX_GPG_PRIVATE_KEY",
+              "UPDATE_MANIFEST_ED25519_PRIVATE_KEY",
+          ]:
+              assert secret_name in signing_doc, secret_name
           PY
           set +e
           TYTUS_INSTALL_MODE=invalid sh install.sh >/tmp/tytus-install-invalid.out 2>/tmp/tytus-install-invalid.err

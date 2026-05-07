@@ -10,6 +10,9 @@ Certificate procurement is calendar-critical. It starts before engineering depen
 
 Phase 6 may build unsigned internal artifacts for testing, but public GA requires trusted signed artifacts and update metadata.
 
+The exact GitHub secret names and fail-closed workflow contract live in
+`docs/release/signing-secret-contract.md`.
+
 ## Day-2 deadline
 
 By 2026-05-08, the project needs either confirmed credentials in place or submitted procurement with owner, provider, expected issuance date, and fallback release label. Default owner for account/provider decisions is Sebastian. Default owner for CI wiring and evidence capture is the release engineer executing this sprint.
