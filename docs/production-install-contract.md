@@ -108,3 +108,16 @@ A GA platform passes only with evidence:
 ## Non-negotiable release rule
 
 Consumer docs and download pages must not advertise source builds or CLI-only installs as the primary path. `cargo install --git` is developer-only.
+
+## Installer script contract
+
+As of 2026-05-07, `install.sh` and `install.ps1` default to the production contract:
+
+- normal one-command installs use checksum-verified release artifacts
+- missing platform artifacts fail with a plain production-unavailable message
+- installers do not fall back to Rust/cargo source builds for normal users
+- source builds require explicit developer opt-in:
+  - `TYTUS_INSTALL_MODE=dev-source`
+  - `TYTUS_DEV_SOURCE_INSTALL=1`
+
+This is a guardrail, not a GA claim. A platform is still GA only after the GA gates above pass on a fresh VM.

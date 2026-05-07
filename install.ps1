@@ -5,24 +5,28 @@
 # Usage:
 #     powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
 #
-# Early-access policy:
-#   Tytus is under active development. By default the installer builds from
-#   source against `main` so users get the latest fixes. Set
-#   TYTUS_USE_RELEASE=1 to install the latest checksum-verified Windows
-#   x86_64 release asset when available.
+# Production install policy:
+#   The one-command installer must never make normal users build from source.
+#   Default installs use checksum-verified release artifacts only. If no
+#   matching artifact exists, the installer fails with a friendly message
+#   instead of asking a non-technical user to install Rust, cargo, or admin
+#   tooling. Source builds are developer-only and require an explicit opt-in.
 #
 # What it does:
 #   1. Detects architecture (x86_64 or arm64)
-#   2. Ensures a Rust toolchain is present (offers rustup install if not)
-#   3. Builds tytus + tytus-mcp from the main branch
-#   4. (Opt-in) Uses the last published Windows release if $env:TYTUS_USE_RELEASE=1
+#   2. Downloads a checksum-verified GitHub release artifact
+#   3. Installs tytus + tytus-mcp
+#   4. Developer-only: builds from source when explicitly requested
 #   5. Adds install dir to user PATH
 #
 # Env vars:
 #     $env:TYTUS_INSTALL_DIR    Override install directory
-#     $env:TYTUS_USE_RELEASE    Prefer the last published release (may be stale)
+#     $env:TYTUS_INSTALL_MODE   "production" (default) or "dev-source"
+#     $env:TYTUS_DEV_SOURCE_INSTALL
+#                                Set to "1" as a short alias for
+#                                TYTUS_INSTALL_MODE=dev-source
 #     $env:TYTUS_SKIP_CHECKSUM  Skip SHA256 verification when using
-#                                TYTUS_USE_RELEASE (NOT RECOMMENDED)
+#                                release artifacts (NOT RECOMMENDED)
 #
 # NOTE: Windows tunnel support is experimental. The `tytus connect` command
 # needs wintun.dll to function — we're bundling it in a future release.
@@ -44,12 +48,34 @@ function Write-Warn2($msg)   { Write-Host " !   $msg" -ForegroundColor Yellow }
 function Write-Err2($msg)    { Write-Host " X   $msg" -ForegroundColor Red }
 
 function Show-Banner {
+    param([string]$Mode)
     Write-Host ""
     Write-Host "┌─────────────────────────────────────────────────┐" -ForegroundColor White
     Write-Host "│          Installing Tytus CLI (Windows)         │" -ForegroundColor White
     Write-Host "│   Private AI pods driven from your terminal     │" -ForegroundColor White
     Write-Host "└─────────────────────────────────────────────────┘" -ForegroundColor White
     Write-Host ""
+    if ($Mode -eq 'dev-source') {
+        Write-Warn2 "Developer mode: building from source against main branch."
+        Write-Host "Requires: Rust toolchain + cargo." -ForegroundColor Gray
+    } else {
+        Write-Ok "Production mode: release artifact only; no Rust/cargo source builds."
+        Write-Host "Safety: checksum verification is required unless TYTUS_SKIP_CHECKSUM=1." -ForegroundColor Gray
+    }
+    Write-Host ""
+}
+
+function Get-InstallMode {
+    if ($env:TYTUS_DEV_SOURCE_INSTALL -eq '1') { return 'dev-source' }
+    if ($env:TYTUS_INSTALL_MODE) { return $env:TYTUS_INSTALL_MODE }
+    return 'production'
+}
+
+function Assert-InstallMode([string]$Mode) {
+    if ($Mode -ne 'production' -and $Mode -ne 'dev-source') {
+        Write-Err2 "Unsupported TYTUS_INSTALL_MODE='$Mode'. Use 'production' or 'dev-source'."
+        exit 1
+    }
 }
 
 function Get-Arch {
@@ -81,9 +107,6 @@ function Add-ToUserPath($dir) {
 }
 
 function Install-FromRelease {
-    # Early-access policy: releases are opt-in.
-    if ($env:TYTUS_USE_RELEASE -ne '1') { return $false }
-
     $arch = Get-Arch
     $asset = "tytus-windows-$arch.zip"
 
@@ -99,7 +122,7 @@ function Install-FromRelease {
     $sumsUrl  = ($release.assets | Where-Object { $_.name -eq 'SHA256SUMS' } | Select-Object -First 1).browser_download_url
 
     if (-not $assetUrl) {
-        Write-Warn2 "No prebuilt binary published yet for $asset. Falling back to source build."
+        Write-Warn2 "No production release artifact published yet for $asset."
         return $false
     }
 
@@ -155,16 +178,28 @@ function Install-FromRelease {
     }
 }
 
+function Stop-ProductionUnavailable([string]$Arch) {
+    Write-Err2 "Production installer is not available for Windows $Arch yet."
+    Write-Err2 "Tytus production installs must use checksum-verified release artifacts."
+    Write-Err2 "Normal users should not install Rust, cargo, or build Tytus from source."
+    Write-Err2 ""
+    Write-Err2 "Developer escape hatch:"
+    Write-Err2 '    $env:TYTUS_INSTALL_MODE="dev-source"; irm https://get.traylinx.com/install.ps1 | iex'
+    Write-Err2 "or:"
+    Write-Err2 '    $env:TYTUS_DEV_SOURCE_INSTALL="1"; irm https://get.traylinx.com/install.ps1 | iex'
+    exit 1
+}
+
 function Ensure-Cargo {
     if (Get-Command cargo -ErrorAction SilentlyContinue) {
         Write-Ok "Rust toolchain: $(cargo --version)"
         return
     }
 
-    Write-Warn2 "Rust (cargo) not found. Tytus needs cargo to build from source."
+    Write-Warn2 "Rust (cargo) not found. Developer source installs require cargo."
     $reply = Read-Host "Install Rust via rustup now? [y/N]"
     if ($reply -notmatch '^[yY]') {
-        Write-Err2 "Rust is required. Install from https://rustup.rs and re-run this script."
+        Write-Err2 "Rust is required for developer source installs. Install from https://rustup.rs and re-run this script."
         exit 1
     }
 
@@ -253,24 +288,23 @@ function Print-NextSteps {
 
 # ── Main ────────────────────────────────────────────────────
 
-Show-Banner
+$mode = Get-InstallMode
+Assert-InstallMode $mode
+Show-Banner -Mode $mode
 
 $arch = Get-Arch
 Write-Ok "Detected: Windows $arch"
-if ($env:TYTUS_USE_RELEASE -eq '1') {
-    Write-Warn2 "Early access — using latest checksum-verified release when available."
-} else {
-    Write-Warn2 "Early access — building from main branch source. Set TYTUS_USE_RELEASE=1 to prefer release binaries."
-}
 
-# Default path: source build from main. Opt in to checksum-verified
-# release via $env:TYTUS_USE_RELEASE=1.
-$ok = $false
-if ($env:TYTUS_USE_RELEASE -eq '1') {
-    $ok = Install-FromRelease
-}
-if (-not $ok) {
-    Install-FromSource
+switch ($mode) {
+    'production' {
+        if (-not (Install-FromRelease)) {
+            Stop-ProductionUnavailable $arch
+        }
+    }
+    'dev-source' {
+        Write-Warn2 "Developer source install requested explicitly; this is not the grandma-safe production path."
+        Install-FromSource
+    }
 }
 
 Verify-Install
