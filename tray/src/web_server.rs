@@ -2046,6 +2046,27 @@ fn handle_juli3ta_library_open_folder(request: Request) {
     }
 }
 
+fn handle_juli3ta_music_state_get(request: Request) {
+    match juli3ta_library::load_music_state() {
+        Ok(state) => respond_json(request, 200, &state),
+        Err(e) => juli3ta_library_error_response(request, e),
+    }
+}
+
+fn handle_juli3ta_music_state_save(request: Request) {
+    let (request, body) = match parse_json_body::<juli3ta_library::SaveMusicStateRequest>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e }));
+            return;
+        }
+    };
+    match juli3ta_library::save_music_state(body.state) {
+        Ok(state) => respond_json(request, 200, &state),
+        Err(e) => juli3ta_library_error_response(request, e),
+    }
+}
+
 fn handle_music_connectors(request: Request) {
     respond_json(
         request,
@@ -2351,6 +2372,12 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Post, "/api/juli3ta/library/open-folder") => {
             handle_juli3ta_library_open_folder(request);
+        }
+        (Method::Get, "/api/juli3ta/music-state") => {
+            handle_juli3ta_music_state_get(request);
+        }
+        (Method::Post, "/api/juli3ta/music-state") => {
+            handle_juli3ta_music_state_save(request);
         }
         (Method::Get, "/api/music/status") => {
             handle_music_status(request);

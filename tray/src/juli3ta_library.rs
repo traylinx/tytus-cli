@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_AUDIO_BYTES: usize = 120 * 1024 * 1024;
 const MAX_COVER_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MUSIC_STATE_BYTES: usize = 4 * 1024 * 1024;
 const METADATA_FILE: &str = "metadata.json";
+const MUSIC_STATE_FILE: &str = ".music-state.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum LibraryError {
@@ -147,6 +149,52 @@ pub struct SaveTrackResponse {
     pub track: LibraryTrack,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicStateSnapshot {
+    #[serde(default = "default_music_state_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub updated_at: u64,
+    #[serde(default)]
+    pub tracks: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub favorites: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub playlists: Vec<serde_json::Value>,
+}
+
+impl Default for MusicStateSnapshot {
+    fn default() -> Self {
+        Self {
+            version: default_music_state_version(),
+            updated_at: 0,
+            tracks: Vec::new(),
+            favorites: Vec::new(),
+            playlists: Vec::new(),
+        }
+    }
+}
+
+fn default_music_state_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveMusicStateRequest {
+    pub state: MusicStateSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicStateResponse {
+    pub ok: bool,
+    pub root_path: String,
+    pub state_path: String,
+    pub state: MusicStateSnapshot,
+}
+
 pub fn library_root() -> PathBuf {
     if let Ok(raw) = std::env::var("JULI3TA_MUSIC_DIR") {
         let trimmed = raw.trim();
@@ -190,6 +238,59 @@ pub fn list_tracks() -> Result<LibraryListResponse, LibraryError> {
     Ok(LibraryListResponse {
         root_path: root.to_string_lossy().to_string(),
         tracks,
+    })
+}
+
+pub fn load_music_state() -> Result<MusicStateResponse, LibraryError> {
+    let root = library_root();
+    fs::create_dir_all(&root)?;
+    let state_path = root.join(MUSIC_STATE_FILE);
+    let state = if state_path.is_file() {
+        let raw = fs::read(&state_path)?;
+        if raw.len() > MAX_MUSIC_STATE_BYTES {
+            return Err(LibraryError::Invalid(
+                "music state snapshot exceeds 4 MB".into(),
+            ));
+        }
+        serde_json::from_slice::<MusicStateSnapshot>(&raw)
+            .map_err(|e| LibraryError::Io(format!("music state parse failed: {e}")))?
+    } else {
+        MusicStateSnapshot::default()
+    };
+    Ok(MusicStateResponse {
+        ok: true,
+        root_path: root.to_string_lossy().to_string(),
+        state_path: state_path.to_string_lossy().to_string(),
+        state,
+    })
+}
+
+pub fn save_music_state(mut state: MusicStateSnapshot) -> Result<MusicStateResponse, LibraryError> {
+    if state.version == 0 {
+        state.version = default_music_state_version();
+    }
+    if state.updated_at == 0 {
+        state.updated_at = now_ms();
+    }
+    let bytes = serde_json::to_vec_pretty(&state)
+        .map_err(|e| LibraryError::Io(format!("music state serialize failed: {e}")))?;
+    if bytes.len() > MAX_MUSIC_STATE_BYTES {
+        return Err(LibraryError::Invalid(
+            "music state snapshot exceeds 4 MB".into(),
+        ));
+    }
+
+    let root = library_root();
+    fs::create_dir_all(&root)?;
+    let state_path = root.join(MUSIC_STATE_FILE);
+    let tmp_path = root.join(format!("{MUSIC_STATE_FILE}.tmp"));
+    fs::write(&tmp_path, bytes)?;
+    fs::rename(&tmp_path, &state_path)?;
+    Ok(MusicStateResponse {
+        ok: true,
+        root_path: root.to_string_lossy().to_string(),
+        state_path: state_path.to_string_lossy().to_string(),
+        state,
     })
 }
 
@@ -573,6 +674,36 @@ mod tests {
         let (bytes, mime) = read_audio("t_123_abc").unwrap();
         assert_eq!(bytes, vec![1, 2, 3]);
         assert_eq!(mime, "audio/mpeg");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn save_and_load_music_state_roundtrip() {
+        let root = std::env::temp_dir().join(format!("juli3ta_state_test_{}", now_ms()));
+        let _env = EnvGuard::new(&root);
+        let snapshot = MusicStateSnapshot {
+            version: 1,
+            updated_at: 42,
+            tracks: vec![serde_json::json!({
+                "id": "yt:abc",
+                "title": "Saved streamed song",
+                "source": "youtube"
+            })],
+            favorites: vec![serde_json::json!({
+                "kind": "track",
+                "entityId": "yt:abc",
+                "provider": "youtube",
+                "title": "Saved streamed song"
+            })],
+            playlists: Vec::new(),
+        };
+        let saved = save_music_state(snapshot.clone()).unwrap();
+        assert!(saved.state_path.ends_with(MUSIC_STATE_FILE));
+
+        let loaded = load_music_state().unwrap();
+        assert_eq!(loaded.state.updated_at, 42);
+        assert_eq!(loaded.state.tracks.len(), 1);
+        assert_eq!(loaded.state.favorites.len(), 1);
         fs::remove_dir_all(root).ok();
     }
 }

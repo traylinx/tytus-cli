@@ -8,7 +8,9 @@ bumps are allowed to break compat.
 ## [Unreleased]
 
 ### Added
-- Public beta download page now points users at `v0.6.14-beta.5` with direct unsigned `.pkg` / `.deb` links, one-file install guidance, and explicit GA warnings.
+- JULI3TA Library/Favorites/Playlists now sync to a tray-backed host-file snapshot at `~/Music/JULI3TA/.music-state.json`, so saved streamed songs survive browser profile loss and computer restarts.
+- Tytus tray exposes `GET/POST /api/juli3ta/music-state` for durable JULI3TA music-state restore, while JULI3TA keeps a browser localStorage backup as a secondary cache.
+- Public beta download page now points users at `v0.6.14-beta.6` with direct unsigned `.pkg` / `.deb` links, one-file install guidance, and explicit GA warnings.
 - Added `docs/guides/public-beta-install.md` and refreshed user manuals for one-file pkg/deb install, unsigned OS warnings, and setup wizard flow.
 - Installers now support `TYTUS_RELEASE_TAG` so public beta users can install a checksum-verified pre-release without source builds.
 
