@@ -8,11 +8,13 @@ bumps are allowed to break compat.
 ## [Unreleased]
 
 ### Added
-- Public beta download page now points users at `v0.6.14-beta.4` with direct unsigned `.pkg` / `.deb` links, one-file install guidance, and explicit GA warnings.
+- Public beta download page now points users at `v0.6.14-beta.5` with direct unsigned `.pkg` / `.deb` links, one-file install guidance, and explicit GA warnings.
 - Added `docs/guides/public-beta-install.md` and refreshed user manuals for one-file pkg/deb install, unsigned OS warnings, and setup wizard flow.
 - Installers now support `TYTUS_RELEASE_TAG` so public beta users can install a checksum-verified pre-release without source builds.
 
 ### Fixed
+- TytusOS restored installed-app windows now survive browser reloads, so standalone JULI3TA/Forge windows remain open after refresh.
+- JULI3TA now receives live daemon state even if its host client boots before the shell bridge is wired, so it keeps using the remote AIL tunnel instead of falling back to “needs a stage”.
 - Tray-served TytusOS now binds to the fixed public contract `http://localhost:4242/` instead of a random `127.0.0.1:<port>` origin.
 - Installer checksum matching now accepts both `asset` and `./asset` entries in `SHA256SUMS`.
 - Linux `.deb` postinstall and packaged changelog copy now say unsigned public beta / not GA instead of old dry-run-only wording.
