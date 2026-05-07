@@ -188,16 +188,24 @@ jobs:
           npm run typecheck
           npm run build
           npm run test
-          (cd app/dist && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}') > tytus-os-dist.sha256
-          printf 'canonical tytus-os dist tree: '
+          if find app/dist -type l -print -quit | grep -q .; then
+            echo "canonical tytus-os dist must not contain symlinks" >&2
+            find app/dist -type l -print >&2
+            exit 1
+          fi
+          (find app/dist -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > dist-manifest.txt
+          sha256sum dist-manifest.txt | awk '{print $1}' > tytus-os-dist.sha256
+          printf 'canonical tytus-os dist manifest: '
           cat tytus-os-dist.sha256
-          tar czf tytusos-dist.tar.gz app/dist tytus-os-dist.sha256
 
       - name: Upload canonical TytusOS dist
         uses: actions/upload-artifact@v6
         with:
           name: tytusos-dist
-          path: tytus-os/tytusos-dist.tar.gz
+          path: |
+            tytus-os/app/dist
+            tytus-os/dist-manifest.txt
+            tytus-os/tytus-os-dist.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -268,18 +276,17 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: tytusos-dist
-          path: tytusos-artifact
+          path: tytus-os
 
-      - name: Extract canonical TytusOS dist
+      - name: Verify canonical TytusOS dist
         shell: bash
+        working-directory: tytus-os
         run: |
-          mkdir -p tytus-os
-          tar xzf tytusos-artifact/tytusos-dist.tar.gz -C tytus-os
-          cd tytus-os
+          sha256sum -c dist-manifest.txt --quiet
           expected="$(cat tytus-os-dist.sha256)"
-          actual="$(cd app/dist && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+          actual="$(sha256sum dist-manifest.txt | awk '{print $1}')"
           if [ "$expected" != "$actual" ]; then
-            echo "canonical TytusOS dist hash mismatch" >&2
+            echo "canonical TytusOS dist manifest fingerprint mismatch" >&2
             echo "expected: $expected" >&2
             echo "actual:   $actual" >&2
             exit 1

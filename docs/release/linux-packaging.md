@@ -120,4 +120,4 @@ Open caveats before Linux GA:
 - if `ubuntu-22.04` Actions runner deprecation starts, move release packaging to
   an Ubuntu 22.04 container or equivalent glibc-pinned build image before GA.
 
-The release workflow builds and tests one canonical TytusOS web dist on Ubuntu 22.04, uploads it as `tytusos-dist`, and embeds those same bytes into every platform binary. Platform jobs do not rebuild the web app independently.
+The release workflow builds and tests one canonical TytusOS web dist on Ubuntu 22.04, uploads `app/dist` with `dist-manifest.txt` and `tytus-os-dist.sha256` as the `tytusos-dist` artifact, verifies the manifest on every platform, and embeds those same bytes into every platform binary. Platform jobs do not rebuild the web app independently.
