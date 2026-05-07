@@ -2,27 +2,41 @@
 
 > Private AI pods, TytusOS desktop, and a stable OpenAI-compatible gateway from one local CLI.
 
-Current release: **v0.6.13** (2026-05-03).
+Current public beta: **v0.6.14-beta.3** (2026-05-07).
 
 ## Install
 
-macOS with Homebrew:
+Public beta download page:
+
+```text
+https://get.traylinx.com/
+```
+
+For the easiest beta path, download one installer file, open it, then open Tytus and follow the setup wizard. The wizard signs you in, lets you pick an assistant, starts the private tunnel, and runs the health test.
+
+| Platform | Public beta path | Status |
+|---|---|---|
+| macOS Apple Silicon / Intel | Download the unsigned `.pkg` from `https://get.traylinx.com/`, Control-click → Open if Gatekeeper blocks double-click, then follow the Tytus setup wizard. | Public beta / technical preview. Not production GA. |
+| Ubuntu/Debian x86_64 | Download the unsigned `.deb` from `https://get.traylinx.com/`, install it, then open Tytus or run `tytus-tray` and follow the setup wizard. | Public beta / technical preview. Not production GA. |
+| Windows x86_64 | Download the `.zip` or use the PowerShell installer from `https://get.traylinx.com/`. | CLI/MCP technical preview; MSI, SmartScreen signing, and tunnel/driver packaging are still GA gates. |
+
+Checksum-verified installer commands are also available:
+
+```bash
+# macOS / Linux public beta
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.3 sh
+```
+
+```powershell
+# Windows public beta preview
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.3"; irm https://get.traylinx.com/install.ps1 | iex
+```
+
+Homebrew remains available for the latest stable tap release:
 
 ```bash
 brew install traylinx/tap/tytus
-tytus setup
-tytus tray install
-open -a Tytus
 ```
-
-Universal installer:
-
-```bash
-curl -fsSL https://get.traylinx.com/install.sh | bash
-tytus setup
-```
-
-Manual release artifacts are published at GitHub Releases for macOS arm64/x64, Linux x64, and Windows x64. Windows binaries compile and package in v0.6.13, but full Windows daemon/tray/tunnel runtime parity is still preview.
 
 ## What you get
 
@@ -43,6 +57,7 @@ echo $OPENAI_API_KEY     # sk-tytus-user-<32hex>
 | Doc | Audience |
 |---|---|
 | [docs/guides/tytus-ecosystem.md](docs/guides/tytus-ecosystem.md) | Users, support, and agents who need the full ecosystem map |
+| [docs/guides/public-beta-install.md](docs/guides/public-beta-install.md) | Public beta one-file installers and OS warning notes |
 | [docs/guides/getting-started.md](docs/guides/getting-started.md) | Fresh install and first pod |
 | [docs/guides/use-with-ai-tools.md](docs/guides/use-with-ai-tools.md) | Cursor, Claude, OpenCode, Codex, Aider, SDKs |
 | [docs/file-sharing.md](docs/file-sharing.md) | Files, pod inbox/outbox, shared folders |

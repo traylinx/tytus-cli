@@ -4,9 +4,17 @@
 This document covers the signed-installer path: Apple Developer ID,
 notarization, stapling, verification, and upload.
 
-Unsigned packages are internal build artifacts only. Gatekeeper may reject
-them, and they must never be linked from the public download page or uploaded
-as release assets.
+Unsigned packages are normally internal build artifacts only. For the public
+beta, Sebastian explicitly allows publishing unsigned packages only when all of
+these are true:
+
+- release tier is `private-beta`, never `production`;
+- filename contains `PUBLIC-BETA-UNSIGNED`;
+- release/download copy says public beta / technical preview / not production GA;
+- macOS users are warned that Gatekeeper may block normal double-click and may
+  require Control-click → Open.
+
+Signed + notarized packages remain mandatory for GA.
 
 ## Prerequisites
 
@@ -90,11 +98,12 @@ gh release upload "v<version>" "target/Tytus-<version>.pkg"
 ## CI dry-run policy
 
 `.github/workflows/release.yml` builds unsigned macOS `.pkg` files on the
-macOS release matrix and stores them as short-lived workflow artifacts named
-`*-unsigned-DO-NOT-DISTRIBUTE-pkg`. The release job deliberately publishes only
-`.tar.gz`, `.zip`, and `SHA256SUMS` until signing/notarization secrets are
-configured. A release guard fails the workflow if an unsigned `.pkg` reaches
-the public release payload.
+macOS release matrix. Internal dry-runs keep unsigned packages as workflow
+artifacts only. Private beta releases may publish unsigned `.pkg` assets only
+with `PUBLIC-BETA-UNSIGNED` in the filename and explicit beta/not-GA copy.
+Production releases still fail closed until signing/notarization is configured.
+A release guard fails the workflow if an unlabeled unsigned `.pkg` reaches the
+public release payload.
 
 ## What the .pkg does on install
 
@@ -114,9 +123,10 @@ the public release payload.
 
 After install:
 - Menu-bar **T** appears (Tytus.app launches automatically).
-- First click on T opens Tower with the 4-step welcome wizard
-  (Phase G).
-- 60 seconds end-to-end from .pkg double-click to first chat.
+- Open Tytus and follow the setup wizard: sign in, pick your AI assistant,
+  start the private tunnel, and run the test.
+- Public beta target: one pkg open → Tytus wizard → first successful health
+  test, with expected unsigned-package OS trust warning.
 
 ## Re-running
 

@@ -18,6 +18,56 @@ This tears down the tunnel, reconnects, and verifies everything works. Fixes 90%
 
 ## Common Problems
 
+### macOS says “unidentified developer” or blocks the pkg
+
+**What happened:** The public beta pkg is intentionally unsigned while Apple Developer ID signing/notarization is deferred.
+
+**Fix:**
+1. Make sure the filename contains `PUBLIC-BETA-UNSIGNED`.
+2. Control-click the pkg in Finder.
+3. Choose **Open**.
+4. Confirm the warning.
+5. After install, open **Tytus** and follow the setup wizard.
+
+Do not use this as a GA security model. Signed/notarized pkg is still the production gate.
+
+---
+
+### Linux says the deb is unsigned
+
+**What happened:** The public beta deb is intentionally unsigned while package/repository signing is deferred.
+
+**Fix:** Only install the deb from the official beta page or GitHub release, verify it matches `v0.6.14-beta.3`, then install:
+
+```bash
+sudo apt install ./Tytus-0.6.14-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
+```
+
+Open Tytus from the launcher or run `tytus-tray`, then follow the setup wizard.
+
+---
+
+### I installed the beta but do not see Tytus
+
+**Fix:**
+
+```bash
+which tytus
+which tytus-tray
+tytus --version
+tytus-tray
+```
+
+On macOS, also try:
+
+```bash
+open -a Tytus
+```
+
+If `tytus-tray` starts, use the setup wizard. If it does not, run `tytus doctor` and include the output in the issue.
+
+---
+
 ### "Not logged in. Run: tytus login"
 
 **What happened:** Your session expired, or you've never logged in on this machine.

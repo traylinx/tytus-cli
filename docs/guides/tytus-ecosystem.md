@@ -1,6 +1,6 @@
 # Tytus ecosystem guide
 
-Last updated: 2026-05-03. Applies to `tytus` v0.6.13.
+Last updated: 2026-05-07. Applies to public beta `tytus` v0.6.14-beta.3.
 
 Tytus is three pieces that should feel like one product:
 
@@ -10,35 +10,47 @@ Tytus is three pieces that should feel like one product:
 
 ## Current release status
 
-| Surface | Status in v0.6.13 |
+| Surface | Status in v0.6.14-beta.3 |
 |---|---|
-| macOS | Full CLI + tray + TytusOS path. Homebrew and release zip available. |
-| Linux | CLI, daemon, tunnel, MCP, TytusOS browser path, and release zip available. Desktop shell integration varies by distro. |
-| Windows | Release zip + installer path exist for CLI/MCP. Full daemon/tray/tunnel parity is still a future sprint, so treat Windows desktop runtime as preview. |
+| macOS | Unsigned public beta `.pkg` for Apple Silicon and Intel. Full CLI + tray + TytusOS path. Gatekeeper warning expected; Control-click → Open. |
+| Linux | Unsigned public beta `.deb` for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, desktop entry, and systemd user service. |
+| Windows | Zip + installer script technical preview for CLI/MCP. MSI, SmartScreen signing, Wintun/driver packaging, and full daemon/tray/tunnel parity are still GA gates. |
 | Tower | Not the user-facing product anymore. Keep only for hidden rollback until the deletion gate. |
 
 ## Install on a fresh machine
 
+Start at the public beta page:
+
+```text
+https://get.traylinx.com/
+```
+
 ### macOS
 
-```bash
-brew install traylinx/tap/tytus
-# or
-curl -fsSL https://get.traylinx.com/install.sh | bash
+Download the matching unsigned `.pkg`:
 
-tytus setup
-tytus tray install
-open -a Tytus
-```
+- Apple Silicon: `Tytus-0.6.14-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg`
+- Intel: `Tytus-0.6.14-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg`
+
+Open the pkg. If Gatekeeper blocks normal double-click, Control-click the pkg and choose **Open**. After install, open **Tytus** and follow the setup wizard.
 
 ### Linux
 
+Download the unsigned `.deb`:
+
 ```bash
-curl -fsSL https://get.traylinx.com/install.sh | bash
-tytus setup
+sudo apt install ./Tytus-0.6.14-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
 ```
 
-If the desktop tray is not packaged for your distro yet, run TytusOS from the local daemon URL printed by `tytus status` or open the tray web port manually:
+Then open Tytus from the app launcher or run:
+
+```bash
+tytus-tray
+```
+
+Follow the setup wizard: sign in, pick your AI assistant, start the private tunnel, run the test.
+
+If the desktop tray is unavailable in your environment, run TytusOS from the local daemon URL printed by `tytus status` or open the tray web port manually:
 
 ```bash
 cat /tmp/tytus/tray-web.port
@@ -47,7 +59,13 @@ open "http://127.0.0.1:$(cat /tmp/tytus/tray-web.port)/" 2>/dev/null || xdg-open
 
 ### Windows
 
-Download `tytus-windows-x86_64.zip` from the GitHub release or use the installer with `TYTUS_USE_RELEASE=1` when instructed. CLI/MCP packaging is present in v0.6.13; full daemon/tray/tunnel runtime is not yet production-complete on Windows.
+Download `tytus-windows-x86_64.zip` from the public beta page or use:
+
+```powershell
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.3"; irm https://get.traylinx.com/install.ps1 | iex
+```
+
+Windows is a CLI/MCP technical preview until MSI signing, SmartScreen behavior, Wintun/driver packaging, and fresh-VM tunnel smoke pass.
 
 ## First-run flow
 

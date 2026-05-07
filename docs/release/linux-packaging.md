@@ -75,14 +75,14 @@ Linux uninstall preserves user data by default and offers explicit separate remo
 
 Secrets must not remain after explicit data removal.
 
-## Phase 6 dry-run package shape
+## Phase 6 package shape
 
 The release workflow now builds the Linux release artifact on `ubuntu-22.04`,
 not `ubuntu-latest`, so the default `x86_64-unknown-linux-gnu` binary keeps the
 Ubuntu 22.04 glibc floor. Ubuntu 24.04 can run that artifact; the inverse is not
 safe.
 
-`pkg/build-deb.sh` creates an unsigned internal `.deb` dry-run artifact only:
+`pkg/build-deb.sh` creates an unsigned `.deb` package with this payload:
 
 - `/usr/bin/tytus`
 - `/usr/bin/tytus-mcp`
@@ -92,10 +92,11 @@ safe.
 - `/usr/share/applications/tytus.desktop`
 - `/usr/share/icons/hicolor/512x512/apps/tytus.png`
 
-The package intentionally does not switch `install.sh` to `.deb` yet and does
-not publish `.deb` files as GitHub Release assets. Workflow artifacts are named
-`*-unsigned-DO-NOT-DISTRIBUTE-deb` with 7-day retention until Linux package or
-repository signing lands.
+Internal dry-runs keep the `.deb` as a workflow artifact only. Private beta
+releases may publish a `.deb` only when the filename contains
+`PUBLIC-BETA-UNSIGNED` and the release/download copy says public beta /
+technical preview / not production GA. Production remains blocked until Debian
+package or repository signing lands.
 
 Runtime dependencies declared by the dry-run package (release CI also installs `libxdo-dev` to link `tytus-tray` on Ubuntu 22.04):
 
@@ -112,8 +113,8 @@ Runtime dependencies declared by the dry-run package (release CI also installs `
 
 Open caveats before Linux GA:
 
-- unsigned `.deb` is internal only;
-- `install.sh` must verify signed package metadata before using `.deb` by default;
+- unsigned `.deb` is public-beta only, never production GA;
+- `install.sh` must verify signed package metadata before using `.deb` by default for production;
 - Ubuntu 22.04 and 24.04 fresh-VM install smoke must prove Secret Service,
   AppIndicator/tray behavior, browser launch, tunnel elevation, repair, update,
   and uninstall;

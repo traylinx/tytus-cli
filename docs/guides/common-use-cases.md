@@ -166,8 +166,12 @@ tytus disconnect && tytus connect && tytus test
 You can't share pods (each user gets their own key). But you can share the setup process:
 
 ```bash
-# They run:
-curl -fsSL https://get.traylinx.com/install.sh | bash
+# They open the beta page and download the installer for their OS:
+# https://get.traylinx.com/
+# Then they open Tytus and follow the setup wizard.
+
+# Command-line beta path, if they prefer terminal:
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.3 sh
 tytus setup
 ```
 

@@ -83,8 +83,10 @@ macOS production publishing requires:
 6. `xcrun stapler staple` completed.
 7. `spctl --assess --type install` passes.
 
-Unsigned `.pkg` files may exist only as workflow artifacts named
-`*-unsigned-DO-NOT-DISTRIBUTE-pkg`; they must never be public release assets.
+Unsigned `.pkg` files may exist as workflow artifacts for dry-runs. Private
+beta may publish unsigned pkg assets only when filenames contain
+`PUBLIC-BETA-UNSIGNED` and all copy says public beta / technical preview / not
+production GA. Production must never publish unsigned pkg assets.
 
 ## Windows production gate
 

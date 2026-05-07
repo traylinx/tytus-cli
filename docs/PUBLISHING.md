@@ -89,9 +89,9 @@ gh workflow run release.yml \
 #    → builds/tests one canonical TytusOS web dist, uploads app/dist + manifest,
 #      and verifies the same bytes before embedding them everywhere
 #    → builds macos-{x86_64,aarch64}, linux-x86_64, windows-x86_64
-#    → uploads unsigned DO-NOT-DISTRIBUTE native package dry-run artifacts
-#      as workflow artifacts only (.pkg/.deb are not public release assets)
-#    → generates SHA256SUMS
+#    → uploads tar/zip assets and SHA256SUMS
+#    → for private-beta only, may publish PUBLIC-BETA-UNSIGNED macOS pkg
+#      and Linux deb assets; production remains fail-closed until signing lands
 #    → publishes GitHub prerelease only if publish_release=true
 
 # 6. homebrew.yml fires automatically on release:published
@@ -147,11 +147,16 @@ Use `release_tier=private-beta` and `publish_release=true`. The workflow may pub
 
 Never use this path for `release_tier=production`.
 
-## Security checks before posting the one-liner publicly
+## Security posture before broad promotion
 
 - [x] Checksum verification in install.sh (C1)
 - [x] SHA256SUMS emitted by release.yml (C1)
 - [x] Sudoers wildcard tightened to `/tmp/tytus/tunnel-*.json` (H3)
+- [x] Public beta artifacts explicitly labeled `PUBLIC-BETA-UNSIGNED`
+- [x] Public download copy says public beta / technical preview / not production GA
+- [ ] Apple Developer ID signing + notarization for GA
+- [ ] Windows MSI/signing/driver packaging for GA
+- [ ] Linux package or repository signing for GA
 - [ ] **E1:** remove `/bin/kill -TERM *` from existing dev sudoers — local fix
 - [ ] **H1:** decide if hardcoded API key `2qQaEiyjeqd0F141C6cFeqpJ353Y7USl` is
       a secret or a public client ID — document or rotate
@@ -159,8 +164,10 @@ Never use this path for `release_tier=production`.
 - [ ] **H5:** update MCP `tytus_env` to return stable values by default
 - [ ] Infrastructure: close SSH on droplet public IP, block `/metrics`
 
-Until the unchecked items are handled, the install one-liner should only be
-shared with trusted testers, not posted publicly.
+The public beta page may be shared now because the release is explicitly
+pre-GA, checksum-verified, and unsigned artifacts are visibly labeled. Do not
+call this GA or promote it as production-ready until the signing and fresh-VM
+smoke gates pass.
 
 ## Soft-launch channels (when ready)
 

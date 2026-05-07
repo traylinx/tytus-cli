@@ -6,6 +6,7 @@ Welcome to Tytus — your private AI pod, driven from any terminal.
 
 | Guide | What it covers |
 |---|---|
+| [Public Beta Install](public-beta-install.md) | One-file beta installers, OS warnings, and first wizard run |
 | [Getting Started](getting-started.md) | Install, setup, first connection — 2 minutes to a working pod |
 | [Use with AI Tools](use-with-ai-tools.md) | Claude Code, Cursor, OpenCode, Gemini, Aider, Vibe — one pod, every tool |
 | [Plans, Agents, and Models](plans-and-agents.md) | Subscription tiers, nemoclaw vs hermes, available models |

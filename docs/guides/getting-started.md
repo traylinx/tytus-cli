@@ -19,18 +19,42 @@ Paste these into any OpenAI-compatible tool — Claude Code, Cursor, Aider, Open
 
 ## Step 1: Install
 
-```bash
-curl -fsSL https://get.traylinx.com/install.sh | bash
+Open the public beta page:
+
+```text
+https://get.traylinx.com/
 ```
 
-This installs `tytus` and `tytus-mcp` into `~/.local/bin` (or `$TYTUS_INSTALL_DIR`).
+Pick one file for your computer:
+
+| Platform | What to download | What to do |
+|---|---|---|
+| macOS Apple Silicon | `Tytus-0.6.14-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` | Open the pkg. If macOS blocks it, Control-click the file and choose **Open**. |
+| macOS Intel | `Tytus-0.6.14-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` | Open the pkg. If macOS blocks it, Control-click the file and choose **Open**. |
+| Ubuntu/Debian x86_64 | `Tytus-0.6.14-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb` | Open with your software installer or run `sudo apt install ./Tytus-0.6.14-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb`. |
+| Windows x86_64 | `tytus-windows-x86_64.zip` | Unzip it and run from PowerShell. MSI and driver packaging are not GA yet. |
+
+This is a **public beta / technical preview**, not production GA. The macOS pkg and Linux deb are unsigned, so OS trust warnings are expected.
+
+Checksum-verified command-line install is also available:
+
+```bash
+# macOS / Linux public beta
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.3 sh
+```
+
+```powershell
+# Windows public beta preview
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.3"; irm https://get.traylinx.com/install.ps1 | iex
+```
 
 **What the installer does:**
-- Downloads the right binary for your OS where available (macOS arm64/x64, Linux x64, Windows x64 release zip)
-- Sets up passwordless sudo so tunnels connect without prompting
-- Tells you the next step
+- Installs `tytus`, `tytus-tray`, and `tytus-mcp` where the platform package supports them
+- Installs the local Tytus desktop/tray entry where available
+- Sets up the narrowly-scoped tunnel permission needed for the private connection
+- Opens or points you to the setup wizard
 
-**From source** (if you prefer):
+**From source** is developer-only:
 ```bash
 git clone https://github.com/traylinx/tytus-cli.git
 cd tytus-cli
@@ -40,11 +64,11 @@ cargo install --path cli --bin tytus --bin tytus-mcp
 
 ## Platform notes
 
-| Platform | v0.6.13 status |
+| Platform | v0.6.14-beta.3 status |
 |---|---|
-| macOS | Full CLI + tray + TytusOS. Homebrew and release zip available. |
-| Linux | CLI, daemon, tunnel, MCP, and browser-served TytusOS. Desktop integration can vary by distro. |
-| Windows | Release zip + CLI/MCP packaging. Full daemon/tray/tunnel runtime parity is preview. |
+| macOS | Public beta unsigned pkg for Apple Silicon and Intel. Full CLI + tray + TytusOS path. |
+| Linux | Public beta unsigned deb for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, and desktop entries. |
+| Windows | Zip + installer script technical preview for CLI/MCP. Full daemon/tray/tunnel/driver runtime parity is still a GA gate. |
 
 ---
 
@@ -92,7 +116,8 @@ curl -sS "$OPENAI_BASE_URL/chat/completions" \
 ```
 
 ### Using TytusOS
-Install the tray and open the local desktop:
+Open **Tytus** from your app launcher/menu bar. If you installed with the command-line path instead of the pkg/deb, install the tray first:
+
 ```bash
 tytus tray install
 open -a Tytus  # macOS
