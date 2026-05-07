@@ -45,6 +45,21 @@ static DAEMON_STARTED_AT: OnceLock<u64> = OnceLock::new();
 pub const TYTUS_OS_PORT: u16 = 4242;
 const TYTUS_OS_HOST: &str = "127.0.0.1";
 const TYTUS_OS_PUBLIC_BASE_URL: &str = "http://localhost:4242";
+#[cfg(test)]
+const TYTUS_OS_IMPORTMAP_CSP_HASH: &str = "'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU='";
+const TYTUS_OS_CONTENT_SECURITY_POLICY: &str = concat!(
+    "default-src 'self'; ",
+    "script-src 'self' 'wasm-unsafe-eval' 'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU=' https://cdn.jsdelivr.net; ",
+    "script-src-elem 'self' 'wasm-unsafe-eval' 'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU=' https://cdn.jsdelivr.net; ",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; ",
+    "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; ",
+    "style-src-attr 'unsafe-inline'; ",
+    "worker-src 'self' blob: https://cdn.jsdelivr.net; ",
+    "connect-src 'self' https://cdn.jsdelivr.net https://*.tytus.traylinx.com http://10.42.42.1:18080 http://localhost:18080 http://127.0.0.1:18080; ",
+    "img-src 'self' data: blob: https:; ",
+    "media-src 'self' blob: https:; ",
+    "font-src 'self' https://fonts.gstatic.com data:;"
+);
 
 fn daemon_started_at() -> u64 {
     *DAEMON_STARTED_AT.get_or_init(|| {
@@ -2624,11 +2639,15 @@ fn handle(request: Request, registry: Registry) {
 fn serve_bytes(request: Request, body: &[u8], content_type: &str) {
     let resp = Response::from_data(body.to_vec())
         .with_header(header("Content-Type", content_type))
-        // CSP: no external resources, no inline eval. Our JS is same-origin,
-        // same with the CSS and the JSON endpoints.
+        // CSP: keep general JS eval blocked, but allow the runtime
+        // surfaces TytusOS actually uses:
+        // - sqlite-wasm needs WebAssembly compilation at boot
+        // - the static importmap is inline, pinned by hash
+        // - Transport-B installed apps load from the jsDelivr catalog
+        // - React window geometry and animation styles use style attrs
         .with_header(header(
             "Content-Security-Policy",
-            "default-src 'self'; script-src 'self'; style-src 'self'; worker-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self';",
+            TYTUS_OS_CONTENT_SECURITY_POLICY,
         ))
         // This wizard is local-only by design. Block embedding in any
         // frame and discourage MIME-sniffing.
@@ -7993,6 +8012,131 @@ mod tests {
             content_type_for_path("/site.webmanifest"),
             "application/manifest+json"
         );
+    }
+
+    #[test]
+    fn tytusos_csp_allows_sqlite_wasm_without_general_eval() {
+        let script_src = csp_directive("script-src");
+        let tokens: Vec<&str> = script_src.split_whitespace().collect();
+
+        assert!(tokens.contains(&"'self'"));
+        assert!(
+            tokens.contains(&"'wasm-unsafe-eval'"),
+            "sqlite-wasm needs WebAssembly compilation; CSP was {}",
+            TYTUS_OS_CONTENT_SECURITY_POLICY,
+        );
+        assert!(
+            !tokens.contains(&"'unsafe-eval'"),
+            "CSP must not allow general JS eval: {}",
+            TYTUS_OS_CONTENT_SECURITY_POLICY,
+        );
+    }
+
+    #[test]
+    fn tytusos_csp_allows_runtime_external_surfaces() {
+        let script_src = csp_directive("script-src");
+        let script_elem = csp_directive("script-src-elem");
+        let style_src = csp_directive("style-src");
+        let style_attr = csp_directive("style-src-attr");
+        let worker_src = csp_directive("worker-src");
+        let connect_src = csp_directive("connect-src");
+        let font_src = csp_directive("font-src");
+
+        assert!(script_src.contains("https://cdn.jsdelivr.net"));
+        assert!(script_elem.contains("https://cdn.jsdelivr.net"));
+        assert!(connect_src.contains("https://cdn.jsdelivr.net"));
+        assert!(connect_src.contains("https://*.tytus.traylinx.com"));
+        assert!(connect_src.contains("http://10.42.42.1:18080"));
+        assert!(connect_src.contains("http://localhost:18080"));
+        assert!(connect_src.contains("http://127.0.0.1:18080"));
+        assert!(worker_src.contains("blob:"));
+        assert!(worker_src.contains("https://cdn.jsdelivr.net"));
+        assert!(style_src.contains("'unsafe-inline'"));
+        assert!(style_attr.contains("'unsafe-inline'"));
+        assert!(style_src.contains("https://fonts.googleapis.com"));
+        assert!(font_src.contains("https://fonts.gstatic.com"));
+    }
+
+    #[test]
+    fn tytusos_csp_hash_matches_vendored_importmap() {
+        use sha2::{Digest, Sha256};
+
+        let html = std::str::from_utf8(os_asset("/index.html").expect("index.html vendored"))
+            .expect("index.html utf8");
+        let open = "<script type=\"importmap\">";
+        let start = html
+            .find(open)
+            .map(|i| i + open.len())
+            .expect("importmap open tag missing");
+        let end = html[start..]
+            .find("</script>")
+            .map(|i| start + i)
+            .expect("importmap close tag missing");
+        let importmap_body = &html[start..end];
+        let digest = Sha256::digest(importmap_body.as_bytes());
+        let hash = format!(
+            "'sha256-{}'",
+            general_purpose::STANDARD.encode(digest.as_slice()),
+        );
+
+        assert_eq!(hash, TYTUS_OS_IMPORTMAP_CSP_HASH);
+        assert!(csp_directive("script-src").contains(&hash));
+        assert!(csp_directive("script-src-elem").contains(&hash));
+    }
+
+    #[test]
+    fn tytusos_csp_is_sent_on_spa_responses() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let port = server.server_addr().to_ip().expect("ip").port();
+        let registry = Registry::new();
+
+        let server_arc = Arc::new(server);
+        let server_for_thread = server_arc.clone();
+        let handler = thread::spawn(move || {
+            if let Some(req) = server_for_thread.incoming_requests().next() {
+                handle(req, registry);
+            }
+        });
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(
+                b"GET / HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Accept: text/html\r\n\
+                  Connection: close\r\n\r\n",
+            )
+            .expect("write");
+        let mut resp = String::new();
+        stream.read_to_string(&mut resp).expect("read");
+        handler.join().expect("handler thread panicked");
+
+        let status = resp.lines().next().unwrap_or("");
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "expected 200 serving TytusOS shell, got: {}\n{}",
+            status,
+            resp,
+        );
+        let csp =
+            extract_header(&resp, "Content-Security-Policy").expect("CSP header missing on shell");
+        assert_eq!(csp, TYTUS_OS_CONTENT_SECURITY_POLICY);
+    }
+
+    fn csp_directive(name: &str) -> &'static str {
+        let prefix = format!("{name} ");
+        TYTUS_OS_CONTENT_SECURITY_POLICY
+            .split(';')
+            .map(str::trim)
+            .find(|part| part.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{name} directive missing"))
     }
 
     #[test]
