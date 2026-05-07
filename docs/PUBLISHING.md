@@ -16,11 +16,17 @@ https://github.com/traylinx/homebrew-tap     ← brew install traylinx/tap/tytus
 ## One-liners users see
 
 ```bash
-# macOS / Linux
+# macOS / Linux — stable/latest production release
 curl -fsSL https://get.traylinx.com/install.sh | bash
 
-# Windows
+# macOS / Linux — explicit public beta/pre-release
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.1 sh
+
+# Windows — stable/latest production release
 powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
+
+# Windows — explicit public beta/pre-release
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.1"; irm https://get.traylinx.com/install.ps1 | iex
 
 # Homebrew
 brew install traylinx/tap/tytus
@@ -137,7 +143,7 @@ secrets or environment approval.
 
 Sebastian explicitly allowed unsigned native installers for public beta while Apple/Windows/Linux signing is deferred. This does **not** change the GA bar.
 
-Use `release_tier=private-beta` and `publish_release=true`. The workflow may publish macOS `.pkg` and Linux `.deb` assets only when their filenames contain `PUBLIC-BETA-UNSIGNED`; production still fails closed. Release copy must say public beta / technical preview and warn about Gatekeeper/SmartScreen trust prompts.
+Use `release_tier=private-beta` and `publish_release=true`. The workflow may publish macOS `.pkg` and Linux `.deb` assets only when their filenames contain `PUBLIC-BETA-UNSIGNED`; production still fails closed. Release copy must say public beta / technical preview and warn about Gatekeeper/SmartScreen trust prompts. The public download page may point at that tag with `TYTUS_RELEASE_TAG=<tag>` so installers fetch the pre-release via `releases/tags/<tag>` instead of `/releases/latest`.
 
 Never use this path for `release_tier=production`.
 

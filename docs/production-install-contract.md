@@ -119,5 +119,6 @@ As of 2026-05-07, `install.sh` and `install.ps1` default to the production contr
 - source builds require explicit developer opt-in:
   - `TYTUS_INSTALL_MODE=dev-source`
   - `TYTUS_DEV_SOURCE_INSTALL=1`
+- public beta/pre-release installs must name the release explicitly with `TYTUS_RELEASE_TAG`, and still verify `SHA256SUMS`
 
 This is a guardrail, not a GA claim. A platform is still GA only after the GA gates above pass on a fresh VM.

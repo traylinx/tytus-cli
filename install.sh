@@ -34,6 +34,8 @@
 #     TYTUS_SKIP_SUDOERS   Set to "1" to skip sudoers configuration
 #     TYTUS_SKIP_CHECKSUM  Set to "1" to skip SHA256 verification when
 #                          using release artifacts (NOT RECOMMENDED)
+#     TYTUS_RELEASE_TAG    Install a specific GitHub release tag instead of
+#                          /releases/latest, e.g. v0.6.14-beta.1
 # ============================================================
 
 set -eu
@@ -154,8 +156,14 @@ try_release_download() {
         *)              return 1 ;;
     esac
 
-    msg "Looking for prebuilt release (${RELEASE_ASSET})..."
-    RELEASES_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null)
+    if [ -n "${TYTUS_RELEASE_TAG:-}" ]; then
+        RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/tags/${TYTUS_RELEASE_TAG}"
+        msg "Looking for prebuilt release (${RELEASE_ASSET}) on ${TYTUS_RELEASE_TAG}..."
+    else
+        RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+        msg "Looking for prebuilt release (${RELEASE_ASSET})..."
+    fi
+    RELEASES_JSON=$(curl -fsSL "$RELEASE_API_URL" 2>/dev/null)
     RELEASE_URL=$(printf "%s" "$RELEASES_JSON" \
         | grep "browser_download_url.*${RELEASE_ASSET}" \
         | cut -d'"' -f4 | head -1)
@@ -199,7 +207,7 @@ try_release_download() {
             err "Install coreutils (Linux) or use macOS built-in shasum."
             exit 1
         fi
-        EXPECTED=$(grep " ${RELEASE_ASSET}\$" "${TMP}/SHA256SUMS" | awk '{print $1}' | head -1)
+        EXPECTED=$(grep -E "[[:space:]](\./)?${RELEASE_ASSET}\$" "${TMP}/SHA256SUMS" | awk '{print $1}' | head -1)
         if [ -z "$EXPECTED" ]; then
             err "SHA256SUMS does not contain entry for ${RELEASE_ASSET}."
             exit 1

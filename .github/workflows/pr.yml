@@ -46,6 +46,7 @@ jobs:
                   "Production install policy",
                   "TYTUS_INSTALL_MODE",
                   "TYTUS_DEV_SOURCE_INSTALL",
+                  "TYTUS_RELEASE_TAG",
                   "dev-source",
               ]:
                   assert needle in text, (path, needle)
@@ -56,6 +57,20 @@ jobs:
           assert "visudo" in postinstall
           for forbidden in ["/sbin/route", "/sbin/ifconfig", "/usr/sbin/sysctl", "wg-quick", "wireguard-go"]:
               assert forbidden not in postinstall, forbidden
+
+          installer = Path("install.sh").read_text()
+          assert "releases/tags/${TYTUS_RELEASE_TAG}" in installer
+          assert "(\./)?${RELEASE_ASSET}" in installer
+
+          powershell_installer = Path("install.ps1").read_text()
+          assert "releases/tags/$($env:TYTUS_RELEASE_TAG)" in powershell_installer
+          assert "(\./)?" in powershell_installer
+
+          web_index = Path("web/index.html").read_text()
+          assert "v0.6.14-beta.1" in web_index
+          assert "PUBLIC-BETA-UNSIGNED" in web_index
+          assert "Not production GA" in web_index
+          assert "TYTUS_RELEASE_TAG=v0.6.14-beta.1" in web_index
 
           sync_script = Path("scripts/sync-tytus-os-dist.sh").read_text()
           assert "command -v shasum" in sync_script

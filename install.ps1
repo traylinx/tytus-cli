@@ -27,6 +27,8 @@
 #                                TYTUS_INSTALL_MODE=dev-source
 #     $env:TYTUS_SKIP_CHECKSUM  Skip SHA256 verification when using
 #                                release artifacts (NOT RECOMMENDED)
+#     $env:TYTUS_RELEASE_TAG    Install a specific GitHub release tag instead
+#                                of /releases/latest, e.g. v0.6.14-beta.1
 #
 # NOTE: Windows tunnel support is experimental. The `tytus connect` command
 # needs wintun.dll to function — we're bundling it in a future release.
@@ -110,9 +112,15 @@ function Install-FromRelease {
     $arch = Get-Arch
     $asset = "tytus-windows-$arch.zip"
 
-    Write-Step "Looking for prebuilt release ($asset)..."
+    if ($env:TYTUS_RELEASE_TAG) {
+        $releaseApiUrl = "https://api.github.com/repos/$Repo/releases/tags/$($env:TYTUS_RELEASE_TAG)"
+        Write-Step "Looking for prebuilt release ($asset) on $($env:TYTUS_RELEASE_TAG)..."
+    } else {
+        $releaseApiUrl = "https://api.github.com/repos/$Repo/releases/latest"
+        Write-Step "Looking for prebuilt release ($asset)..."
+    }
     try {
-        $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
+        $release = Invoke-RestMethod $releaseApiUrl
     } catch {
         Write-Warn2 "Could not reach GitHub releases API."
         return $false
@@ -145,7 +153,8 @@ function Install-FromRelease {
             Write-Step "Verifying SHA256..."
             $sumsPath = Join-Path $tmp 'SHA256SUMS'
             Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath -UseBasicParsing
-            $expected = (Get-Content $sumsPath | Where-Object { $_ -match "\s$([regex]::Escape($asset))$" } | ForEach-Object { ($_ -split '\s+')[0] } | Select-Object -First 1)
+            $assetPattern = "\s(\./)?$([regex]::Escape($asset))$"
+            $expected = (Get-Content $sumsPath | Where-Object { $_ -match $assetPattern } | ForEach-Object { ($_ -split '\s+')[0] } | Select-Object -First 1)
             if (-not $expected) {
                 Write-Err2 "SHA256SUMS does not contain entry for $asset"
                 exit 1
