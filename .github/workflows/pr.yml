@@ -21,6 +21,63 @@ env:
   TYTUS_OS_REF: ${{ inputs.tytus_os_ref || '265c2fb85343b9a96171e044d3d6a7117a77f7cd' }}
 
 jobs:
+  installer-contract:
+    name: Installer contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Shell installer contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n install.sh
+          sh -n web/install.sh
+          test "$(readlink web/install.sh)" = "../install.sh"
+          test "$(readlink web/install.ps1)" = "../install.ps1"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for path in ["install.sh", "web/install.sh", "install.ps1", "web/install.ps1"]:
+              text = Path(path).read_text()
+              assert "TYTUS_USE_RELEASE" not in text, path
+              for needle in [
+                  "Production install policy",
+                  "TYTUS_INSTALL_MODE",
+                  "TYTUS_DEV_SOURCE_INSTALL",
+                  "dev-source",
+              ]:
+                  assert needle in text, (path, needle)
+          PY
+          set +e
+          TYTUS_INSTALL_MODE=invalid sh install.sh >/tmp/tytus-install-invalid.out 2>/tmp/tytus-install-invalid.err
+          rc=$?
+          set -e
+          test "$rc" -eq 1
+          grep -q "Unsupported TYTUS_INSTALL_MODE" /tmp/tytus-install-invalid.err
+
+      - name: PowerShell installer contract
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw install.ps1), [ref]$errors)
+          if ($errors) {
+            $errors | Format-List *
+            exit 1
+          }
+
+          $env:TYTUS_INSTALL_MODE = 'invalid'
+          $output = & pwsh -NoProfile -File ./install.ps1 2>&1
+          if ($LASTEXITCODE -ne 1) {
+            $output
+            throw "Expected invalid TYTUS_INSTALL_MODE to exit 1; got $LASTEXITCODE"
+          }
+          if (($output -join "`n") -notmatch 'Unsupported TYTUS_INSTALL_MODE') {
+            $output
+            throw "Expected invalid mode error text"
+          }
+
   rust:
     name: Rust ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
