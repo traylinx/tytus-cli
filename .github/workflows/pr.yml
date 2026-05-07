@@ -56,6 +56,12 @@ jobs:
           assert "visudo" in postinstall
           for forbidden in ["/sbin/route", "/sbin/ifconfig", "/usr/sbin/sysctl", "wg-quick", "wireguard-go"]:
               assert forbidden not in postinstall, forbidden
+
+          release = Path(".github/workflows/release.yml").read_text()
+          assert "Build unsigned macOS pkg dry-run" in release
+          assert "unsigned-DO-NOT-DISTRIBUTE-pkg" in release
+          assert "Assert unsigned pkg artifacts are not public release payload" in release
+          assert "dist/*.pkg" not in release
           PY
           set +e
           TYTUS_INSTALL_MODE=invalid sh install.sh >/tmp/tytus-install-invalid.out 2>/tmp/tytus-install-invalid.err
