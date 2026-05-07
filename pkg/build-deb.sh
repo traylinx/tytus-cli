@@ -81,8 +81,8 @@ COPYRIGHT
 cat > "$PKGROOT/usr/share/doc/$PACKAGE_NAME/changelog.Debian" <<CHANGELOG
 tytus ($VERSION) unstable; urgency=medium
 
-  * Internal unsigned Linux package dry-run.
-  * DO NOT DISTRIBUTE to end users until package/repository signing lands.
+  * Public beta unsigned Linux package preview.
+  * Intended for technical-preview testers; not production GA.
 
  -- Traylinx <hello@traylinx.com>  Thu, 07 May 2026 00:00:00 +0000
 CHANGELOG

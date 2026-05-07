@@ -13,7 +13,7 @@ Tytus installed.
 
 Next steps:
   1. Open Tytus from your app launcher, or run: tytus-tray
-  2. For background token refresh and tunnel autostart: tytus autostart install
+  2. Follow the setup wizard: sign in, pick your AI assistant, start tunnel, test
 
 This is an unsigned public beta package. Expect normal OS trust warnings.
 It is intended for technical-preview testers, not production GA.

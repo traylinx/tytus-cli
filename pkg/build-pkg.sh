@@ -128,8 +128,8 @@ cat > "$BUILD_DIR/welcome.html" <<'HTML'
 <h2>Welcome to Tytus</h2>
 <p>This installer puts the <code>tytus</code> CLI, menu-bar app, and MCP
 server on your Mac. About 60 seconds end-to-end.</p>
-<p>After install, click the <strong>T</strong> in your menu bar to start chatting
-with your private AI.</p>
+<p>After install, click the <strong>T</strong> in your menu bar and follow the setup wizard:
+sign in, pick your AI assistant, start the private tunnel, and run the test.</p>
 </body></html>
 HTML
 
@@ -137,7 +137,7 @@ cat > "$BUILD_DIR/conclusion.html" <<'HTML'
 <html><body style="font-family:-apple-system,sans-serif;padding:20px;color:#1a1a1a">
 <h2>Tytus is installed.</h2>
 <p>Look for the <strong>T</strong> icon in your menu bar (top-right of the screen).</p>
-<p>Click it to sign in and pick your AI assistant — under 60 seconds.</p>
+<p>Click it and follow the setup wizard: sign in, pick your AI assistant, start the tunnel, and run the test.</p>
 <p>If the icon doesn't appear: open <strong>Tytus</strong> from Applications,
 or run <code>tytus tray install</code> in Terminal.</p>
 </body></html>
