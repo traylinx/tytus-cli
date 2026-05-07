@@ -60,6 +60,7 @@ jobs:
       - name: PowerShell installer contract
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $false
           $errors = $null
           [void][System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw install.ps1), [ref]$errors)
           if ($errors) {
@@ -69,9 +70,10 @@ jobs:
 
           $env:TYTUS_INSTALL_MODE = 'invalid'
           $output = & pwsh -NoProfile -File ./install.ps1 2>&1
-          if ($LASTEXITCODE -ne 1) {
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 1) {
             $output
-            throw "Expected invalid TYTUS_INSTALL_MODE to exit 1; got $LASTEXITCODE"
+            throw "Expected invalid TYTUS_INSTALL_MODE to exit 1; got $exitCode"
           }
           if (($output -join "`n") -notmatch 'Unsupported TYTUS_INSTALL_MODE') {
             $output
