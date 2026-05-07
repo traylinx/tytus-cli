@@ -164,7 +164,7 @@ jobs:
             name: tytus-macos-aarch64
             archive: tar.gz
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             name: tytus-linux-x86_64
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
@@ -258,6 +258,17 @@ jobs:
           ls -la target/Tytus-*-unsigned.pkg
         shell: bash
 
+      - name: Build unsigned Linux deb dry-run
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        working-directory: tytus-cli
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          pkg/build-deb.sh
+          dpkg-deb --info target/Tytus-*-unsigned.deb
+          dpkg-deb --contents target/Tytus-*-unsigned.deb | sed -n '1,80p'
+        shell: bash
+
       - name: Package
         working-directory: tytus-cli
         run: |
@@ -284,6 +295,14 @@ jobs:
           path: tytus-cli/target/Tytus-*-unsigned.pkg
           retention-days: 7
 
+      - name: Upload unsigned Linux deb dry-run artifact
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.name }}-unsigned-DO-NOT-DISTRIBUTE-deb
+          path: tytus-cli/target/Tytus-*-unsigned.deb
+          retention-days: 7
+
   release:
     needs:
       - check-nonproduction-release-policy
@@ -308,14 +327,14 @@ jobs:
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} dist/ \;
           ls -la dist/
 
-      - name: Assert unsigned pkg artifacts are not public release payload
+      - name: Assert unsigned native package artifacts are not public release payload
         run: |
-          if find dist -type f \( -name '*.pkg' -o -name '*unsigned*' \) | grep -q .; then
-            echo "unsigned/internal pkg artifact reached public release payload" >&2
-            find dist -type f \( -name '*.pkg' -o -name '*unsigned*' \) -print >&2
+          if find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' -o -name '*unsigned*' \) | grep -q .; then
+            echo "unsigned/internal native package artifact reached public release payload" >&2
+            find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' -o -name '*unsigned*' \) -print >&2
             exit 1
           fi
-          echo "Public release payload excludes unsigned pkg dry-run artifacts."
+          echo "Public release payload excludes unsigned native package dry-run artifacts."
 
       - name: Generate SHA256SUMS
         run: |

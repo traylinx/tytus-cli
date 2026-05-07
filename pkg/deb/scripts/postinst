@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+
+cat <<'MSG'
+Tytus installed.
+
+Next steps:
+  1. Open Tytus from your app launcher, or run: tytus-tray
+  2. For background token refresh and tunnel autostart: tytus autostart install
+
+This dry-run package is unsigned and must not be distributed to end users.
+MSG
+
+exit 0

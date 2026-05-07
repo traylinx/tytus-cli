@@ -74,3 +74,47 @@ Linux uninstall preserves user data by default and offers explicit separate remo
 - generated user content
 
 Secrets must not remain after explicit data removal.
+
+## Phase 6 dry-run package shape
+
+The release workflow now builds the Linux release artifact on `ubuntu-22.04`,
+not `ubuntu-latest`, so the default `x86_64-unknown-linux-gnu` binary keeps the
+Ubuntu 22.04 glibc floor. Ubuntu 24.04 can run that artifact; the inverse is not
+safe.
+
+`pkg/build-deb.sh` creates an unsigned internal `.deb` dry-run artifact only:
+
+- `/usr/bin/tytus`
+- `/usr/bin/tytus-mcp`
+- `/usr/bin/tytus-tray`
+- `/usr/lib/systemd/user/tytus-daemon.service`
+- `/etc/xdg/autostart/tytus-tray.desktop`
+- `/usr/share/applications/tytus.desktop`
+- `/usr/share/icons/hicolor/512x512/apps/tytus.png`
+
+The package intentionally does not switch `install.sh` to `.deb` yet and does
+not publish `.deb` files as GitHub Release assets. Workflow artifacts are named
+`*-unsigned-DO-NOT-DISTRIBUTE-deb` with 7-day retention until Linux package or
+repository signing lands.
+
+Runtime dependencies declared by the dry-run package:
+
+- `libc6 (>= 2.35)`
+- `ca-certificates`
+- `libdbus-1-3`
+- `libsecret-1-0`
+- `libgtk-3-0`
+- `libayatana-appindicator3-1`
+- `iproute2`
+- `xdg-utils`
+- recommends `policykit-1 | polkitd`
+
+Open caveats before Linux GA:
+
+- unsigned `.deb` is internal only;
+- `install.sh` must verify signed package metadata before using `.deb` by default;
+- Ubuntu 22.04 and 24.04 fresh-VM install smoke must prove Secret Service,
+  AppIndicator/tray behavior, browser launch, tunnel elevation, repair, update,
+  and uninstall;
+- if `ubuntu-22.04` Actions runner deprecation starts, move release packaging to
+  an Ubuntu 22.04 container or equivalent glibc-pinned build image before GA.

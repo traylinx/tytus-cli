@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Tytus Tray
+Comment=Start Tytus tray at login
+Exec=/usr/bin/tytus-tray
+Icon=tytus
+Terminal=false
+X-GNOME-Autostart-enabled=true

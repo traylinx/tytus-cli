@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Tytus
+Comment=Open Tytus OS and manage your private AI pod
+Exec=/usr/bin/tytus-tray
+Icon=tytus
+Terminal=false
+Categories=Network;Utility;
+StartupNotify=false

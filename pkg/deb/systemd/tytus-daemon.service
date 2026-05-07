@@ -1,0 +1,15 @@
+[Unit]
+Description=Tytus token-refresh daemon
+Documentation=https://github.com/traylinx/tytus-cli#readme
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/tytus daemon run
+Restart=always
+RestartSec=30
+Environment=TYTUS_HEADLESS=1
+
+[Install]
+WantedBy=default.target

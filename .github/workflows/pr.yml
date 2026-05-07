@@ -59,8 +59,11 @@ jobs:
 
           release = Path(".github/workflows/release.yml").read_text()
           assert "Build unsigned macOS pkg dry-run" in release
+          assert "Build unsigned Linux deb dry-run" in release
           assert "unsigned-DO-NOT-DISTRIBUTE-pkg" in release
-          assert "Assert unsigned pkg artifacts are not public release payload" in release
+          assert "unsigned-DO-NOT-DISTRIBUTE-deb" in release
+          assert "Assert unsigned native package artifacts are not public release payload" in release
+          assert "ubuntu-22.04" in release
           assert "Check production signing secrets" in release
           assert "Check non-production release policy" in release
           assert "environment: release-production" in release
@@ -68,6 +71,7 @@ jobs:
           assert "publish_release" in release
           assert "Production release blocked" in release
           assert "dist/*.pkg" not in release
+          assert "dist/*.deb" not in release
 
           signing_doc = Path("docs/release/signing-secret-contract.md").read_text()
           for secret_name in [
