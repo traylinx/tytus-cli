@@ -38,6 +38,14 @@ if [ -z "$TARGET_HOME" ]; then
     TARGET_HOME="/Users/$TARGET_USER"
 fi
 
+case "$TARGET_USER" in
+    *[!A-Za-z0-9._-]*|"")
+        echo "[tytus-postinstall] unsafe target username for sudoers: $TARGET_USER" >>"$LOG"
+        echo "Tytus could not safely configure its private-connection permission." >&2
+        exit 1
+        ;;
+esac
+
 echo "[tytus-postinstall] target user=$TARGET_USER home=$TARGET_HOME" >>"$LOG"
 
 # Run the tray installer as the target user. /usr/local/bin/tytus
@@ -52,22 +60,44 @@ else
 fi
 
 # sudoers entry for `tytus connect` is set up by the install.sh path.
-# For .pkg installs we ship the same file directly so the user never
-# has to type their password to bring the tunnel up. The /etc/sudoers.d
-# file is owned by root:wheel mode 0440 per macOS rules.
+# For .pkg installs we ship the same tightly-scoped wrapper entry directly
+# so the user never has to type their password to bring the tunnel up.
+# The entry must stay narrower than direct raw network-tool access:
+# root elevation goes through `/usr/local/bin/tytus`, whose `tunnel-up`
+# validates the config path and whose `tunnel-down` validates PID files.
+# The /etc/sudoers.d file is owned by root:wheel mode 0440 per macOS rules.
 SUDOERS_FILE=/etc/sudoers.d/tytus
-if [ ! -f "$SUDOERS_FILE" ]; then
-    cat > "$SUDOERS_FILE" <<EOF
+TMP_SUDOERS=/tmp/tytus-sudoers.$$
+cat > "$TMP_SUDOERS" <<EOF
 # Installed by Tytus.pkg postinstall — tightly scoped sudoers entry so
 # \`tytus connect\` can bring the WireGuard tunnel up without a password
-# prompt. Same surface install.sh creates. Remove with:
+# prompt. Same wrapper surface install.sh creates. Remove with:
 #   sudo rm /etc/sudoers.d/tytus
-$TARGET_USER ALL=(root) NOPASSWD: /sbin/route, /sbin/ifconfig, /usr/sbin/sysctl, /usr/local/bin/wg-quick, /opt/homebrew/bin/wg-quick, /usr/local/sbin/wireguard-go, /opt/homebrew/sbin/wireguard-go
+$TARGET_USER ALL=(root) NOPASSWD: /usr/local/bin/tytus tunnel-up /tmp/tytus/tunnel-*.json, /usr/local/bin/tytus tunnel-down *
 EOF
-    chmod 0440 "$SUDOERS_FILE"
-    chown root:wheel "$SUDOERS_FILE"
-    echo "[tytus-postinstall] wrote $SUDOERS_FILE" >>"$LOG"
+
+if command -v visudo >/dev/null 2>&1; then
+    VISUDO=$(command -v visudo)
+else
+    VISUDO=/usr/sbin/visudo
 fi
+
+if [ ! -x "$VISUDO" ]; then
+    echo "[tytus-postinstall] visudo not found — refusing to install unchecked sudoers" >>"$LOG"
+    rm -f "$TMP_SUDOERS"
+    exit 1
+fi
+
+if ! "$VISUDO" -cf "$TMP_SUDOERS" >>"$LOG" 2>&1; then
+    echo "[tytus-postinstall] sudoers validation failed — refusing to install unchecked sudoers" >>"$LOG"
+    rm -f "$TMP_SUDOERS"
+    exit 1
+fi
+
+mkdir -p /etc/sudoers.d
+install -m 0440 -o root -g wheel "$TMP_SUDOERS" "$SUDOERS_FILE"
+rm -f "$TMP_SUDOERS"
+echo "[tytus-postinstall] wrote validated wrapper sudoers $SUDOERS_FILE" >>"$LOG"
 
 echo "[tytus-postinstall] complete $(date)" >>"$LOG"
 exit 0

@@ -49,6 +49,13 @@ jobs:
                   "dev-source",
               ]:
                   assert needle in text, (path, needle)
+
+          postinstall = Path("pkg/scripts/postinstall").read_text()
+          assert "/usr/local/bin/tytus tunnel-up /tmp/tytus/tunnel-*.json" in postinstall
+          assert "/usr/local/bin/tytus tunnel-down *" in postinstall
+          assert "visudo" in postinstall
+          for forbidden in ["/sbin/route", "/sbin/ifconfig", "/usr/sbin/sysctl", "wg-quick", "wireguard-go"]:
+              assert forbidden not in postinstall, forbidden
           PY
           set +e
           TYTUS_INSTALL_MODE=invalid sh install.sh >/tmp/tytus-install-invalid.out 2>/tmp/tytus-install-invalid.err

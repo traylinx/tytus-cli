@@ -87,9 +87,12 @@ gh release upload "v<version>" "target/Tytus-<version>.pkg"
      bundle + `~/Library/LaunchAgents/com.traylinx.tytus.tray.plist`
      land in the user's home (not `/var/root/`).
    - Drops `/etc/sudoers.d/tytus` with the same tightly-scoped
-     `wg-quick` / `route` / `ifconfig` exemptions `install.sh` uses,
-     so the user never has to type their password to bring the
-     tunnel up.
+     Tytus-wrapper permission `install.sh` uses:
+     `/usr/local/bin/tytus tunnel-up /tmp/tytus/tunnel-*.json` and
+     `/usr/local/bin/tytus tunnel-down *`.
+   - Validates the generated sudoers file with `visudo -cf` before installing
+     it. The package must never grant passwordless access to raw tools such as
+     `route`, `ifconfig`, `sysctl`, `wg-quick`, or `wireguard-go`.
 
 After install:
 - Menu-bar **T** appears (Tytus.app launches automatically).
