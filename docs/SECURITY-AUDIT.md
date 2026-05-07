@@ -79,10 +79,15 @@ The wildcard was the bug — sudoers rules must be tightly scoped.
 - If validation passes, sends SIGTERM via `libc::kill`.
 - If the PID is `<= 1` it refuses immediately (defence against any
   upstream parsing weirdness that might end up calling with `0` or `1`).
-- The sudoers entry in `install.sh` is now scoped to **only**:
+- The sudoers entry in `install.sh` and `pkg/scripts/postinstall` is now
+  scoped to **only** the Tytus wrapper:
   ```
-  ${USER} ALL=(root) NOPASSWD: ${BIN_PATH} tunnel-up *, ${BIN_PATH} tunnel-down *
+  ${USER} ALL=(root) NOPASSWD: ${BIN_PATH} tunnel-up /tmp/tytus/tunnel-*.json, ${BIN_PATH} tunnel-down *
   ```
+- The macOS `.pkg` postinstall validates the generated sudoers drop-in with
+  `visudo -cf` before installing it and refuses to install unchecked sudoers.
+- The `.pkg` path must never grant passwordless access to raw network tools
+  such as `route`, `ifconfig`, `sysctl`, `wg-quick`, or `wireguard-go`.
 - `cmd_disconnect` was updated to invoke `sudo -n <self_exe> tunnel-down
   <pid>` instead of `sudo -n kill -TERM <pid>`.
 

@@ -15,7 +15,7 @@
 //!   concurrent install job at a time — the UI only lets the user click
 //!   one card. Parallel installs would overspend units anyway.
 //! - Port bound at startup to `127.0.0.1:0` (kernel picks). Written to
-//!   `<tmp>/tytus/tray-web.port` so `open_os()` can read it.
+//!   the platform runtime `tray-web.port` so `open_os()` can read it.
 //! - Lifecycle: server thread owns the `tiny_http::Server` and parks on
 //!   `recv()`. On tray quit we drop the `Arc<Server>` and the kernel
 //!   tears down the listener.
@@ -1658,6 +1658,37 @@ pub fn open_os() {
 /// the current call sites do this; this is a future-maintainer warning.
 pub fn open_os_at(fragment: &str) {
     let fragment = canonical_os_fragment(fragment);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    // Override — when TYTUS_OS_URL is set, route every "Open TytusOS"
+    // shortcut through that base URL instead of the tray's dynamic
+    // tray-web.port. Useful for pinning the tray to a fixed dev URL
+    // (e.g. the Vite dev server at http://localhost:4242/) so menubar
+    // clicks always land on the same origin as the developer's open
+    // tabs. Set via `launchctl setenv TYTUS_OS_URL http://localhost:4242/`
+    // for it to reach the GUI app launched from the Dock / menubar.
+    if let Ok(raw) = std::env::var("TYTUS_OS_URL") {
+        let base = raw.trim().trim_end_matches('/');
+        if !base.is_empty() {
+            // Match the dynamic-port branch's nonce policy: no nonce on
+            // the bare base URL (lets the browser focus the existing tab
+            // on repeat "Open TytusOS" clicks); nonce only when a
+            // fragment is present, so successive deep-link clicks
+            // re-fire hashchange.
+            let url = if fragment.is_empty() {
+                format!("{}/", base)
+            } else {
+                let sep = if fragment.contains('?') { '&' } else { '?' };
+                format!("{}/{}{}n={:x}", base, fragment, sep, nonce)
+            };
+            open_url(&url);
+            return;
+        }
+    }
+
     let port = match current_port() {
         Some(p) => p,
         None => {
@@ -1665,10 +1696,6 @@ pub fn open_os_at(fragment: &str) {
             return;
         }
     };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
     let url = if fragment.is_empty() {
         format!("http://127.0.0.1:{}/", port)
     } else {
@@ -1690,18 +1717,11 @@ fn canonical_os_fragment(fragment: &str) -> String {
 }
 
 fn open_url(url: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = Command::new("open").arg(&url).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = Command::new("xdg-open").arg(&url).spawn();
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = url;
-    }
+    let _ = atomek_core::platform::open::open_url(url);
+}
+
+fn open_path(path: &Path) {
+    let _ = atomek_core::platform::open::open_path(path);
 }
 
 fn legacy_tower_enabled() -> bool {
@@ -1711,7 +1731,7 @@ fn legacy_tower_enabled() -> bool {
 }
 
 fn port_file() -> Option<PathBuf> {
-    Some(PathBuf::from("/tmp/tytus/tray-web.port"))
+    Some(atomek_core::platform::paths::tray_web_port_file())
 }
 
 fn current_port() -> Option<u16> {
@@ -2547,6 +2567,9 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/files/delete") => {
             handle_files_delete(request);
         }
+        (Method::Post, "/api/files/trash") => {
+            handle_files_trash(request);
+        }
         (Method::Post, "/api/files/copy") => {
             handle_files_copy(request);
         }
@@ -2564,6 +2587,14 @@ fn handle(request: Request, registry: Registry) {
         // on demand so the open call doesn't fail on a fresh pod.
         (Method::Post, "/api/files/open-downloads") => {
             handle_files_open_downloads(request, &query);
+        }
+        // Native clipboard bridge. Text-only by design; images/files stay in
+        // browser Clipboard API until the daemon has a richer pasteboard model.
+        (Method::Get, "/api/clipboard/text") => {
+            handle_clipboard_text_get(request);
+        }
+        (Method::Post, "/api/clipboard/text") => {
+            handle_clipboard_text_set(request);
         }
         (Method::Post, "/api/workspace/open") => {
             handle_workspace_open(request);
@@ -3379,6 +3410,16 @@ fn agent_units_for(agent_type: &str) -> u32 {
     }
 }
 
+fn terminate_process(pid: u32) -> Result<(), String> {
+    atomek_core::platform::process::terminate_process(pid).map_err(|e| e.to_string())
+}
+
+fn process_exists(pid: i32) -> bool {
+    u32::try_from(pid)
+        .ok()
+        .is_some_and(atomek_core::platform::process::process_exists)
+}
+
 /// POST /api/jobs/<id>/cancel — SIGTERM the job's child process.
 ///
 /// Idempotent and safe to call against a finished job (returns
@@ -3423,15 +3464,13 @@ fn handle_job_cancel(request: Request, registry: &Registry, job_id: &str) {
         &job,
         JobEvent::Log(format!("[cancel] sending SIGTERM to PID {}", pid)),
     );
-    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-    if rc != 0 {
-        let errno = std::io::Error::last_os_error();
+    if let Err(reason) = terminate_process(pid) {
         respond_json(
             request,
             500,
             &serde_json::json!({
                 "cancelled": false,
-                "reason": format!("kill failed: {}", errno),
+                "reason": format!("kill failed: {}", reason),
             }),
         );
         return;
@@ -3867,24 +3906,22 @@ fn handle_open_external(request: Request, query: &str) {
 
     match target.as_str() {
         "health-test" => {
-            // Open Terminal running `tytus test`. Reuse the existing tray
-            // helper by shelling out to `open` on macOS.
-            #[cfg(target_os = "macos")]
-            {
-                let script = "tell application \"Terminal\" to do script \"tytus test\"";
-                let _ = Command::new("osascript").args(["-e", script]).spawn();
+            // Open a platform terminal running `tytus test`. The terminal
+            // substrate owns macOS/Linux/Windows launch details.
+            match atomek_core::platform::terminal::open_shell_command("tytus test") {
+                Ok(()) => respond_json(request, 200, &serde_json::json!({ "ok": true })),
+                Err(e) => respond_json(
+                    request,
+                    500,
+                    &serde_json::json!({"error": format!("terminal launch failed: {}", e)}),
+                ),
             }
-            #[cfg(not(target_os = "macos"))]
-            { /* linux: rely on user's preferred terminal — not implemented */ }
-            respond_json(request, 200, &serde_json::json!({ "ok": true }));
         }
         "channel-setup" => {
-            // Open Terminal running `tytus channels add <channel> --pod <NN>`.
+            // Open a platform terminal running `tytus channels add <channel> --pod <NN>`.
             // The CLI prompts interactively for the token so we never handle
-            // secrets inside the wizard's HTTP layer. Whitelist channel names
-            // + digit-only pod so the osascript we build is safe. Everything
-            // goes through double-quoted heredoc-style strings in AppleScript
-            // — shell escaping is belt-and-suspenders.
+            // secrets inside the wizard's HTTP layer. Channel names and pod
+            // ids are whitelisted before entering the terminal command string.
             let channel = query
                 .split('&')
                 .find_map(|kv| kv.strip_prefix("channel=").map(|v| v.to_string()))
@@ -3906,19 +3943,15 @@ fn handle_open_external(request: Request, query: &str) {
                 respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
                 return;
             }
-            #[cfg(target_os = "macos")]
-            {
-                // The CLI prompts for each credential interactively when
-                // --token is omitted. That keeps the user copying the token
-                // directly into Terminal, never into an HTTP payload.
-                let cmd = format!("tytus channels add {} --pod {}", channel, pod);
-                let script = format!(
-                    "tell application \"Terminal\" to do script \"{}\"",
-                    cmd.replace('"', "\\\"")
-                );
-                let _ = Command::new("osascript").args(["-e", &script]).spawn();
+            let cmd = format!("tytus channels add {} --pod {}", channel, pod);
+            match atomek_core::platform::terminal::open_shell_command(&cmd) {
+                Ok(()) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+                Err(e) => respond_json(
+                    request,
+                    500,
+                    &serde_json::json!({"error": format!("terminal launch failed: {}", e)}),
+                ),
             }
-            respond_json(request, 200, &serde_json::json!({"ok": true}));
         }
         _ => respond_json(
             request,
@@ -3988,14 +4021,7 @@ fn handle_pod_open(request: Request, query: &str) {
         .and_then(|a| a.ui_url.clone().or_else(|| a.public_url.clone()));
     match url {
         Some(u) => {
-            #[cfg(target_os = "macos")]
-            {
-                let _ = Command::new("open").arg(&u).spawn();
-            }
-            #[cfg(target_os = "linux")]
-            {
-                let _ = Command::new("xdg-open").arg(&u).spawn();
-            }
+            open_url(&u);
             respond_json(request, 200, &serde_json::json!({"ok": true, "url": u}));
         }
         None => {
@@ -4716,8 +4742,8 @@ fn handle_shared_folders_run_streamed(request: Request, registry: &Registry, que
 }
 
 /// POST /api/shared-folders/open — body `{"local_path":"..."}`. Opens
-/// the path in Finder via macOS `open`. Returns 400 if the path
-/// doesn't exist (orphan sidecar) so the UI can flag the binding.
+/// the path with the platform default file manager. Returns 400 if
+/// the path doesn't exist (orphan sidecar) so the UI can flag the binding.
 fn handle_shared_folders_open(mut request: Request) {
     #[derive(serde::Deserialize)]
     struct Body {
@@ -4746,11 +4772,7 @@ fn handle_shared_folders_open(mut request: Request) {
         );
         return;
     }
-    let _ = Command::new("open")
-        .arg(&body.local_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    open_path(std::path::Path::new(&body.local_path));
     respond_json(request, 200, &serde_json::json!({"ok": true}));
 }
 
@@ -5187,6 +5209,12 @@ fn handle_files_list(request: Request, query: &str) {
                 )
             })
         }
+        source if user_file_source_root(source).is_some() => {
+            let (label, root) = user_file_source_root(source).expect("checked above");
+            let _ = fs::create_dir_all(&root);
+            list_local_dir(&root, &rel)
+                .map(|rows| (label.to_string(), root.to_string_lossy().to_string(), rows))
+        }
         "shared" => {
             let idx = match query_value_decoded(query, "binding") {
                 Ok(Some(v)) => v.parse::<usize>().ok(),
@@ -5299,9 +5327,42 @@ fn safe_file_name(raw: Option<String>) -> Result<String, String> {
     Ok(name)
 }
 
+fn user_file_source_root(source: &str) -> Option<(&'static str, PathBuf)> {
+    let home = || dirs::home_dir().unwrap_or_else(|| std::env::temp_dir());
+    match source {
+        "user-documents" => Some((
+            "Documents",
+            dirs::document_dir().unwrap_or_else(|| home().join("Documents")),
+        )),
+        "user-desktop" => Some((
+            "Desktop",
+            dirs::desktop_dir().unwrap_or_else(|| home().join("Desktop")),
+        )),
+        "user-downloads" => Some((
+            "Downloads",
+            dirs::download_dir().unwrap_or_else(|| home().join("Downloads")),
+        )),
+        "user-music" => Some((
+            "Music",
+            dirs::audio_dir().unwrap_or_else(|| home().join("Music")),
+        )),
+        "user-pictures" => Some((
+            "Pictures",
+            dirs::picture_dir().unwrap_or_else(|| home().join("Pictures")),
+        )),
+        _ => None,
+    }
+}
+
 fn local_files_root(source: &str, binding: Option<usize>) -> Result<PathBuf, String> {
     match source {
         "tytus-home" => Ok(crate::workspace::ensure_tytus_home()),
+        source if user_file_source_root(source).is_some() => {
+            let (_label, root) = user_file_source_root(source).expect("checked above");
+            fs::create_dir_all(&root)
+                .map_err(|e| format!("user folder is not accessible: {}", e))?;
+            Ok(root)
+        }
         "shared" => {
             let Some(idx) = binding else {
                 return Err("missing binding index".to_string());
@@ -5502,6 +5563,68 @@ fn handle_files_delete(mut request: Request) {
     };
     match result {
         Ok(_) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+fn handle_files_trash(mut request: Request) {
+    let body = match read_file_mutation_body(&mut request) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let root = match writable_files_root(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let rel = match safe_relative_path(body.path.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let target = match anchored_existing_entry(&root, &rel) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    if !target.exists() {
+        respond_json(request, 404, &serde_json::json!({"error":"not found"}));
+        return;
+    }
+    let trash_root = crate::workspace::ensure_tytus_home().join(".Trash");
+    if let Err(e) = fs::create_dir_all(&trash_root) {
+        respond_json(request, 500, &serde_json::json!({"error": e.to_string()}));
+        return;
+    }
+    let name = rel
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("item")
+        .replace(['/', '\\', '\0'], "_");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dest = trash_root.join(format!("{}_{}", stamp, name));
+    match fs::rename(&target, &dest) {
+        Ok(_) => respond_json(
+            request,
+            200,
+            &serde_json::json!({
+                "ok": true,
+                "trash_path": dest.to_string_lossy(),
+                "original_path": rel.to_string_lossy(),
+            }),
+        ),
         Err(e) => respond_json(request, 400, &serde_json::json!({"error": e.to_string()})),
     }
 }
@@ -5843,11 +5966,7 @@ fn handle_files_open_downloads(request: Request, query: &str) {
     };
     let path = crate::workspace::ensure_download_dir_for_pod(&pod);
     let legacy_path = crate::workspace::legacy_download_dir_for_pod(&pod);
-    let _ = Command::new("open")
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    open_path(&path);
     respond_json(
         request,
         200,
@@ -5861,11 +5980,7 @@ fn handle_files_open_downloads(request: Request, query: &str) {
 
 fn handle_workspace_open(request: Request) {
     let path = crate::workspace::ensure_tytus_home();
-    let _ = Command::new("open")
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    open_path(&path);
     respond_json(
         request,
         200,
@@ -5876,6 +5991,55 @@ fn handle_workspace_open(request: Request) {
     );
 }
 
+const MAX_CLIPBOARD_TEXT_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct ClipboardTextBody {
+    text: String,
+}
+
+fn handle_clipboard_text_get(request: Request) {
+    match read_system_clipboard_text() {
+        Ok(text) => respond_json(request, 200, &serde_json::json!({"text": text})),
+        Err(e) => respond_json(request, 503, &serde_json::json!({"error": e})),
+    }
+}
+
+fn handle_clipboard_text_set(mut request: Request) {
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: ClipboardTextBody = match serde_json::from_str(&buf) {
+        Ok(v) => v,
+        Err(_) => {
+            respond_json(request, 400, &serde_json::json!({"error":"bad json"}));
+            return;
+        }
+    };
+    if body.text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+        respond_json(
+            request,
+            413,
+            &serde_json::json!({"error":"clipboard text exceeds 2 MiB"}),
+        );
+        return;
+    }
+    match write_system_clipboard_text(&body.text) {
+        Ok(()) => respond_json(request, 200, &serde_json::json!({"ok": true})),
+        Err(e) => respond_json(request, 503, &serde_json::json!({"error": e})),
+    }
+}
+
+fn read_system_clipboard_text() -> Result<String, String> {
+    atomek_core::platform::clipboard::read_text().map_err(|e| e.to_string())
+}
+
+fn write_system_clipboard_text(text: &str) -> Result<(), String> {
+    atomek_core::platform::clipboard::write_text(text).map_err(|e| e.to_string())
+}
+
 /// POST /api/shared-folders/open-cache — opens
 /// `~/.cache/garagetytus` in Finder.
 fn handle_shared_folders_open_cache(request: Request) {
@@ -5883,50 +6047,28 @@ fn handle_shared_folders_open_cache(request: Request) {
         .map(|h| format!("{}/.cache/garagetytus", h))
         .unwrap_or_else(|_| "/tmp".to_string());
     let _ = std::fs::create_dir_all(&path);
-    let _ = Command::new("open")
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    open_path(Path::new(&path));
     respond_json(request, 200, &serde_json::json!({"ok": true}));
 }
 
-/// POST /api/shared-folders/pick-folder — calls macOS osascript to
-/// open a native folder picker and returns the chosen POSIX path.
-/// Returns `{cancelled: true}` if the user dismissed the dialog.
-/// macOS-only; non-macOS returns 501.
+/// POST /api/shared-folders/pick-folder — opens a native folder picker and
+/// returns the chosen POSIX path. Returns `{cancelled: true}` if the user
+/// dismissed the dialog. macOS-only; non-macOS returns 501.
 #[cfg(target_os = "macos")]
 fn handle_shared_folders_pick_folder(request: Request) {
-    let script = "POSIX path of (choose folder with prompt \
-                  \"Pick a Mac folder to share with your pods\")";
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if path.is_empty() {
-                respond_json(request, 200, &serde_json::json!({"cancelled": true}));
-            } else {
-                respond_json(request, 200, &serde_json::json!({"path": path}));
-            }
-        }
-        Ok(_) => {
-            // osascript exits non-zero when user cancels. Distinguish
-            // from real failure by treating any non-zero as "cancelled"
-            // — the picker doesn't fail in any other realistic way.
-            respond_json(request, 200, &serde_json::json!({"cancelled": true}));
-        }
-        Err(e) => {
-            respond_json(
-                request,
-                500,
-                &serde_json::json!({
-                    "error": format!("osascript failed: {}", e),
-                }),
-            );
-        }
+    match atomek_core::platform::dialog::pick_path(
+        atomek_core::platform::dialog::PickKind::Folder,
+        "Pick a Mac folder to share with your pods",
+    ) {
+        Ok(Some(path)) => respond_json(request, 200, &serde_json::json!({"path": path})),
+        Ok(None) => respond_json(request, 200, &serde_json::json!({"cancelled": true})),
+        Err(e) => respond_json(
+            request,
+            500,
+            &serde_json::json!({
+                "error": format!("folder picker failed: {}", e),
+            }),
+        ),
     }
 }
 
@@ -5936,7 +6078,7 @@ fn handle_shared_folders_pick_folder(request: Request) {
         request,
         501,
         &serde_json::json!({
-            "error": "folder picker is macOS-only (osascript)",
+            "error": "folder picker is macOS-only",
         }),
     );
 }
@@ -6869,31 +7011,7 @@ fn handle_login(request: Request) {
 }
 
 fn open_verification_url(url: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = url;
-        false
-    }
+    atomek_core::platform::open::open_url(url).is_ok()
 }
 
 async fn persist_device_login(
@@ -7212,17 +7330,16 @@ fn handle_daemon_lifecycle(request: Request, action: DaemonAction) {
 }
 
 fn handle_daemon_status(request: Request) {
-    // Canonical liveness check: read /tmp/tytus/daemon.pid + `kill -0`
-    // probe. `kill -0 pid` returns Ok if the process exists and the
-    // sender has permission to signal it; Err(ESRCH) if it's gone.
+    // Canonical liveness check: read the platform daemon pidfile and
+    // probe with the shared process substrate.
     // Matches the CLI's `tytus daemon status` logic so results agree
     // between surfaces.
-    let pid_path = PathBuf::from("/tmp/tytus/daemon.pid");
+    let pid_path = atomek_core::platform::paths::daemon_pid_file();
     let pid: Option<i32> = std::fs::read_to_string(&pid_path)
         .ok()
         .and_then(|s| s.trim().parse().ok());
     let running = match pid {
-        Some(p) => unsafe { libc::kill(p, 0) == 0 },
+        Some(p) => process_exists(p),
         None => false,
     };
     respond_json(
@@ -7262,10 +7379,7 @@ fn handle_log_tail(request: Request, query: &str) {
             }
         }
     }
-    let path = match name {
-        "startup" => PathBuf::from("/tmp/tytus/autostart.log"),
-        _ => PathBuf::from("/tmp/tytus/daemon.log"),
-    };
+    let path = log_file_with_legacy(name);
     let meta = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(_) => {
@@ -7325,6 +7439,24 @@ fn handle_log_tail(request: Request, query: &str) {
             "missing": false,
         }),
     );
+}
+
+fn log_file_with_legacy(name: &str) -> PathBuf {
+    let (primary, legacy) = match name {
+        "startup" => (
+            atomek_core::platform::logging::autostart_log_file(),
+            atomek_core::platform::logging::legacy_autostart_log_file(),
+        ),
+        _ => (
+            atomek_core::platform::logging::daemon_log_file(),
+            atomek_core::platform::logging::legacy_daemon_log_file(),
+        ),
+    };
+    if primary.exists() || !legacy.exists() {
+        primary
+    } else {
+        legacy
+    }
 }
 
 // ── TytusOS Wave 3b: launch in editor ────────────────────────────
@@ -8771,7 +8903,8 @@ mod tests {
         assert!(defaults.sharing_globally_enabled);
         assert!(defaults.default_auto_sync);
         assert_eq!(defaults.default_bucket, "shared");
-        assert!(defaults.default_local_root.ends_with("/Tytus/Shared"));
+        assert!(std::path::Path::new(&defaults.default_local_root)
+            .ends_with(std::path::Path::new("Tytus").join("Shared")));
     }
 
     #[test]

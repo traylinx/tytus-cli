@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.13"
+version = "0.6.14"
 edition = "2021"
 authors = ["Traylinx <hello@traylinx.com>"]
 license = "MIT"
@@ -39,6 +39,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
+getrandom = "0.3"
 dirs = "6"
 libc = "0.2"
 urlencoding = "2"

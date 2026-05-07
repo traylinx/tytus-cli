@@ -66,43 +66,18 @@ pub fn parse_pod_action(id: &str) -> Option<(String, SharedFoldersPodAction)> {
     None
 }
 
-// ── osascript helpers ────────────────────────────────────────
+// ── Native prompt helpers ───────────────────────────────────
 
-/// Prompt the user for a bucket name with an osascript dialog.
-/// Returns None on cancel or empty input. macOS-only.
-#[cfg(target_os = "macos")]
+/// Prompt the user for a bucket name. Returns None on cancel, empty input, or
+/// unsupported platforms.
 pub fn prompt_bucket_name(default: Option<&str>) -> Option<String> {
-    let default_clause = match default {
-        Some(d) => format!(" default answer \"{}\"", d.replace('"', "\\\"")),
-        None => " default answer \"\"".to_string(),
-    };
-    let script = format!(
-        "set r to display dialog \"Bucket name for the shared folder?\\n\\n\
-         Lowercase letters, digits, dot, hyphen. 3-63 chars. \
-         Created on the droplet if it doesn't exist.\" \
-         with title \"garagetytus folder bind\"{}\n\
-         text returned of r",
-        default_clause,
-    );
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn prompt_bucket_name(_default: Option<&str>) -> Option<String> {
-    None
+    atomek_core::platform::dialog::prompt_text(
+        "garagetytus folder bind",
+        "Bucket name for the shared folder?\n\nLowercase letters, digits, dot, hyphen. 3-63 chars. Created on the droplet if it doesn't exist.",
+        default,
+    )
+    .ok()
+    .flatten()
 }
 
 // ── Helper resolution ────────────────────────────────────────
@@ -334,11 +309,7 @@ pub fn open_binding_in_finder(safe_name: &str) {
         .find(|b| b.safe_name == safe_name)
     {
         if std::path::Path::new(&b.local_path).is_dir() {
-            let _ = std::process::Command::new("open")
-                .arg(&b.local_path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            let _ = atomek_core::platform::open::open_path(std::path::Path::new(&b.local_path));
         }
     }
 }
@@ -351,11 +322,7 @@ pub fn open_cache_dir() {
         .unwrap_or_else(|_| "/tmp".to_string());
     // Make sure it exists so Finder doesn't bounce
     let _ = std::fs::create_dir_all(&path);
-    let _ = std::process::Command::new("open")
-        .arg(&path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let _ = atomek_core::platform::open::open_path(std::path::Path::new(&path));
 }
 
 // ── Helpers ──────────────────────────────────────────────────

@@ -16,11 +16,17 @@ https://github.com/traylinx/homebrew-tap     ← brew install traylinx/tap/tytus
 ## One-liners users see
 
 ```bash
-# macOS / Linux
+# macOS / Linux — stable/latest production release
 curl -fsSL https://get.traylinx.com/install.sh | bash
 
-# Windows
+# macOS / Linux — explicit public beta/pre-release
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.1 sh
+
+# Windows — stable/latest production release
 powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
+
+# Windows — explicit public beta/pre-release
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.1"; irm https://get.traylinx.com/install.ps1 | iex
 
 # Homebrew
 brew install traylinx/tap/tytus
@@ -65,19 +71,43 @@ git add -A && git commit -m "release: v0.3.0"
 git tag v0.3.0
 git push origin main v0.3.0
 
-# 3. Wait for release.yml to finish (~10 min)
-#    → builds macos-{x86_64,aarch64}, linux-{x86_64,aarch64}
-#    → generates SHA256SUMS
-#    → publishes GitHub release
+# 3. Dry-run release.yml first (no public release)
+gh workflow run release.yml \
+  -f tag=v0.3.0 \
+  -f tytus_os_ref=<immutable-tytus-os-sha-or-tag> \
+  -f release_tier=internal-dry-run \
+  -f publish_release=false
 
-# 4. homebrew.yml fires automatically on release:published
+# 4. For trusted tester/private beta only, publish a prerelease
+gh workflow run release.yml \
+  -f tag=v0.3.0 \
+  -f tytus_os_ref=<immutable-tytus-os-sha-or-tag> \
+  -f release_tier=private-beta \
+  -f publish_release=true
+
+# 5. Wait for release.yml to finish (~10 min)
+#    → builds/tests one canonical TytusOS web dist, uploads app/dist + manifest,
+#      and verifies the same bytes before embedding them everywhere
+#    → builds macos-{x86_64,aarch64}, linux-x86_64, windows-x86_64
+#    → uploads unsigned DO-NOT-DISTRIBUTE native package dry-run artifacts
+#      as workflow artifacts only (.pkg/.deb are not public release assets)
+#    → generates SHA256SUMS
+#    → publishes GitHub prerelease only if publish_release=true
+
+# 6. homebrew.yml fires automatically on release:published
 #    → renders formula with real SHAs
 #    → pushes to traylinx/homebrew-tap
 #    → brew install traylinx/tap/tytus immediately gets the new version
 
-# 5. Cloudflare Pages rebuilds on main push (step 2)
+# 7. Cloudflare Pages rebuilds on main push (step 2)
 #    → new install.sh propagates in ~30 seconds
 ```
+
+Production release tier is intentionally fail-closed until signed/notarized
+package publishing is implemented and the protected `release-production`
+environment secrets in `docs/release/signing-secret-contract.md` are present.
+Internal dry-runs and private beta runs do not request production signing
+secrets or environment approval.
 
 ## One-time setup required
 
@@ -107,6 +137,15 @@ git push origin main v0.3.0
 - Users can still install (Right-click → Open → Allow), but it adds friction
 - When we have customers, add a signing step to release.yml using
   `codesign --sign "Developer ID Application: Traylinx" ...`
+
+
+## Public beta with unsigned installers
+
+Sebastian explicitly allowed unsigned native installers for public beta while Apple/Windows/Linux signing is deferred. This does **not** change the GA bar.
+
+Use `release_tier=private-beta` and `publish_release=true`. The workflow may publish macOS `.pkg` and Linux `.deb` assets only when their filenames contain `PUBLIC-BETA-UNSIGNED`; production still fails closed. Release copy must say public beta / technical preview and warn about Gatekeeper/SmartScreen trust prompts. The public download page may point at that tag with `TYTUS_RELEASE_TAG=<tag>` so installers fetch the pre-release via `releases/tags/<tag>` instead of `/releases/latest`.
+
+Never use this path for `release_tier=production`.
 
 ## Security checks before posting the one-liner publicly
 

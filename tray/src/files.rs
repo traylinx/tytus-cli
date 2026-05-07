@@ -7,10 +7,10 @@
 // needs a subclassed status button with objc2 — deferred.
 //
 // What this module ships instead:
-//   - osascript-driven file/folder picker ("Push file…")
+//   - platform file/folder picker ("Push file…")
 //   - terminal drop-in for pod listing ("List inbox")
 //   - local download dir opener ("Open download folder")
-//   - notification helper with "Reveal in Finder" action
+//   - notification helper with platform reveal action
 //
 // All ops shell out to the `tytus` CLI binary so the CLI stays
 // the single source of truth for how sharing behaves.
@@ -32,47 +32,25 @@ pub fn ensure_download_dir(pod_id: &str) -> PathBuf {
     crate::workspace::ensure_download_dir_for_pod(pod_id)
 }
 
-// ── osascript file/folder picker ─────────────────────────────
+// ── Native file/folder picker ────────────────────────────────
 
-/// Ask the user to pick a file or folder via Finder. Returns the
-/// POSIX path, or None if cancelled. macOS only — other OSes get
-/// a no-op implementation that always returns None.
-#[cfg(target_os = "macos")]
+/// Ask the user to pick a file or folder via the platform picker. Returns the
+/// POSIX path, or None if cancelled/unsupported.
 pub fn pick_path(kind: PickerKind) -> Option<String> {
-    let verb = match kind {
-        PickerKind::File => "choose file",
-        PickerKind::Folder => "choose folder",
+    let platform_kind = match kind {
+        PickerKind::File => atomek_core::platform::dialog::PickKind::File,
+        PickerKind::Folder => atomek_core::platform::dialog::PickKind::Folder,
     };
-    let script = format!(
-        "POSIX path of ({} with prompt \"Pick a {} to push to your pod\")",
-        verb,
-        match kind {
-            PickerKind::File => "file",
-            PickerKind::Folder => "folder",
-        },
-    );
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        // User cancelled → osascript exits non-zero. Treat as None.
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn pick_path(_kind: PickerKind) -> Option<String> {
-    // Non-macOS tray path: the tray crate is macOS-only today, but
-    // keeping this compile-safe for future Linux builds.
-    None
+    let label = match kind {
+        PickerKind::File => "file",
+        PickerKind::Folder => "folder",
+    };
+    atomek_core::platform::dialog::pick_path(
+        platform_kind,
+        &format!("Pick a {} to push to your pod", label),
+    )
+    .ok()
+    .flatten()
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -81,35 +59,18 @@ pub enum PickerKind {
     Folder,
 }
 
-// ── Notification with Reveal in Finder ───────────────────────
+// ── Notification with platform reveal ───────────────────────
 
-/// Notify the user of a completed transfer. Adds a "Reveal in
-/// Finder" action when a local path is given. macOS-native via
-/// osascript — no UserNotifications API dependency.
+/// Notify the user of a completed transfer and reveal the local path in the
+/// platform file manager when one is given.
 #[cfg(target_os = "macos")]
 pub fn notify_transfer(title: &str, body: &str, reveal: Option<&std::path::Path>) {
-    let escaped_body = body.replace('"', "\\\"");
-    let escaped_title = title.replace('"', "\\\"");
-    let script = format!(
-        "display notification \"{}\" with title \"{}\"",
-        escaped_body, escaped_title,
-    );
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let _ = atomek_core::platform::dialog::notify(title, body);
     if let Some(path) = reveal {
-        // Brief pause so the notification banner appears before
-        // Finder steals focus. Purely cosmetic.
+        // Brief pause so the notification banner appears before the file
+        // manager steals focus. Purely cosmetic.
         std::thread::sleep(std::time::Duration::from_millis(400));
-        let _ = std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let _ = atomek_core::platform::open::reveal_path(path);
     }
 }
 
@@ -216,11 +177,11 @@ pub fn spawn_pull(pod_id: &str, remote_path: &str) {
 
 pub fn open_download_dir(pod_id: &str) {
     let path = ensure_download_dir(pod_id);
-    let _ = std::process::Command::new("open")
-        .arg(&path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    open_path(&path);
+}
+
+fn open_path(path: &std::path::Path) {
+    let _ = atomek_core::platform::open::open_path(path);
 }
 
 // ── Menu-id helpers (keep ids in one place) ────────────────

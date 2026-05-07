@@ -1,22 +1,217 @@
 name: Release
 
-# Early-access policy: releases are manual-only while the CLI is under
-# active development. Users install from source via `cargo install --git`
-# through install.sh — every fix lands for them instantly without a tag.
-# Flip this back to `push: tags: ['v*']` when the CLI is stable.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build (e.g. v0.4.0). Must already exist.'
+        description: 'Release tag to build (e.g. v0.7.0-rc1). Must already exist.'
         required: true
         type: string
+      tytus_os_ref:
+        description: 'Immutable tytus-os tag or commit SHA to build and embed'
+        required: true
+        type: string
+      release_tier:
+        description: 'Release trust tier. Production is fail-closed until signed/notarized package publishing is wired.'
+        required: true
+        default: 'internal-dry-run'
+        type: choice
+        options:
+          - internal-dry-run
+          - private-beta
+          - production
+      publish_release:
+        description: 'Actually create/update a public GitHub Release. Leave false for internal dry-runs.'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
+env:
+  TYTUS_OS_REF: ${{ inputs.tytus_os_ref }}
+
 jobs:
+  check-nonproduction-release-policy:
+    name: Check non-production release policy
+    if: ${{ inputs.release_tier != 'production' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate non-production publish policy
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.publish_release }}" = "true" ] && [ "${{ inputs.release_tier }}" = "internal-dry-run" ]; then
+            echo "Refusing to publish an internal dry-run as a public GitHub Release." >&2
+            exit 1
+          fi
+          echo "Non-production release policy passed for release_tier=${{ inputs.release_tier }} publish_release=${{ inputs.publish_release }}."
+
+  check-production-signing-secrets:
+    name: Check production signing secrets
+    if: ${{ inputs.release_tier == 'production' }}
+    environment: release-production
+    runs-on: ubuntu-latest
+    outputs:
+      macos_signing_available: ${{ steps.detect.outputs.macos_signing_available }}
+      windows_signing_available: ${{ steps.detect.outputs.windows_signing_available }}
+      linux_signing_available: ${{ steps.detect.outputs.linux_signing_available }}
+      update_signing_available: ${{ steps.detect.outputs.update_signing_available }}
+    steps:
+      - name: Detect production signing secrets without printing values
+        id: detect
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION_CERT_P12: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_P12 }}
+          APPLE_DEVELOPER_ID_INSTALLER_CERT_P12: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          APPLE_NOTARY_APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
+          WINDOWS_CODESIGN_CERT_PFX: ${{ secrets.WINDOWS_CODESIGN_CERT_PFX }}
+          WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+          LINUX_GPG_KEY_ID: ${{ secrets.LINUX_GPG_KEY_ID }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+          UPDATE_MANIFEST_ED25519_PRIVATE_KEY: ${{ secrets.UPDATE_MANIFEST_ED25519_PRIVATE_KEY }}
+          UPDATE_MANIFEST_KEY_ID: ${{ secrets.UPDATE_MANIFEST_KEY_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          present() { [ -n "${1:-}" ]; }
+          require() {
+            local name="$1"
+            local value="${2:-}"
+            if ! present "$value"; then
+              missing+=("$name")
+            fi
+          }
+
+          require APPLE_DEVELOPER_ID_APPLICATION_CERT_P12 "$APPLE_DEVELOPER_ID_APPLICATION_CERT_P12"
+          require APPLE_DEVELOPER_ID_INSTALLER_CERT_P12 "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12"
+          require APPLE_CERT_PASSWORD "$APPLE_CERT_PASSWORD"
+          require APPLE_NOTARY_APPLE_ID "$APPLE_NOTARY_APPLE_ID"
+          require APPLE_NOTARY_TEAM_ID "$APPLE_NOTARY_TEAM_ID"
+          require APPLE_NOTARY_APP_PASSWORD "$APPLE_NOTARY_APP_PASSWORD"
+          require WINDOWS_CODESIGN_CERT_PFX "$WINDOWS_CODESIGN_CERT_PFX"
+          require WINDOWS_CODESIGN_PASSWORD "$WINDOWS_CODESIGN_PASSWORD"
+          require LINUX_GPG_PRIVATE_KEY "$LINUX_GPG_PRIVATE_KEY"
+          require LINUX_GPG_KEY_ID "$LINUX_GPG_KEY_ID"
+          require LINUX_GPG_PASSPHRASE "$LINUX_GPG_PASSPHRASE"
+          require UPDATE_MANIFEST_ED25519_PRIVATE_KEY "$UPDATE_MANIFEST_ED25519_PRIVATE_KEY"
+          require UPDATE_MANIFEST_KEY_ID "$UPDATE_MANIFEST_KEY_ID"
+
+          if present "$APPLE_DEVELOPER_ID_APPLICATION_CERT_P12" \
+            && present "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12" \
+            && present "$APPLE_CERT_PASSWORD" \
+            && present "$APPLE_NOTARY_APPLE_ID" \
+            && present "$APPLE_NOTARY_TEAM_ID" \
+            && present "$APPLE_NOTARY_APP_PASSWORD"; then
+            echo "macos_signing_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "macos_signing_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if present "$WINDOWS_CODESIGN_CERT_PFX" \
+            && present "$WINDOWS_CODESIGN_PASSWORD"; then
+            echo "windows_signing_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "windows_signing_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if present "$LINUX_GPG_PRIVATE_KEY" \
+            && present "$LINUX_GPG_KEY_ID" \
+            && present "$LINUX_GPG_PASSPHRASE"; then
+            echo "linux_signing_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "linux_signing_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if present "$UPDATE_MANIFEST_ED25519_PRIVATE_KEY" \
+            && present "$UPDATE_MANIFEST_KEY_ID"; then
+            echo "update_signing_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "update_signing_available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Production release blocked: missing required signing secrets:' >&2
+            printf ' %s' "${missing[@]}" >&2
+            printf '\n' >&2
+            exit 1
+          fi
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## Production signing secret contract check
+
+          `release-production` environment approval passed. All required
+          signing/update secrets are present. This job reports booleans only and
+          never prints secret values. Exact secret names live in
+          `docs/release/signing-secret-contract.md`.
+          SUMMARY
+
+
+  build-tytusos-dist:
+    name: Build canonical TytusOS dist
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Validate immutable tytus-os ref
+        shell: bash
+        run: |
+          if [[ -z "${TYTUS_OS_REF}" ]]; then
+            echo "tytus_os_ref is required for deterministic releases" >&2
+            exit 1
+          fi
+          if [[ "${TYTUS_OS_REF}" == "main" || "${TYTUS_OS_REF}" == feature/* ]]; then
+            echo "release tytus_os_ref must be an immutable tag or commit SHA, not moving branch: ${TYTUS_OS_REF}" >&2
+            exit 1
+          fi
+
+      - name: Checkout tytus-os
+        uses: actions/checkout@v5
+        with:
+          repository: traylinx/tytus-os
+          ref: ${{ env.TYTUS_OS_REF }}
+          path: tytus-os
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tytus-os/package-lock.json
+
+      - name: Build and test canonical TytusOS dist
+        working-directory: tytus-os
+        run: |
+          npm ci
+          npm run build:packages
+          npm run typecheck
+          npm run build
+          npm run test
+          if find app/dist -type l -print -quit | grep -q .; then
+            echo "canonical tytus-os dist must not contain symlinks" >&2
+            find app/dist -type l -print >&2
+            exit 1
+          fi
+          (find app/dist -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > dist-manifest.txt
+          sha256sum dist-manifest.txt | awk '{print $1}' > tytus-os-dist.sha256
+          printf 'canonical tytus-os dist manifest: '
+          cat tytus-os-dist.sha256
+
+      - name: Upload canonical TytusOS dist
+        uses: actions/upload-artifact@v6
+        with:
+          name: tytusos-dist
+          path: |
+            tytus-os/app/dist
+            tytus-os/dist-manifest.txt
+            tytus-os/tytus-os-dist.sha256
+          if-no-files-found: error
+          retention-days: 7
+
   build:
+    name: Build ${{ matrix.name }}
+    needs: build-tytusos-dist
     strategy:
       fail-fast: false
       matrix:
@@ -30,101 +225,278 @@ jobs:
             name: tytus-macos-aarch64
             archive: tar.gz
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             name: tytus-linux-x86_64
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            os: windows-2025-vs2026
             name: tytus-windows-x86_64
             archive: zip
-          # aarch64-linux via cross needs libdbus-1-dev inside the container
-          # which requires a Cross.toml pre-install step. Deferred until v0.3.1
-          # to avoid blocking the initial launch — install.sh falls back to
-          # cargo install --git on unsupported architectures.
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+
+      - name: Validate immutable tytus-os ref
+        shell: bash
+        run: |
+          if [[ -z "${TYTUS_OS_REF}" ]]; then
+            echo "tytus_os_ref is required for deterministic releases" >&2
+            exit 1
+          fi
+          if [[ "${TYTUS_OS_REF}" == "main" || "${TYTUS_OS_REF}" == feature/* ]]; then
+            echo "release tytus_os_ref must be an immutable tag or commit SHA, not moving branch: ${TYTUS_OS_REF}" >&2
+            exit 1
+          fi
+
+      - name: Checkout tytus-cli
+        uses: actions/checkout@v5
         with:
           ref: ${{ inputs.tag }}
+          path: tytus-cli
 
-      # The Linux keyring backend (keyring crate with
-      # linux-native-sync-persistent + sync-secret-service) links libdbus-1
-      # via libdbus-sys's build.rs. The dev header package is not in the
-      # default ubuntu-latest image, so add it.
-      - name: Install libdbus-1-dev (Linux only)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install Linux native deps
+        if: runner.os == 'Linux'
+        working-directory: tytus-cli
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          sudo apt-get install -y \
+            pkg-config \
+            libdbus-1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            librsvg2-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Check vendored TytusOS bundle
-        run: scripts/check-tytus-os-dist.sh
+      - name: Download canonical TytusOS dist
+        uses: actions/download-artifact@v7
+        with:
+          name: tytusos-dist
+          path: tytus-os
+
+      - name: Verify canonical TytusOS dist
+        shell: bash
+        working-directory: tytus-os
+        run: |
+          sha256sum -c dist-manifest.txt --quiet
+          expected="$(cat tytus-os-dist.sha256)"
+          actual="$(sha256sum dist-manifest.txt | awk '{print $1}')"
+          if [ "$expected" != "$actual" ]; then
+            echo "canonical TytusOS dist manifest fingerprint mismatch" >&2
+            echo "expected: $expected" >&2
+            echo "actual:   $actual" >&2
+            exit 1
+          fi
+          echo "canonical TytusOS dist verified: $actual"
+
+      - name: Embed TytusOS dist
+        working-directory: tytus-cli
+        env:
+          TYTUS_OS_SOURCE: ${{ github.workspace }}/tytus-os
+        run: scripts/sync-tytus-os-dist.sh --sync
         shell: bash
 
-      - name: Build CLI
+      - name: Build Rust binaries
+        working-directory: tytus-cli
         run: |
           cargo build --release -p atomek-cli --target ${{ matrix.target }}
           cargo build --release -p tytus-mcp --target ${{ matrix.target }}
-          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            cargo build --release -p tytus-tray --target ${{ matrix.target }}
-          fi
+          cargo build --release -p tytus-tray --target ${{ matrix.target }}
+        shell: bash
+
+      - name: Build unsigned macOS pkg dry-run
+        if: runner.os == 'macOS'
+        working-directory: tytus-cli
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          pkg/build-pkg.sh
+          ls -la target/Tytus-*-unsigned.pkg
+        shell: bash
+
+      - name: Build unsigned Linux deb dry-run
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        working-directory: tytus-cli
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          pkg/build-deb.sh
+          dpkg-deb --info target/Tytus-*-unsigned.deb
+          dpkg-deb --contents target/Tytus-*-unsigned.deb | sed -n '1,80p'
         shell: bash
 
       - name: Package
+        working-directory: tytus-cli
         run: |
           cd target/${{ matrix.target }}/release
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
-            powershell -NoProfile -Command "Compress-Archive -Force -Path tytus.exe,tytus-mcp.exe -DestinationPath ../../../${{ matrix.name }}.zip"
+            powershell -NoProfile -Command "Compress-Archive -Force -Path tytus.exe,tytus-mcp.exe,tytus-tray.exe -DestinationPath ../../../${{ matrix.name }}.zip"
           else
-            files="tytus tytus-mcp"
-            if [[ -f tytus-tray ]]; then
-              files="${files} tytus-tray"
-            fi
-            tar czf ../../../${{ matrix.name }}.tar.gz ${files}
+            tar czf ../../../${{ matrix.name }}.tar.gz tytus tytus-mcp tytus-tray
           fi
           cd ../../..
         shell: bash
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.name }}
-          path: ${{ matrix.name }}.${{ matrix.archive }}
+          path: tytus-cli/${{ matrix.name }}.${{ matrix.archive }}
+
+      - name: Upload unsigned macOS pkg dry-run artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.name }}-unsigned-DO-NOT-DISTRIBUTE-pkg
+          path: tytus-cli/target/Tytus-*-unsigned.pkg
+          retention-days: 7
+
+      - name: Upload unsigned Linux deb dry-run artifact
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.name }}-unsigned-DO-NOT-DISTRIBUTE-deb
+          path: tytus-cli/target/Tytus-*-unsigned.deb
+          retention-days: 7
 
   release:
-    needs: build
+    needs:
+      - check-nonproduction-release-policy
+      - check-production-signing-secrets
+      - build
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (
+        (inputs.release_tier == 'production' && needs['check-production-signing-secrets'].result == 'success') ||
+        (inputs.release_tier != 'production' && needs['check-nonproduction-release-policy'].result == 'success')
+      )
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
 
       - name: Flatten artifacts
         run: |
+          set -euo pipefail
           mkdir -p dist
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} dist/ \;
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} dist/ \;
+
+          if [ "${{ inputs.release_tier }}" = "private-beta" ]; then
+            while IFS= read -r -d '' f; do
+              base="$(basename "$f" .pkg)"
+              cp "$f" "dist/${base}-PUBLIC-BETA-UNSIGNED.pkg"
+            done < <(find artifacts -type f -name '*.pkg' -print0)
+            while IFS= read -r -d '' f; do
+              base="$(basename "$f" .deb)"
+              cp "$f" "dist/${base}-PUBLIC-BETA-UNSIGNED.deb"
+            done < <(find artifacts -type f -name '*.deb' -print0)
+          fi
+
           ls -la dist/
+
+      - name: Assert native package public-release policy
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.release_tier }}" = "private-beta" ]; then
+            if find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' \) | grep -q .; then
+              bad="$(find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' \) ! -name '*PUBLIC-BETA-UNSIGNED*' -print)"
+              if [ -n "$bad" ]; then
+                echo "Private beta native packages must be explicitly named PUBLIC-BETA-UNSIGNED:" >&2
+                echo "$bad" >&2
+                exit 1
+              fi
+              echo "Private beta release includes explicitly labeled unsigned native packages."
+            fi
+          else
+            if find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' -o -name '*unsigned*' -o -name '*UNSIGNED*' \) | grep -q .; then
+              echo "unsigned/internal native package artifact reached non-beta public release payload" >&2
+              find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' -o -name '*unsigned*' -o -name '*UNSIGNED*' \) -print >&2
+              exit 1
+            fi
+            echo "Public release payload excludes unsigned native package artifacts."
+          fi
 
       - name: Generate SHA256SUMS
         run: |
           cd dist
-          sha256sum *.tar.gz *.zip 2>/dev/null > SHA256SUMS || sha256sum *.tar.gz > SHA256SUMS
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS
           echo "── SHA256SUMS ──"
           cat SHA256SUMS
 
+      - name: Signing readiness summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
+          ## Release signing readiness
+
+          - release_tier: `${{ inputs.release_tier }}`
+          - publish_release: `${{ inputs.publish_release }}`
+          - macOS signing available: `${{ needs['check-production-signing-secrets'].outputs.macos_signing_available || 'not checked for non-production' }}`
+          - Windows signing available: `${{ needs['check-production-signing-secrets'].outputs.windows_signing_available || 'not checked for non-production' }}`
+          - Linux signing available: `${{ needs['check-production-signing-secrets'].outputs.linux_signing_available || 'not checked for non-production' }}`
+          - Update manifest signing available: `${{ needs['check-production-signing-secrets'].outputs.update_signing_available || 'not checked for non-production' }}`
+
+          Production publishing is fail-closed until signed/notarized package
+          publishing is implemented and verified.
+          SUMMARY
+
+      - name: Enforce release tier policy
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.publish_release }}" = "true" ] && [ "${{ inputs.release_tier }}" = "internal-dry-run" ]; then
+            echo "Refusing to publish an internal dry-run as a public GitHub Release." >&2
+            exit 1
+          fi
+
+          if [ "${{ inputs.release_tier }}" = "production" ]; then
+            if [ "${{ needs['check-production-signing-secrets'].outputs.macos_signing_available }}" != "true" ] \
+              || [ "${{ needs['check-production-signing-secrets'].outputs.windows_signing_available }}" != "true" ] \
+              || [ "${{ needs['check-production-signing-secrets'].outputs.linux_signing_available }}" != "true" ] \
+              || [ "${{ needs['check-production-signing-secrets'].outputs.update_signing_available }}" != "true" ]; then
+              echo "Production release blocked: all platform/update signing secrets must be available." >&2
+              exit 1
+            fi
+            echo "Production release blocked: signed/notarized package publishing steps are not implemented yet." >&2
+            echo "This fail-closed guard prevents unsigned artifacts from being labeled production." >&2
+            exit 1
+          fi
+
+          echo "Release tier policy passed for non-production workflow run."
+
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        if: ${{ inputs.publish_release }}
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag }}
+          prerelease: ${{ inputs.release_tier != 'production' }}
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.pkg
+            dist/*.deb
             dist/SHA256SUMS
+          body: |
+            # Tytus public beta — unsigned installer preview
+
+            This is a public beta / technical preview, not production GA.
+
+            The macOS `.pkg` and Linux `.deb` assets are deliberately named `PUBLIC-BETA-UNSIGNED`.
+            They are provided so early testers can try the one-action install flow before paid signing/cert infrastructure is wired.
+
+            Expect OS trust warnings, especially on macOS Gatekeeper and Windows SmartScreen. If you need the safest path, use the tar/zip artifacts or wait for the signed GA release.
+
+            Windows is included as a zip technical preview only. The signed MSI + Wintun/WireGuard service path is not GA yet.
+
+            Do not describe this release as "installs on every user's computer" or "production-ready".
           generate_release_notes: true
           fail_on_unmatched_files: false
+
+      - name: Skip public release
+        if: ${{ !inputs.publish_release }}
+        run: |
+          echo "publish_release=false — artifacts and SHA256SUMS were validated but no public GitHub Release was created."

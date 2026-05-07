@@ -7,10 +7,11 @@
 //! - Sign in / Settings / Doctor / About
 //! - Daemon controls
 //!
-//! Single-instance: enforced via a pidfile at /tmp/tytus/tray.pid. Launching
+//! Single-instance: enforced via the platform runtime pidfile. Launching
 //! a second tray pops focus on the existing one and exits.
 //!
-//! Talks to tytus-daemon via Unix socket at /tmp/tytus/daemon.sock.
+//! Talks to tytus-daemon via localhost control plane, with legacy Unix socket
+//! fallback during migration.
 
 use std::sync::{Arc, Mutex};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -1951,9 +1952,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             notify("Tytus", "Config JSON copied to clipboard.");
         }
         "open_mcp_guide" => {
-            let _ = std::process::Command::new("open")
-                .arg("https://github.com/traylinx/tytus-cli#connect-from-claude-cursor-opencode")
-                .status();
+            let _ = atomek_core::platform::open::open_url(
+                "https://github.com/traylinx/tytus-cli#connect-from-claude-cursor-opencode",
+            );
         }
         "test" => {
             // TytusOS streams `tytus test` in-page via /api/test. Deep-link
@@ -1961,10 +1962,16 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             web_server::open_os_at("#/run/test");
         }
         "view_daemon_log" => {
-            open_log_file("/tmp/tytus/daemon.log");
+            open_log_file(&log_file_with_legacy(
+                atomek_core::platform::logging::daemon_log_file(),
+                atomek_core::platform::logging::legacy_daemon_log_file(),
+            ));
         }
         "view_startup_log" => {
-            open_log_file("/tmp/tytus/autostart.log");
+            open_log_file(&log_file_with_legacy(
+                atomek_core::platform::logging::autostart_log_file(),
+                atomek_core::platform::logging::legacy_autostart_log_file(),
+            ));
         }
         "doctor" => {
             // TytusOS streams `tytus doctor` in-page via /api/doctor.
@@ -1980,7 +1987,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             });
         }
         "docs" => {
-            let _ = std::process::Command::new("open").arg(DOCS_URL).status();
+            let _ = atomek_core::platform::open::open_url(DOCS_URL);
         }
         "about" => {
             let version = env!("CARGO_PKG_VERSION");
@@ -1988,18 +1995,9 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 "Tytus Tray v{}\\n\\nPrivate AI pod for your terminal.\\nTraylinx / Makakoo.",
                 version
             );
-            // macOS: display via osascript; everywhere else: println.
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("osascript")
-                    .arg("-e")
-                    .arg(format!(
-                        "display dialog \"{}\" with title \"About Tytus\" buttons {{\"OK\"}} default button 1 with icon note",
-                        msg
-                    ))
-                    .status();
-            }
-            #[cfg(not(target_os = "macos"))]
+            if atomek_core::platform::dialog::show_info("About Tytus", &msg)
+                .map(|a| a == atomek_core::platform::dialog::DialogAnswer::Unsupported)
+                .unwrap_or(true)
             {
                 println!("{}", msg);
             }
@@ -2050,7 +2048,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 Some(url) => {
                     // Direct browser open — no forwarder spawn, no tunnel
                     // reachability check needed.
-                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                    let _ = atomek_core::platform::open::open_url(&url);
                     notify("Tytus", &format!("Opening pod {} via public edge", pod_id));
                 }
                 None => open_pod_via_forwarder(&pod_id),
@@ -2315,9 +2313,7 @@ fn short_basename(path: &str) -> String {
 /// poll the marker for ~3s before launching the browser.
 fn open_pod_via_forwarder(pod_id: &str) {
     if let Some(existing_url) = existing_ui_forwarder(pod_id) {
-        let _ = std::process::Command::new("open")
-            .arg(&existing_url)
-            .spawn();
+        let _ = atomek_core::platform::open::open_url(&existing_url);
         return;
     }
     spawn_detached_ui(pod_id);
@@ -2326,17 +2322,17 @@ fn open_pod_via_forwarder(pod_id: &str) {
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(100));
             if let Some(url) = existing_ui_forwarder(&pod_for_poll) {
-                let _ = std::process::Command::new("open").arg(&url).spawn();
+                let _ = atomek_core::platform::open::open_url(&url);
                 return;
             }
         }
-        let _ = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(format!(
-                "display notification \"Forwarder for pod {} didn't come up in 3s — opening Terminal for diagnostics.\" with title \"Tytus\"",
+        let _ = atomek_core::platform::dialog::notify(
+            "Tytus",
+            &format!(
+                "Forwarder for pod {} didn't come up in 3s — opening Terminal for diagnostics.",
                 pod_for_poll
-            ))
-            .spawn();
+            ),
+        );
     });
 }
 
@@ -2351,6 +2347,7 @@ fn open_pod_via_forwarder(pod_id: &str) {
 /// We trust the marker only when the pid is alive AND the port still
 /// accepts a TCP connect. Anything else = stale → return None and let
 /// the caller spawn a fresh forwarder.
+#[cfg(unix)]
 pub(crate) fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
     let path = format!("/tmp/tytus/ui-{}.port", pod_id);
     let raw = std::fs::read_to_string(&path).ok()?;
@@ -2373,6 +2370,11 @@ pub(crate) fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
     }
 }
 
+#[cfg(not(unix))]
+pub(crate) fn existing_ui_forwarder(_pod_id: &str) -> Option<String> {
+    None
+}
+
 /// True if a WireGuard tunnel is currently up for this pod. We check
 /// `/tmp/tytus/tunnel-<pod>.pid` — written by cmd_tunnel_up under the
 /// elevated helper — AND verify the pid is actually alive. The pidfile
@@ -2386,6 +2388,7 @@ pub(crate) fn existing_ui_forwarder(pod_id: &str) -> Option<String> {
 /// 2026-04-19 smoke test: tray always labelled pod rows "Connect & Open
 /// in Browser" because this function returned false even with utun4
 /// actively routing packets.
+#[cfg(unix)]
 fn tunnel_reaches_pod(pod_id: &str) -> bool {
     let path = format!("/tmp/tytus/tunnel-{}.pid", pod_id);
     let raw = match std::fs::read_to_string(&path) {
@@ -2406,8 +2409,12 @@ fn tunnel_reaches_pod(pod_id: &str) -> bool {
     }
     // libc::kill failed. Alive-but-EPERM means the daemon is running
     // under a different uid (root), which is the normal happy path.
-    let errno = unsafe { *libc::__error() };
-    errno == libc::EPERM
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn tunnel_reaches_pod(_pod_id: &str) -> bool {
+    false
 }
 
 /// Start `tytus ui --pod <pod_id> --no-open` as a fully detached
@@ -2575,51 +2582,25 @@ fn run_silent_with_notify<F>(
     });
 }
 
-/// Native yes/no dialog via osascript. Returns true iff the user clicked OK.
+/// Native yes/no dialog. Returns true iff the user clicked OK.
 /// Used to gate destructive actions (Sign Out, future pod revocation).
-#[cfg(target_os = "macos")]
 fn confirm_dialog(title: &str, body: &str) -> bool {
-    let script = format!(
-        "display dialog \"{}\" with title \"{}\" buttons {{\"Cancel\", \"OK\"}} default button \"Cancel\" cancel button \"Cancel\" with icon caution",
-        body.replace('"', "\\\"").replace('\n', " "),
-        title.replace('"', "\\\""),
-    );
-    std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn confirm_dialog(_title: &str, _body: &str) -> bool {
-    // On Linux we can't guarantee a GUI confirm dialog is available (no
-    // osascript equivalent everywhere). Skip confirmation — the terminal
-    // window that actually runs the destructive command will prompt.
-    true
+    match atomek_core::platform::dialog::ask_permission(title, body) {
+        Ok(atomek_core::platform::dialog::DialogAnswer::Accepted) => true,
+        Ok(atomek_core::platform::dialog::DialogAnswer::Unsupported) => {
+            // On Linux we can't guarantee a GUI confirm dialog is available.
+            // Skip confirmation — the terminal window that actually runs the
+            // destructive command will prompt.
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Show a notification in the menu bar / notification center.
-#[cfg(target_os = "macos")]
 fn notify(title: &str, body: &str) {
-    let script = format!(
-        "display notification \"{}\" with title \"{}\"",
-        body.replace('"', "\\\""),
-        title.replace('"', "\\\""),
-    );
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let _ = atomek_core::platform::dialog::notify(title, body);
 }
-
-#[cfg(not(target_os = "macos"))]
-fn notify(_title: &str, _body: &str) {}
 
 /// User-facing recovery dialog when Connect fails to bring the gateway
 /// up within the 60s verification window. Three buttons:
@@ -2636,48 +2617,41 @@ fn notify(_title: &str, _body: &str) {}
 #[cfg(target_os = "macos")]
 fn show_connect_failure_help() {
     let body = "I can't tell if your tunnel came up within 60 seconds. This usually means one of:\n\n• Your network just changed (WiFi switch, VPN toggle)\n• The droplet is momentarily unreachable\n• A stale tunnel process is blocking a clean retry\n\nTry Again will disconnect cleanly and reconnect. Copy Diag puts a short diagnostic on your clipboard you can share.";
-    let script = format!(
-        "display dialog \"{}\" with title \"Tytus — connection trouble\" \
-         buttons {{\"Copy Diag\", \"Cancel\", \"Try Again\"}} \
-         default button \"Try Again\" cancel button \"Cancel\" with icon caution",
-        body.replace('"', "\\\"").replace('\n', "\\n"),
-    );
-    let out = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output();
-    let stdout = match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-        Err(_) => return,
-    };
-    if stdout.contains("Try Again") {
-        // Disconnect first (reaps the stale tunnel), then reconnect.
-        // Run in a Terminal so sudo can prompt for the reconnect pass.
-        busy_set("Retrying connection…");
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            busy_clear();
-        });
-        open_in_terminal_simple(
-            "tytus disconnect 2>/dev/null; tytus connect && exit; echo; echo 'Retry failed — see above.'; echo 'Press Enter to close…'; read _"
-        );
-    } else if stdout.contains("Copy Diag") {
-        let diag = build_diag_summary();
-        // Write to pbcopy via stdin pipe.
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(stdin) = child.stdin.as_mut() {
-                use std::io::Write;
-                let _ = stdin.write_all(diag.as_bytes());
-            }
-            let _ = child.wait();
+    let choice = atomek_core::platform::dialog::choose_button(
+        "Tytus — connection trouble",
+        body,
+        &["Copy Diag", "Cancel", "Try Again"],
+        "Try Again",
+        Some("Cancel"),
+        "caution",
+    )
+    .ok()
+    .flatten();
+    match choice.as_deref() {
+        Some("Try Again") => {
+            // Disconnect first (reaps the stale tunnel), then reconnect.
+            // Run in a Terminal so sudo can prompt for the reconnect pass.
+            busy_set("Retrying connection…");
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                busy_clear();
+            });
+            open_in_terminal_simple(
+                "tytus disconnect 2>/dev/null; tytus connect && exit; echo; echo 'Retry failed — see above.'; echo 'Press Enter to close…'; read _"
+            );
         }
-        notify(
-            "Tytus",
-            "Diagnostic copied to clipboard — paste it when asking for help.",
-        );
+        Some("Copy Diag") => {
+            let diag = build_diag_summary();
+            if copy_to_clipboard(&diag) {
+                notify(
+                    "Tytus",
+                    "Diagnostic copied to clipboard — paste it when asking for help.",
+                );
+            } else {
+                notify("Tytus", "Couldn't copy diagnostic to clipboard.");
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2817,40 +2791,8 @@ fn connection_pair(state: &Arc<Mutex<TrayState>>) -> (String, Option<String>) {
 /// Put arbitrary text on the system clipboard. Factored out so individual
 /// menu items can copy URL / key / JSON independently rather than always
 /// dumping the full export block.
-fn copy_to_clipboard(text: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        use std::io::Write;
-        for (bin, args) in [
-            ("xclip", &["-selection", "clipboard"][..]),
-            ("xsel", &["--clipboard", "--input"][..]),
-        ] {
-            if let Ok(mut child) = std::process::Command::new(bin)
-                .args(args)
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                let _ = child.wait();
-                return;
-            }
-        }
-    }
+fn copy_to_clipboard(text: &str) -> bool {
+    atomek_core::platform::clipboard::write_text(text).is_ok()
 }
 
 /// Put the stable OpenAI-compatible env-var block on the clipboard.
@@ -2895,119 +2837,43 @@ fn copy_connection_info(state: &Arc<Mutex<TrayState>>) {
         key = key,
     );
 
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-            notify("Tytus", "Connection info copied to clipboard.");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        // Best-effort: try xclip, then xsel.
-        use std::io::Write;
-        for (bin, args) in [
-            ("xclip", &["-selection", "clipboard"][..]),
-            ("xsel", &["--clipboard", "--input"][..]),
-        ] {
-            if let Ok(mut child) = std::process::Command::new(bin)
-                .args(args)
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                let _ = child.wait();
-                return;
-            }
-        }
+    if copy_to_clipboard(&text) {
+        notify("Tytus", "Connection info copied to clipboard.");
+    } else {
         // Fallback: dump to a temp file so the user can read it.
+        let _ = std::fs::create_dir_all("/tmp/tytus");
         let _ = std::fs::write("/tmp/tytus/connection-info.sh", &text);
+        notify(
+            "Tytus",
+            "Clipboard unavailable — wrote /tmp/tytus/connection-info.sh",
+        );
     }
 }
 
 /// Open a log file in the system's default viewer. On macOS that's the
 /// Console app for .log files, which gives live tail + search for free.
-fn open_log_file(path: &str) {
-    if !std::path::Path::new(path).exists() {
-        notify("Tytus", &format!("Log not found yet: {}", path));
+fn open_log_file(path: &std::path::Path) {
+    if !path.exists() {
+        notify("Tytus", &format!("Log not found yet: {}", path.display()));
         return;
     }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(path).spawn();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    let _ = atomek_core::platform::open::open_path(path);
+}
+
+fn log_file_with_legacy(
+    primary: std::path::PathBuf,
+    legacy: std::path::PathBuf,
+) -> std::path::PathBuf {
+    if primary.exists() || !legacy.exists() {
+        primary
+    } else {
+        legacy
     }
 }
 
 /// Open a shell command in a new terminal window.
-///
-/// Uses a `.command` file opened via `open(1)` on macOS — macOS launches
-/// Terminal.app for `.command` files through LaunchServices, which does NOT
-/// require Automation permission (unlike `osascript tell "Terminal" to do
-/// script ...`, which silently fails if the user hasn't granted it).
-///
-/// This is why clicking Doctor did nothing before: tytus-tray had no
-/// Automation entitlement for Terminal.app, so the AppleScript was rejected
-/// with no visible prompt.
-#[cfg(target_os = "macos")]
 pub(crate) fn open_in_terminal_simple(cmd: &str) {
-    let _ = std::fs::create_dir_all("/tmp/tytus");
-    // Unique path per invocation so rapid clicks don't race on the same file.
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let script_path = format!("/tmp/tytus/launch-{}.command", nonce);
-
-    // Why the PATH prepend: `tytus` lives in ~/bin and the user's login shell
-    // only picks it up from .zshrc. A freshly-spawned Terminal window runs a
-    // login shell that sources .zshrc, so usually PATH is correct — but we
-    // prepend defensively so the menu works even on minimal shell configs.
-    // The .command file also self-deletes at the end so /tmp doesn't fill up.
-    let script = format!(
-        "#!/bin/bash\n\
-         export PATH=\"$HOME/bin:/usr/local/bin:/opt/homebrew/bin:$PATH\"\n\
-         cd \"$HOME\"\n\
-         {cmd}\n\
-         rm -f \"{path}\"\n",
-        cmd = cmd,
-        path = script_path,
-    );
-
-    if std::fs::write(&script_path, &script).is_err() {
-        return;
-    }
-
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
-
-    let _ = std::process::Command::new("open").arg(&script_path).spawn();
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn open_in_terminal_simple(cmd: &str) {
-    // Best-effort: try common Linux terminals.
-    for term in &["gnome-terminal", "konsole", "xterm"] {
-        if std::process::Command::new(term)
-            .args(["--", "sh", "-c", cmd])
-            .spawn()
-            .is_ok()
-        {
-            return;
-        }
-    }
+    let _ = atomek_core::platform::terminal::open_shell_command(cmd);
 }
 
 /// Get the current pod connection info from the daemon.

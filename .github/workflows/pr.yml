@@ -1,0 +1,221 @@
+name: PR truth
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  workflow_dispatch:
+    inputs:
+      tytus_os_ref:
+        description: 'tytus-os ref to build for dist embedding checks'
+        required: false
+        default: '265c2fb85343b9a96171e044d3d6a7117a77f7cd'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || '265c2fb85343b9a96171e044d3d6a7117a77f7cd' }}
+
+jobs:
+  installer-contract:
+    name: Installer contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Shell installer contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n install.sh
+          sh -n web/install.sh
+          test "$(readlink web/install.sh)" = "../install.sh"
+          test "$(readlink web/install.ps1)" = "../install.ps1"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for path in ["install.sh", "web/install.sh", "install.ps1", "web/install.ps1"]:
+              text = Path(path).read_text()
+              assert "TYTUS_USE_RELEASE" not in text, path
+              for needle in [
+                  "Production install policy",
+                  "TYTUS_INSTALL_MODE",
+                  "TYTUS_DEV_SOURCE_INSTALL",
+                  "TYTUS_RELEASE_TAG",
+                  "dev-source",
+              ]:
+                  assert needle in text, (path, needle)
+
+          postinstall = Path("pkg/scripts/postinstall").read_text()
+          assert "/usr/local/bin/tytus tunnel-up /tmp/tytus/tunnel-*.json" in postinstall
+          assert "/usr/local/bin/tytus tunnel-down *" in postinstall
+          assert "visudo" in postinstall
+          for forbidden in ["/sbin/route", "/sbin/ifconfig", "/usr/sbin/sysctl", "wg-quick", "wireguard-go"]:
+              assert forbidden not in postinstall, forbidden
+
+          installer = Path("install.sh").read_text()
+          assert "releases/tags/${TYTUS_RELEASE_TAG}" in installer
+          assert "(\./)?${RELEASE_ASSET}" in installer
+
+          powershell_installer = Path("install.ps1").read_text()
+          assert "releases/tags/$($env:TYTUS_RELEASE_TAG)" in powershell_installer
+          assert "(\./)?" in powershell_installer
+
+          web_index = Path("web/index.html").read_text()
+          assert "v0.6.14-beta.1" in web_index
+          assert "PUBLIC-BETA-UNSIGNED" in web_index
+          assert "Not production GA" in web_index
+          assert "TYTUS_RELEASE_TAG=v0.6.14-beta.1" in web_index
+
+          sync_script = Path("scripts/sync-tytus-os-dist.sh").read_text()
+          assert "command -v shasum" in sync_script
+          assert "command -v sha256sum" in sync_script
+          assert "missing SHA-256 tool" in sync_script
+
+          release = Path(".github/workflows/release.yml").read_text()
+          assert "Build unsigned macOS pkg dry-run" in release
+          assert "Build canonical TytusOS dist" in release
+          assert "tytusos-dist" in release
+          assert "dist-manifest.txt" in release
+          assert "Verify canonical TytusOS dist" in release
+          assert "Download canonical TytusOS dist" in release
+          assert "tytusos-dist.tar.gz" not in release
+          assert "tar xzf tytusos-artifact" not in release
+          assert "Build unsigned Linux deb dry-run" in release
+          assert "unsigned-DO-NOT-DISTRIBUTE-pkg" in release
+          assert "unsigned-DO-NOT-DISTRIBUTE-deb" in release
+          assert "Assert native package public-release policy" in release
+          assert "ubuntu-22.04" in release
+          assert "Check production signing secrets" in release
+          assert "Check non-production release policy" in release
+          assert "environment: release-production" in release
+          assert "release_tier" in release
+          assert "publish_release" in release
+          assert "Production release blocked" in release
+          assert "PUBLIC-BETA-UNSIGNED" in release
+          assert "private-beta" in release
+          assert "not production GA" in release
+
+          signing_doc = Path("docs/release/signing-secret-contract.md").read_text()
+          for secret_name in [
+              "APPLE_DEVELOPER_ID_APPLICATION_CERT_P12",
+              "APPLE_DEVELOPER_ID_INSTALLER_CERT_P12",
+              "WINDOWS_CODESIGN_CERT_PFX",
+              "LINUX_GPG_PRIVATE_KEY",
+              "UPDATE_MANIFEST_ED25519_PRIVATE_KEY",
+          ]:
+              assert secret_name in signing_doc, secret_name
+          PY
+          set +e
+          TYTUS_INSTALL_MODE=invalid sh install.sh >/tmp/tytus-install-invalid.out 2>/tmp/tytus-install-invalid.err
+          rc=$?
+          set -e
+          test "$rc" -eq 1
+          grep -q "Unsupported TYTUS_INSTALL_MODE" /tmp/tytus-install-invalid.err
+
+      - name: PowerShell installer contract
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $errors = $null
+          [void][System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw install.ps1), [ref]$errors)
+          if ($errors) {
+            $errors | Format-List *
+            exit 1
+          }
+
+          $env:TYTUS_INSTALL_MODE = 'invalid'
+          $output = & pwsh -NoProfile -File ./install.ps1 2>&1
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 1) {
+            $output
+            throw "Expected invalid TYTUS_INSTALL_MODE to exit 1; got $exitCode"
+          }
+          if (($output -join "`n") -notmatch 'Unsupported TYTUS_INSTALL_MODE') {
+            $output
+            throw "Expected invalid mode error text"
+          }
+          $global:LASTEXITCODE = 0
+
+  rust:
+    name: Rust ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: ubuntu-latest
+          - os: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux native deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libdbus-1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            xdotool \
+            librsvg2-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo metadata
+        run: cargo metadata --no-deps --format-version 1
+
+      - name: Cargo check all targets
+        timeout-minutes: 15
+        run: cargo check --workspace --all-targets
+
+      - name: Cargo test all targets
+        timeout-minutes: 15
+        run: cargo test --workspace --all-targets
+
+  tytus-os-dist:
+    name: TytusOS dist embedding
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tytus-cli
+        uses: actions/checkout@v5
+        with:
+          path: tytus-cli
+
+      - name: Checkout tytus-os
+        uses: actions/checkout@v5
+        with:
+          repository: traylinx/tytus-os
+          ref: ${{ env.TYTUS_OS_REF }}
+          path: tytus-os
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tytus-os/package-lock.json
+
+      - name: Build and test TytusOS
+        working-directory: tytus-os
+        run: |
+          npm ci
+          npm run build:packages
+          npm run typecheck
+          npm run build
+          npm run test
+
+      - name: Verify vendored TytusOS dist
+        working-directory: tytus-cli
+        env:
+          TYTUS_OS_SOURCE: ${{ github.workspace }}/tytus-os
+        run: scripts/sync-tytus-os-dist.sh --check

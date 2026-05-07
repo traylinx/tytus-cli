@@ -7,6 +7,25 @@ bumps are allowed to break compat.
 
 ## [Unreleased]
 
+### Added
+- Public beta download page now points users at `v0.6.14-beta.1` with direct unsigned `.pkg` / `.deb` links and explicit GA warnings.
+- Installers now support `TYTUS_RELEASE_TAG` so public beta users can install a checksum-verified pre-release without source builds.
+
+### Fixed
+- Installer checksum matching now accepts both `asset` and `./asset` entries in `SHA256SUMS`.
+
+## [0.6.14] — 2026-05-07
+
+### Added
+- Public beta release path for explicitly labeled unsigned native installer previews.
+- Private-beta release workflow now may publish `PUBLIC-BETA-UNSIGNED` macOS `.pkg` and Linux `.deb` assets while production remains fail-closed.
+
+### Fixed
+- Release dist sync hashing now falls back from `shasum` to `sha256sum`, fixing Windows Git Bash release runners.
+
+### Safety
+- This is not public GA. Unsigned installer assets are beta-only and must not be described as production-ready.
+
 ## [0.6.13] — 2026-05-03
 
 ### Fixed

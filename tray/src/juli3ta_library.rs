@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_AUDIO_BYTES: usize = 120 * 1024 * 1024;
@@ -318,18 +317,7 @@ pub fn read_audio(id: &str) -> Result<(Vec<u8>, String), LibraryError> {
 pub fn open_library_folder() -> Result<String, LibraryError> {
     let root = library_root();
     fs::create_dir_all(&root)?;
-    #[cfg(target_os = "macos")]
-    let mut cmd = Command::new("open");
-    #[cfg(target_os = "linux")]
-    let mut cmd = Command::new("xdg-open");
-    #[cfg(target_os = "windows")]
-    let mut cmd = Command::new("explorer");
-
-    cmd.arg(&root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    cmd.spawn()
+    atomek_core::platform::open::open_path(&root)
         .map_err(|e| LibraryError::Io(format!("failed to open folder: {e}")))?;
     Ok(root.to_string_lossy().to_string())
 }

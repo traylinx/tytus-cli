@@ -4,6 +4,8 @@ mod channels_store;
 mod cmd_transfer;
 #[cfg(unix)]
 mod daemon;
+#[cfg(unix)]
+mod daemon_http;
 #[cfg(windows)]
 mod daemon_windows;
 #[cfg(windows)]
@@ -18,6 +20,7 @@ mod wizard;
 // main.rs can reference it as `tunnel_reap::...` unchanged.
 use atomek_cli::tunnel_pidfile;
 use atomek_cli::tunnel_reap;
+use atomek_core::platform::{open as platform_open, process};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use state::{CliState, PodEntry};
@@ -29,57 +32,52 @@ use state::{CliState, PodEntry};
 /// prepend a curated TLDR via `before_help`. Power users still get
 /// clap's full alphabetical Commands: list below it.
 
-#[cfg(unix)]
 fn process_alive_cross(pid: i32) -> bool {
-    if pid <= 1 {
-        return false;
-    }
-    (unsafe { libc::kill(pid, 0) == 0 })
-        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    u32::try_from(pid).ok().is_some_and(process::process_exists)
 }
 
-#[cfg(windows)]
-fn process_alive_cross(pid: i32) -> bool {
-    if pid <= 1 {
-        return false;
-    }
-    std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-        .output()
+fn terminate_process_cross(pid: i32) -> bool {
+    u32::try_from(pid)
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-        .unwrap_or(false)
+        .is_some_and(|p| process::terminate_process(p).is_ok())
 }
 
-#[cfg(unix)]
-fn terminate_process_cross(pid: i32) -> bool {
-    pid > 1 && unsafe { libc::kill(pid, libc::SIGTERM) == 0 }
-}
-
-#[cfg(windows)]
-fn terminate_process_cross(pid: i32) -> bool {
-    pid > 1
-        && std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-}
-
-#[cfg(unix)]
 fn force_kill_process_cross(pid: i32) -> bool {
-    pid > 1 && unsafe { libc::kill(pid, libc::SIGKILL) == 0 }
+    u32::try_from(pid)
+        .ok()
+        .is_some_and(|p| process::force_terminate_process(p).is_ok())
 }
 
-#[cfg(windows)]
-fn force_kill_process_cross(pid: i32) -> bool {
-    pid > 1
-        && std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+fn daemon_alive_cross() -> bool {
+    if daemon::pid_file_pid().is_some_and(daemon::process_alive) {
+        return true;
+    }
+    if let Ok(control) =
+        atomek_core::platform::ipc::read_control_file(&atomek_core::platform::paths::control_file())
+    {
+        if process::process_exists(control.pid) {
+            return true;
+        }
+    }
+    #[cfg(unix)]
+    {
+        atomek_core::platform::paths::legacy_daemon_socket().exists()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+fn path_with_legacy_fallback(
+    primary: std::path::PathBuf,
+    legacy: std::path::PathBuf,
+) -> std::path::PathBuf {
+    if primary.exists() || !legacy.exists() {
+        primary
+    } else {
+        legacy
+    }
 }
 
 #[cfg(unix)]
@@ -4036,12 +4034,7 @@ async fn cmd_app_catalog(url_override: Option<&str>, json: bool) {
     println!("Open URL: tytus app install <id> --no-open  (just prints the URL)");
 }
 
-async fn cmd_app_install(
-    target: String,
-    no_open: bool,
-    catalog_url: Option<&str>,
-    json: bool,
-) {
+async fn cmd_app_install(target: String, no_open: bool, catalog_url: Option<&str>, json: bool) {
     // Target can be either a Featured id OR a fully-qualified manifest URL.
     let manifest_url = if target.starts_with("https://") {
         target
@@ -4052,13 +4045,12 @@ async fn cmd_app_install(
             Ok(a) => a,
             Err(e) => {
                 if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({ "error": e, "target": target })
-                    );
+                    println!("{}", serde_json::json!({ "error": e, "target": target }));
                 } else {
                     eprintln!("failed to fetch catalog: {}", e);
-                    eprintln!("(falling back: pass a fully-qualified https:// URL instead of an id)");
+                    eprintln!(
+                        "(falling back: pass a fully-qualified https:// URL instead of an id)"
+                    );
                 }
                 return;
             }
@@ -4110,7 +4102,10 @@ async fn cmd_app_install(
         } else {
             println!("   Opening App Store at {} …", APP_STORE_URL);
             if let Err(e) = open::that(APP_STORE_URL) {
-                eprintln!("   (failed to open browser: {} — copy the URL manually.)", e);
+                eprintln!(
+                    "   (failed to open browser: {} — copy the URL manually.)",
+                    e
+                );
             }
         }
     }
@@ -6153,6 +6148,14 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/unknown".to_string());
         let plist_dir = std::path::PathBuf::from(&home).join("Library/LaunchAgents");
+        let autostart_log = atomek_core::platform::logging::autostart_log_file();
+        let daemon_log = atomek_core::platform::logging::daemon_log_file();
+        if let Some(parent) = autostart_log.parent() {
+            let _ = atomek_core::platform::paths::ensure_private_dir(parent);
+        }
+        if let Some(parent) = daemon_log.parent() {
+            let _ = atomek_core::platform::paths::ensure_private_dir(parent);
+        }
         // Two agents: one oneshot that brings the tunnel up at login, one
         // persistent daemon that keeps refreshing tokens 24/7 so the RT never
         // expires server-side. Both are managed atomically by this subcommand.
@@ -6187,9 +6190,9 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     <key>KeepAlive</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/tmp/tytus/autostart.log</string>
+    <string>{autostart_log}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/tytus/autostart.log</string>
+    <string>{autostart_log}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
@@ -6201,7 +6204,8 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     </dict>
 </dict>
 </plist>
-"#
+"#,
+                    autostart_log = autostart_log.display()
                 );
                 if let Err(e) = std::fs::write(&plist_path, plist) {
                     eprintln!("Failed to write plist: {}", e);
@@ -6237,9 +6241,9 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>/tmp/tytus/daemon.log</string>
+    <string>{daemon_log}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/tytus/daemon.log</string>
+    <string>{daemon_log}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
@@ -6251,7 +6255,8 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
     </dict>
 </dict>
 </plist>
-"#
+"#,
+                    daemon_log = daemon_log.display()
                 );
                 if let Err(e) = std::fs::write(&daemon_plist_path, daemon_plist) {
                     eprintln!("Failed to write daemon plist: {}", e);
@@ -6259,18 +6264,11 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                 }
                 // (Re)load both agents.
                 for p in [&plist_path, &daemon_plist_path] {
-                    let _ = std::process::Command::new("launchctl")
-                        .args(["unload", p.to_str().unwrap_or_default()])
-                        .output();
+                    let _ = atomek_core::platform::service::launchd_unload_agent(p, false);
                 }
-                let load_connect = std::process::Command::new("launchctl")
-                    .args(["load", "-w", plist_path.to_str().unwrap_or_default()])
-                    .output();
-                let load_daemon = std::process::Command::new("launchctl")
-                    .args(["load", "-w", daemon_plist_path.to_str().unwrap_or_default()])
-                    .output();
-                let ok_connect = load_connect.map(|o| o.status.success()).unwrap_or(false);
-                let ok_daemon = load_daemon.map(|o| o.status.success()).unwrap_or(false);
+                let ok_connect = atomek_core::platform::service::launchd_load_agent(&plist_path);
+                let ok_daemon =
+                    atomek_core::platform::service::launchd_load_agent(&daemon_plist_path);
                 if json {
                     println!(
                         "{}",
@@ -6279,7 +6277,9 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                             "plist_path": plist_path.to_string_lossy(),
                             "daemon_plist_path": daemon_plist_path.to_string_lossy(),
                             "loaded": ok_connect,
-                            "daemon_loaded": ok_daemon
+                            "daemon_loaded": ok_daemon,
+                            "autostart_log": autostart_log.to_string_lossy(),
+                            "daemon_log": daemon_log.to_string_lossy()
                         })
                     );
                 } else {
@@ -6298,9 +6298,7 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
             }
             AutostartAction::Uninstall => {
                 for p in [&plist_path, &daemon_plist_path] {
-                    let _ = std::process::Command::new("launchctl")
-                        .args(["unload", "-w", p.to_str().unwrap_or_default()])
-                        .output();
+                    let _ = atomek_core::platform::service::launchd_unload_agent(p, true);
                     let _ = std::fs::remove_file(p);
                 }
                 if json {
@@ -6319,16 +6317,10 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
             AutostartAction::Status => {
                 let installed = plist_path.exists();
                 let daemon_installed = daemon_plist_path.exists();
-                let loaded = std::process::Command::new("launchctl")
-                    .args(["list", "com.traylinx.tytus"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                let daemon_loaded = std::process::Command::new("launchctl")
-                    .args(["list", "com.traylinx.tytus.daemon"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
+                let names = atomek_core::platform::service::service_names();
+                let loaded = atomek_core::platform::service::launchd_agent_loaded(names.connect);
+                let daemon_loaded =
+                    atomek_core::platform::service::launchd_agent_loaded(names.daemon);
                 if json {
                     println!(
                         "{}",
@@ -6384,6 +6376,14 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
         let unit_dir = std::path::PathBuf::from(&home).join(".config/systemd/user");
         let unit_path = unit_dir.join("tytus.service");
         let daemon_unit_path = unit_dir.join("tytus-daemon.service");
+        let autostart_log = atomek_core::platform::logging::autostart_log_file();
+        let daemon_log = atomek_core::platform::logging::daemon_log_file();
+        if let Some(parent) = autostart_log.parent() {
+            let _ = atomek_core::platform::paths::ensure_private_dir(parent);
+        }
+        if let Some(parent) = daemon_log.parent() {
+            let _ = atomek_core::platform::paths::ensure_private_dir(parent);
+        }
         let exe = std::env::current_exe()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
@@ -6396,7 +6396,8 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                     std::process::exit(1);
                 }
                 let unit = format!(
-                    "[Unit]\nDescription=Tytus private AI pod tunnel (auto-start on login)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart={exe} connect\nRemainAfterExit=yes\nEnvironment=TYTUS_HEADLESS=1\nStandardOutput=append:/tmp/tytus/autostart.log\nStandardError=append:/tmp/tytus/autostart.log\n\n[Install]\nWantedBy=default.target\n"
+                    "[Unit]\nDescription=Tytus private AI pod tunnel (auto-start on login)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart={exe} connect\nRemainAfterExit=yes\nEnvironment=TYTUS_HEADLESS=1\nStandardOutput=append:{autostart_log}\nStandardError=append:{autostart_log}\n\n[Install]\nWantedBy=default.target\n",
+                    autostart_log = autostart_log.display()
                 );
                 if let Err(e) = std::fs::write(&unit_path, unit) {
                     eprintln!("Failed to write unit: {}", e);
@@ -6404,23 +6405,17 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                 }
                 // Persistent token-refresh daemon — restart forever on crash.
                 let daemon_unit = format!(
-                    "[Unit]\nDescription=Tytus token-refresh daemon (background)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={exe} daemon run\nRestart=always\nRestartSec=30\nEnvironment=TYTUS_HEADLESS=1\nStandardOutput=append:/tmp/tytus/daemon.log\nStandardError=append:/tmp/tytus/daemon.log\n\n[Install]\nWantedBy=default.target\n"
+                    "[Unit]\nDescription=Tytus token-refresh daemon (background)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={exe} daemon run\nRestart=always\nRestartSec=30\nEnvironment=TYTUS_HEADLESS=1\nStandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n[Install]\nWantedBy=default.target\n",
+                    daemon_log = daemon_log.display()
                 );
                 if let Err(e) = std::fs::write(&daemon_unit_path, daemon_unit) {
                     eprintln!("Failed to write daemon unit: {}", e);
                     std::process::exit(1);
                 }
-                let _ = std::process::Command::new("systemctl")
-                    .args(["--user", "daemon-reload"])
-                    .output();
-                let r = std::process::Command::new("systemctl")
-                    .args(["--user", "enable", "--now", "tytus.service"])
-                    .output();
-                let rd = std::process::Command::new("systemctl")
-                    .args(["--user", "enable", "--now", "tytus-daemon.service"])
-                    .output();
-                let ok = r.map(|o| o.status.success()).unwrap_or(false);
-                let ok_daemon = rd.map(|o| o.status.success()).unwrap_or(false);
+                let _ = atomek_core::platform::service::systemd_user_daemon_reload();
+                let ok = atomek_core::platform::service::systemd_user_enable_now("tytus.service");
+                let ok_daemon =
+                    atomek_core::platform::service::systemd_user_enable_now("tytus-daemon.service");
                 if json {
                     println!(
                         "{}",
@@ -6429,7 +6424,9 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                             "unit_path":unit_path.to_string_lossy(),
                             "daemon_unit_path":daemon_unit_path.to_string_lossy(),
                             "enabled":ok,
-                            "daemon_enabled":ok_daemon
+                            "daemon_enabled":ok_daemon,
+                            "autostart_log": autostart_log.to_string_lossy(),
+                            "daemon_log": daemon_log.to_string_lossy()
                         })
                     );
                 } else {
@@ -6442,12 +6439,10 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
                 }
             }
             AutostartAction::Uninstall => {
-                let _ = std::process::Command::new("systemctl")
-                    .args(["--user", "disable", "--now", "tytus.service"])
-                    .output();
-                let _ = std::process::Command::new("systemctl")
-                    .args(["--user", "disable", "--now", "tytus-daemon.service"])
-                    .output();
+                let _ = atomek_core::platform::service::systemd_user_disable_now("tytus.service");
+                let _ = atomek_core::platform::service::systemd_user_disable_now(
+                    "tytus-daemon.service",
+                );
                 let _ = std::fs::remove_file(&unit_path);
                 let _ = std::fs::remove_file(&daemon_unit_path);
                 if json {
@@ -6466,16 +6461,9 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
             AutostartAction::Status => {
                 let installed = unit_path.exists();
                 let daemon_installed = daemon_unit_path.exists();
-                let active = std::process::Command::new("systemctl")
-                    .args(["--user", "is-enabled", "tytus.service"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                let daemon_active = std::process::Command::new("systemctl")
-                    .args(["--user", "is-enabled", "tytus-daemon.service"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
+                let active = atomek_core::platform::service::systemd_user_enabled("tytus.service");
+                let daemon_active =
+                    atomek_core::platform::service::systemd_user_enabled("tytus-daemon.service");
                 if json {
                     println!(
                         "{}",
@@ -6650,9 +6638,7 @@ fn cmd_tray(action: TrayAction, json: bool) {
 
             // Poke LaunchServices so Spotlight picks up the bundle immediately
             // instead of after the next mds re-scan (which can take minutes).
-            let _ = std::process::Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
-                .args(["-f", app_path.to_str().unwrap_or_default()])
-                .output();
+            let _ = atomek_core::platform::service::macos_register_launch_services(&app_path);
 
             // LaunchAgent: open Tytus.app at login. Using `open -a` lets
             // launchd reuse a running instance instead of racing against
@@ -6693,19 +6679,11 @@ fn cmd_tray(action: TrayAction, json: bool) {
                 eprintln!("Failed to write tray plist: {}", e);
                 std::process::exit(1);
             }
-            let _ = std::process::Command::new("launchctl")
-                .args(["unload", tray_plist_path.to_str().unwrap_or_default()])
-                .output();
-            let loaded = std::process::Command::new("launchctl")
-                .args(["load", "-w", tray_plist_path.to_str().unwrap_or_default()])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let _ = atomek_core::platform::service::launchd_unload_agent(&tray_plist_path, false);
+            let loaded = atomek_core::platform::service::launchd_load_agent(&tray_plist_path);
 
             // Start the tray right now so the user sees the T immediately.
-            let _ = std::process::Command::new("/usr/bin/open")
-                .args(["-a", app_path.to_str().unwrap_or_default()])
-                .status();
+            let _ = atomek_core::platform::service::macos_open_app(&app_path);
 
             if json {
                 println!(
@@ -6735,9 +6713,7 @@ fn cmd_tray(action: TrayAction, json: bool) {
             }
         }
         TrayAction::Uninstall => {
-            let _ = std::process::Command::new("launchctl")
-                .args(["unload", "-w", tray_plist_path.to_str().unwrap_or_default()])
-                .output();
+            let _ = atomek_core::platform::service::launchd_unload_agent(&tray_plist_path, true);
             let _ = std::fs::remove_file(&tray_plist_path);
             let _ = std::fs::remove_dir_all(&app_path);
             // Best-effort: kill any running tray so /Applications/Tytus.app
@@ -6745,9 +6721,7 @@ fn cmd_tray(action: TrayAction, json: bool) {
             let _ = std::process::Command::new("pkill")
                 .args(["-f", "tytus-tray"])
                 .status();
-            let _ = std::process::Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
-                .args(["-u", app_path.to_str().unwrap_or_default()])
-                .output();
+            let _ = atomek_core::platform::service::macos_unregister_launch_services(&app_path);
             if json {
                 println!("{}", serde_json::json!({"action":"uninstall"}));
             } else {
@@ -6757,15 +6731,18 @@ fn cmd_tray(action: TrayAction, json: bool) {
         TrayAction::Status => {
             let app_installed = app_path.exists();
             let plist_installed = tray_plist_path.exists();
-            let loaded = std::process::Command::new("launchctl")
-                .args(["list", "com.traylinx.tytus.tray"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            // Probe /tmp/tytus/tray.pid (the tray's single-instance lock)
-            // and verify the pid is actually alive. More reliable than pgrep,
-            // which has different process names for bundle vs raw binary.
-            let running = std::fs::read_to_string("/tmp/tytus/tray.pid")
+            let loaded = atomek_core::platform::service::launchd_agent_loaded(
+                atomek_core::platform::service::service_names().tray,
+            );
+            // Probe the tray single-instance lock and verify the pid is
+            // actually alive. More reliable than pgrep, which has different
+            // process names for bundle vs raw binary. Keep legacy fallback for
+            // trays launched before the platform-runtime migration.
+            let tray_pid_path = path_with_legacy_fallback(
+                atomek_core::platform::paths::tray_pid_file(),
+                atomek_core::platform::paths::legacy_runtime_dir().join("tray.pid"),
+            );
+            let running = std::fs::read_to_string(tray_pid_path)
                 .ok()
                 .and_then(|s| s.trim().parse::<i32>().ok())
                 .map(|pid| process_alive_cross(pid))
@@ -7082,7 +7059,6 @@ async fn cmd_ui(
     no_open: bool,
     json: bool,
 ) {
-    use std::process::Command;
     use tokio::net::{TcpListener, TcpStream};
 
     let state = CliState::load();
@@ -7253,10 +7229,7 @@ async fn cmd_ui(
                     println!("  Reusing it — close the other Terminal window to stop it.");
                 }
                 if !no_open {
-                    #[cfg(target_os = "macos")]
-                    let _ = Command::new("open").arg(&existing_url).spawn();
-                    #[cfg(target_os = "linux")]
-                    let _ = Command::new("xdg-open").arg(&existing_url).spawn();
+                    let _ = platform_open::open_url(&existing_url);
                 }
                 return;
             } else {
@@ -7364,12 +7337,9 @@ async fn cmd_ui(
         println!("Press Ctrl+C to stop.");
     }
 
-    // Open the browser unless --no-open. On macOS use `open`, on Linux `xdg-open`.
+    // Open the browser unless --no-open.
     if !no_open {
-        #[cfg(target_os = "macos")]
-        let _ = Command::new("open").arg(&url).spawn();
-        #[cfg(target_os = "linux")]
-        let _ = Command::new("xdg-open").arg(&url).spawn();
+        let _ = platform_open::open_url(&url);
     }
 
     // A1: upstream health monitor. TCP-probe the upstream every 10s and
@@ -8783,7 +8753,7 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
     // so we hint at both paths: if the daemon's alive and reachable, it's
     // probably transient; if not, re-login.
     let token_valid = state.has_valid_token();
-    let daemon_alive = std::path::Path::new("/tmp/tytus/daemon.sock").exists();
+    let daemon_alive = daemon_alive_cross();
     checks.push((
         "token_valid",
         token_valid,
@@ -9673,11 +9643,13 @@ fn reap_dead_tunnels(state: &mut CliState) {
     }
 }
 
-/// Append a timestamped line to /tmp/tytus/autostart.log for headless diagnostics.
+/// Append a timestamped line to the platform autostart log for headless diagnostics.
 fn append_autostart_log(msg: &str) {
     use std::io::Write;
-    let dir = secure_tytus_tmp_dir();
-    let log_path = dir.join("autostart.log");
+    let log_path = atomek_core::platform::logging::autostart_log_file();
+    if let Some(parent) = log_path.parent() {
+        let _ = atomek_core::platform::paths::ensure_private_dir(parent);
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

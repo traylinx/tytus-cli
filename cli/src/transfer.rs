@@ -137,25 +137,10 @@ pub fn resolve_pod(explicit: Option<&str>, state: &CliState) -> Result<String, T
 
 // ── Transfer log (JSONL, flock-serialised) ─────────────────
 
-/// Where transfer events land. Honours `XDG_DATA_HOME` on
-/// Linux; uses `~/Library/Application Support/tytus/` on macOS.
+/// Where transfer events land. Uses the shared platform substrate so macOS,
+/// Linux, and Windows resolve the same app-data contract.
 pub fn transfer_log_path() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(h) = dirs::home_dir() {
-            return h.join("Library/Application Support/tytus/transfers.log");
-        }
-    }
-    // Linux / BSD / others.
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("tytus/transfers.log");
-        }
-    }
-    if let Some(h) = dirs::home_dir() {
-        return h.join(".local/share/tytus/transfers.log");
-    }
-    PathBuf::from("/tmp/tytus/transfers.log")
+    atomek_core::platform::paths::data_dir().join("transfers.log")
 }
 
 /// One row of the append-only JSONL log.

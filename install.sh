@@ -7,30 +7,35 @@
 #     curl -fsSL https://get.traylinx.com/install.sh | bash
 # (legacy direct-from-github URL also works as a fallback)
 #
-# Early-access policy:
-#   Tytus is under active development. The installer builds from source
-#   against `main` via `cargo install --git` so every user gets the latest
-#   fixes without us having to cut a release for every bugfix. Prebuilt
-#   binaries will return once the CLI is stable and versioned.
+# Production install policy:
+#   The one-command installer must never make normal users build from source.
+#   Default installs use checksum-verified release artifacts only. If no
+#   matching artifact exists, the installer fails with a friendly message
+#   instead of asking a non-technical user to install Rust, cargo, or admin
+#   tooling. Source builds are developer-only and require an explicit opt-in.
 #
 # What it does:
 #   1. Detects your OS + arch
-#   2. Ensures a Rust toolchain is present (offers rustup install if not)
-#   3. Builds + installs `tytus` and `tytus-mcp` from the main branch
-#   4. (Opt-in) Tries an older prebuilt release if TYTUS_USE_RELEASE=1
+#   2. Downloads a checksum-verified GitHub release artifact
+#   3. Installs `tytus`, `tytus-mcp`, and `tytus-tray` when bundled
+#   4. Developer-only: builds from source when explicitly requested
 #   5. Sets up a tightly-scoped sudoers entry so `tytus connect` never
 #      prompts for a password when opening the WireGuard tunnel
 #   6. Prints clear next steps
 #
 # Env:
 #     TYTUS_INSTALL_DIR    Override the install directory
-#                          (default: $HOME/.cargo/bin for source builds,
-#                          /usr/local/bin for releases)
+#                          (default: /usr/local/bin for releases,
+#                          $HOME/.cargo/bin for dev-source builds)
+#     TYTUS_INSTALL_MODE   "production" (default) or "dev-source"
+#     TYTUS_DEV_SOURCE_INSTALL
+#                          Set to "1" as a short alias for
+#                          TYTUS_INSTALL_MODE=dev-source
 #     TYTUS_SKIP_SUDOERS   Set to "1" to skip sudoers configuration
-#     TYTUS_USE_RELEASE    Set to "1" to prefer the last published GitHub
-#                          release over a fresh source build (may be stale)
 #     TYTUS_SKIP_CHECKSUM  Set to "1" to skip SHA256 verification when
-#                          using TYTUS_USE_RELEASE (NOT RECOMMENDED)
+#                          using release artifacts (NOT RECOMMENDED)
+#     TYTUS_RELEASE_TAG    Install a specific GitHub release tag instead of
+#                          /releases/latest, e.g. v0.6.14-beta.1
 # ============================================================
 
 set -eu
@@ -59,15 +64,39 @@ ok()   { printf " %s✓%s %s\n" "$GREEN" "$RESET" "$1"; }
 warn() { printf " %s!%s %s\n" "$YELLOW" "$RESET" "$1" >&2; }
 err()  { printf " %s✗%s %s\n" "$RED" "$RESET" "$1" >&2; }
 
+install_mode() {
+    if [ "${TYTUS_DEV_SOURCE_INSTALL:-}" = "1" ]; then
+        printf "dev-source"
+        return 0
+    fi
+    printf "%s" "${TYTUS_INSTALL_MODE:-production}"
+}
+
+validate_install_mode() {
+    case "$1" in
+        production|dev-source) return 0 ;;
+        *)
+            err "Unsupported TYTUS_INSTALL_MODE='$1'. Use 'production' or 'dev-source'."
+            exit 1
+            ;;
+    esac
+}
+
 banner() {
+    _mode="$1"
     printf "\n"
     printf "%s┌─────────────────────────────────────────────────┐%s\n" "$BOLD" "$RESET"
     printf "%s│          Installing %sTytus CLI%s                    │%s\n" "$BOLD" "$BLUE" "$RESET$BOLD" "$RESET"
     printf "%s│   %sPrivate AI pods driven from your terminal%s     │%s\n" "$BOLD" "$DIM" "$RESET$BOLD" "$RESET"
     printf "%s└─────────────────────────────────────────────────┘%s\n" "$BOLD" "$RESET"
     printf "\n"
-    printf "%sEarly access:%s building from source against main branch.\n" "$YELLOW$BOLD" "$RESET"
-    printf "%sRequires:%s a Rust toolchain (we can install it for you).\n" "$DIM" "$RESET"
+    if [ "$_mode" = "dev-source" ]; then
+        printf "%sDeveloper mode:%s building from source against main branch.\n" "$YELLOW$BOLD" "$RESET"
+        printf "%sRequires:%s Rust toolchain + cargo.\n" "$DIM" "$RESET"
+    else
+        printf "%sProduction mode:%s release artifact only; no Rust/cargo source builds.\n" "$GREEN$BOLD" "$RESET"
+        printf "%sSafety:%s checksum verification is required unless TYTUS_SKIP_CHECKSUM=1.\n" "$DIM" "$RESET"
+    fi
     printf "\n"
 }
 
@@ -118,10 +147,6 @@ detect_platform() {
 # ── Try prebuilt release download ──────────────────────────
 
 try_release_download() {
-    # Early-access policy: releases are opt-in. The default path is a
-    # fresh source build from main so users always get the latest fixes.
-    [ "${TYTUS_USE_RELEASE:-}" = "1" ] || return 1
-
     RELEASE_ASSET=""
     case "${OS}-${ARCH_NORM}" in
         darwin-x86_64)  RELEASE_ASSET="tytus-macos-x86_64.tar.gz" ;;
@@ -131,8 +156,14 @@ try_release_download() {
         *)              return 1 ;;
     esac
 
-    msg "Looking for prebuilt release (${RELEASE_ASSET})..."
-    RELEASES_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null)
+    if [ -n "${TYTUS_RELEASE_TAG:-}" ]; then
+        RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/tags/${TYTUS_RELEASE_TAG}"
+        msg "Looking for prebuilt release (${RELEASE_ASSET}) on ${TYTUS_RELEASE_TAG}..."
+    else
+        RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+        msg "Looking for prebuilt release (${RELEASE_ASSET})..."
+    fi
+    RELEASES_JSON=$(curl -fsSL "$RELEASE_API_URL" 2>/dev/null)
     RELEASE_URL=$(printf "%s" "$RELEASES_JSON" \
         | grep "browser_download_url.*${RELEASE_ASSET}" \
         | cut -d'"' -f4 | head -1)
@@ -141,7 +172,7 @@ try_release_download() {
         | cut -d'"' -f4 | head -1)
 
     if [ -z "$RELEASE_URL" ]; then
-        warn "No prebuilt binary published yet for ${RELEASE_ASSET}. Falling back to source build."
+        warn "No production release artifact published yet for ${RELEASE_ASSET}."
         return 1
     fi
 
@@ -176,7 +207,7 @@ try_release_download() {
             err "Install coreutils (Linux) or use macOS built-in shasum."
             exit 1
         fi
-        EXPECTED=$(grep " ${RELEASE_ASSET}\$" "${TMP}/SHA256SUMS" | awk '{print $1}' | head -1)
+        EXPECTED=$(grep -E "[[:space:]](\./)?${RELEASE_ASSET}\$" "${TMP}/SHA256SUMS" | awk '{print $1}' | head -1)
         if [ -z "$EXPECTED" ]; then
             err "SHA256SUMS does not contain entry for ${RELEASE_ASSET}."
             exit 1
@@ -195,23 +226,45 @@ try_release_download() {
 
     tar xzf "${TMP}/${RELEASE_ASSET}" -C "${TMP}"
 
+    if [ ! -d "$INSTALL_DIR" ]; then
+        if mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+            :
+        else
+            sudo mkdir -p "$INSTALL_DIR"
+        fi
+    fi
+
     install_one() {
         _bin="$1"
         [ -f "${TMP}/${_bin}" ] || return 0
         if [ -w "$INSTALL_DIR" ]; then
             mv "${TMP}/${_bin}" "${INSTALL_DIR}/"
+            chmod +x "${INSTALL_DIR}/${_bin}"
         else
             sudo mv "${TMP}/${_bin}" "${INSTALL_DIR}/"
+            sudo chmod +x "${INSTALL_DIR}/${_bin}"
         fi
-        chmod +x "${INSTALL_DIR}/${_bin}"
         ok "${INSTALL_DIR}/${_bin}"
     }
     msg "Installing to ${INSTALL_DIR}..."
     install_one "${CLI_NAME}"
     install_one "${MCP_NAME}"
+    install_one "tytus-tray"
 
     BIN_PATH="${INSTALL_DIR}/${CLI_NAME}"
     return 0
+}
+
+production_unavailable() {
+    err "Production installer is not available for ${OS_PRETTY} ${ARCH_NORM} yet."
+    err "Tytus production installs must use checksum-verified release artifacts."
+    err "Normal users should not install Rust, cargo, or build Tytus from source."
+    err ""
+    err "Developer escape hatch:"
+    err "    curl -fsSL https://get.traylinx.com/install.sh | TYTUS_INSTALL_MODE=dev-source sh"
+    err "or:"
+    err "    curl -fsSL https://get.traylinx.com/install.sh | TYTUS_DEV_SOURCE_INSTALL=1 sh"
+    exit 1
 }
 
 # ── Fallback: cargo install --git ──────────────────────────
@@ -222,7 +275,7 @@ ensure_cargo() {
         return 0
     fi
 
-    warn "Rust (cargo) not found. Tytus is built from source with cargo."
+    warn "Rust (cargo) not found. Developer source installs require cargo."
     reply=$(read_reply "Install Rust via rustup now? [y/N]" "n")
     case "$reply" in
         [yY]*)
@@ -240,7 +293,7 @@ ensure_cargo() {
             fi
             ;;
         *)
-            err "Rust is required to build Tytus from source during early access."
+            err "Rust is required for developer source installs."
             err "Install manually from https://rustup.rs and re-run this script."
             exit 1
             ;;
@@ -408,16 +461,20 @@ print_next_steps() {
 # ── Main ───────────────────────────────────────────────────
 
 main() {
-    banner
+    MODE=$(install_mode)
+    validate_install_mode "$MODE"
+    banner "$MODE"
     detect_platform
 
-    # Default path: source build from main. Opt-in to stale prebuilt
-    # release via TYTUS_USE_RELEASE=1.
-    if [ "${TYTUS_USE_RELEASE:-}" = "1" ] && try_release_download; then
-        :
-    else
-        install_from_source
-    fi
+    case "$MODE" in
+        production)
+            try_release_download || production_unavailable
+            ;;
+        dev-source)
+            warn "Developer source install requested explicitly; this is not the grandma-safe production path."
+            install_from_source
+            ;;
+    esac
 
     verify_install
     setup_sudoers
