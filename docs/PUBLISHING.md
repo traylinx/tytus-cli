@@ -80,6 +80,7 @@ gh workflow run release.yml \
   -f publish_release=true
 
 # 5. Wait for release.yml to finish (~10 min)
+#    → builds/tests one canonical TytusOS web dist and embeds the same bytes everywhere
 #    → builds macos-{x86_64,aarch64}, linux-x86_64, windows-x86_64
 #    → uploads unsigned DO-NOT-DISTRIBUTE native package dry-run artifacts
 #      as workflow artifacts only (.pkg/.deb are not public release assets)

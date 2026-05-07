@@ -149,8 +149,61 @@ jobs:
           `docs/release/signing-secret-contract.md`.
           SUMMARY
 
+
+  build-tytusos-dist:
+    name: Build canonical TytusOS dist
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Validate immutable tytus-os ref
+        shell: bash
+        run: |
+          if [[ -z "${TYTUS_OS_REF}" ]]; then
+            echo "tytus_os_ref is required for deterministic releases" >&2
+            exit 1
+          fi
+          if [[ "${TYTUS_OS_REF}" == "main" || "${TYTUS_OS_REF}" == feature/* ]]; then
+            echo "release tytus_os_ref must be an immutable tag or commit SHA, not moving branch: ${TYTUS_OS_REF}" >&2
+            exit 1
+          fi
+
+      - name: Checkout tytus-os
+        uses: actions/checkout@v5
+        with:
+          repository: traylinx/tytus-os
+          ref: ${{ env.TYTUS_OS_REF }}
+          path: tytus-os
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tytus-os/package-lock.json
+
+      - name: Build and test canonical TytusOS dist
+        working-directory: tytus-os
+        run: |
+          npm ci
+          npm run build:packages
+          npm run typecheck
+          npm run build
+          npm run test
+          (cd app/dist && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}') > tytus-os-dist.sha256
+          printf 'canonical tytus-os dist tree: '
+          cat tytus-os-dist.sha256
+          tar czf tytusos-dist.tar.gz app/dist tytus-os-dist.sha256
+
+      - name: Upload canonical TytusOS dist
+        uses: actions/upload-artifact@v6
+        with:
+          name: tytusos-dist
+          path: tytus-os/tytusos-dist.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
   build:
     name: Build ${{ matrix.name }}
+    needs: build-tytusos-dist
     strategy:
       fail-fast: false
       matrix:
@@ -193,13 +246,6 @@ jobs:
           ref: ${{ inputs.tag }}
           path: tytus-cli
 
-      - name: Checkout tytus-os
-        uses: actions/checkout@v5
-        with:
-          repository: traylinx/tytus-os
-          ref: ${{ env.TYTUS_OS_REF }}
-          path: tytus-os
-
       - name: Install Linux native deps
         if: runner.os == 'Linux'
         working-directory: tytus-cli
@@ -210,6 +256,7 @@ jobs:
             libdbus-1-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
+            libxdo-dev \
             librsvg2-dev
 
       - name: Install Rust
@@ -217,21 +264,27 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v5
+      - name: Download canonical TytusOS dist
+        uses: actions/download-artifact@v7
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: tytus-os/package-lock.json
+          name: tytusos-dist
+          path: tytusos-artifact
 
-      - name: Build TytusOS dist
-        working-directory: tytus-os
+      - name: Extract canonical TytusOS dist
+        shell: bash
         run: |
-          npm ci
-          npm run build:packages
-          npm run typecheck
-          npm run build
-          npm run test
+          mkdir -p tytus-os
+          tar xzf tytusos-artifact/tytusos-dist.tar.gz -C tytus-os
+          cd tytus-os
+          expected="$(cat tytus-os-dist.sha256)"
+          actual="$(cd app/dist && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+          if [ "$expected" != "$actual" ]; then
+            echo "canonical TytusOS dist hash mismatch" >&2
+            echo "expected: $expected" >&2
+            echo "actual:   $actual" >&2
+            exit 1
+          fi
+          echo "canonical TytusOS dist verified: $actual"
 
       - name: Embed TytusOS dist
         working-directory: tytus-cli

@@ -60,7 +60,7 @@ Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: Traylinx <hello@traylinx.com>
 Homepage: https://traylinx.com
-Depends: libc6 (>= 2.35), ca-certificates, libdbus-1-3, libsecret-1-0, libgtk-3-0, libayatana-appindicator3-1, iproute2, xdg-utils
+Depends: libc6 (>= 2.35), ca-certificates, libdbus-1-3, libsecret-1-0, libgtk-3-0, libayatana-appindicator3-1, libxdo3, iproute2, xdg-utils
 Recommends: policykit-1 | polkitd
 Description: Tytus private AI pod desktop and CLI
  Tytus installs the CLI, MCP server, and tray app used to open Tytus OS,

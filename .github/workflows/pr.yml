@@ -59,6 +59,9 @@ jobs:
 
           release = Path(".github/workflows/release.yml").read_text()
           assert "Build unsigned macOS pkg dry-run" in release
+          assert "Build canonical TytusOS dist" in release
+          assert "tytusos-dist" in release
+          assert "Download canonical TytusOS dist" in release
           assert "Build unsigned Linux deb dry-run" in release
           assert "unsigned-DO-NOT-DISTRIBUTE-pkg" in release
           assert "unsigned-DO-NOT-DISTRIBUTE-deb" in release

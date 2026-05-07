@@ -97,7 +97,7 @@ not publish `.deb` files as GitHub Release assets. Workflow artifacts are named
 `*-unsigned-DO-NOT-DISTRIBUTE-deb` with 7-day retention until Linux package or
 repository signing lands.
 
-Runtime dependencies declared by the dry-run package:
+Runtime dependencies declared by the dry-run package (release CI also installs `libxdo-dev` to link `tytus-tray` on Ubuntu 22.04):
 
 - `libc6 (>= 2.35)`
 - `ca-certificates`
@@ -105,6 +105,7 @@ Runtime dependencies declared by the dry-run package:
 - `libsecret-1-0`
 - `libgtk-3-0`
 - `libayatana-appindicator3-1`
+- `libxdo3`
 - `iproute2`
 - `xdg-utils`
 - recommends `policykit-1 | polkitd`
@@ -118,3 +119,5 @@ Open caveats before Linux GA:
   and uninstall;
 - if `ubuntu-22.04` Actions runner deprecation starts, move release packaging to
   an Ubuntu 22.04 container or equivalent glibc-pinned build image before GA.
+
+The release workflow builds and tests one canonical TytusOS web dist on Ubuntu 22.04, uploads it as `tytusos-dist`, and embeds those same bytes into every platform binary. Platform jobs do not rebuild the web app independently.
