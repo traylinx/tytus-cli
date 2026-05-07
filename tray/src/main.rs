@@ -629,18 +629,13 @@ fn main() {
 
     let state = Arc::new(Mutex::new(TrayState::default()));
 
-    // Spin up the localhost install wizard server on a random port. This
-    // is the entry point for the browser-based "Install Agent…" flow.
-    // Failure to bind is non-fatal: the menu action falls back to opening
-    // a Terminal with `tytus agent install` if the port file is missing.
-    // Tray-side integration for SPRINT §6 E1.
+    // Spin up the localhost TytusOS server on the fixed public beta port.
+    // This is the entry point for the browser-based setup/App Store flows.
+    // Failure to bind is visible: the product contract is http://localhost:4242/.
     if let Some(port) = web_server::start() {
-        eprintln!(
-            "[tray] install wizard ready on http://127.0.0.1:{}/install",
-            port
-        );
+        eprintln!("[tray] TytusOS ready on http://localhost:{}/", port);
     } else {
-        eprintln!("[tray] install wizard not available (bind failed)");
+        eprintln!("[tray] TytusOS not available on http://localhost:4242/ (bind failed)");
     }
 
     // Initial poll

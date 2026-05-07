@@ -37,7 +37,7 @@ Named pipes are viable on Windows, but ACL setup and Rust async ergonomics are a
 
 The Phase 2 platform substrate owns exact paths, but the contract is:
 
-- macOS runtime: platform runtime dir, with legacy read compatibility for `/tmp/tytus/tray-web.port` during migration.
+- macOS runtime: fixed loopback origin `http://localhost:4242/`, with `/tmp/tytus/tray-web.port` retained only as legacy diagnostic metadata.
 - Linux runtime: `$XDG_RUNTIME_DIR/tytus` when available; fallback to owner-only runtime dir under user cache/runtime path.
 - Windows runtime: `%LOCALAPPDATA%\Tytus\Runtime` or equivalent current-user local app data path.
 
@@ -45,11 +45,11 @@ No new production code may hard-code `/tmp/tytus` outside migration shims and te
 
 ## Port and discovery protocol
 
-The daemon uses a dynamic localhost port by default to avoid conflicts. Fixed ports are allowed only in tests or explicit developer overrides.
+The tray-served TytusOS origin is fixed: `http://localhost:4242/`. This is a public product contract because user docs, App Store deep links, browser tabs, and support instructions must not change on every tray restart. If port 4242 is unavailable, startup must fail visibly instead of silently moving to a random port.
 
-Discovery is file-based through the Phase 2 platform runtime directory:
+Discovery is fixed-origin first. Runtime files are diagnostic/migration metadata only:
 
-- macOS: platform runtime dir with legacy read compatibility for `/tmp/tytus/tray-web.port`.
+- macOS: fixed loopback origin `http://localhost:4242/`; legacy read compatibility for `/tmp/tytus/tray-web.port` is diagnostic only.
 - Linux: `$XDG_RUNTIME_DIR/tytus/control.json` when available.
 - Windows: `%LOCALAPPDATA%\Tytus\Runtime\control.json`.
 

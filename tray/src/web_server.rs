@@ -1,6 +1,6 @@
 //! Local HTTP server for the TytusOS control surface.
 //!
-//! Binds to `127.0.0.1:<random>` at tray startup, serves embedded TytusOS assets,
+//! Binds to `127.0.0.1:4242` at tray startup, serves embedded TytusOS assets,
 //! and exposes a tiny local API so the static JS can (a) list the agent
 //! catalog, (b) kick off a `tytus agent install` subprocess, and (c) stream
 //! its stdout back via server-sent events. Legacy `/install` paths 302 to
@@ -14,8 +14,8 @@
 //! - Synchronous `tiny_http` + a small thread pool. We expect one
 //!   concurrent install job at a time — the UI only lets the user click
 //!   one card. Parallel installs would overspend units anyway.
-//! - Port bound at startup to `127.0.0.1:0` (kernel picks). Written to
-//!   the platform runtime `tray-web.port` so `open_os()` can read it.
+//! - Port bound at startup to `127.0.0.1:4242`. Written to the platform
+//!   runtime `tray-web.port` for legacy consumers and diagnostics.
 //! - Lifecycle: server thread owns the `tiny_http::Server` and parks on
 //!   `recv()`. On tray quit we drop the `Arc<Server>` and the kernel
 //!   tears down the listener.
@@ -38,6 +38,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// `start()` call; UI consumers compare against the value last seen
 /// to detect a daemon restart and drop stale activeJob state.
 static DAEMON_STARTED_AT: OnceLock<u64> = OnceLock::new();
+
+/// Stable local TytusOS port. User-facing docs, app install deep links,
+/// OAuth/browser callbacks, and support instructions depend on this staying
+/// fixed instead of using a kernel-assigned random port.
+pub const TYTUS_OS_PORT: u16 = 4242;
+const TYTUS_OS_HOST: &str = "127.0.0.1";
+const TYTUS_OS_PUBLIC_BASE_URL: &str = "http://localhost:4242";
 
 fn daemon_started_at() -> u64 {
     *DAEMON_STARTED_AT.get_or_init(|| {
@@ -1592,10 +1599,11 @@ fn handle_terminal_stop(request: Request, query: &str) {
 
 // ── Public entry ──────────────────────────────────────────────
 
-/// Spawn the wizard server on a random localhost port and return the port.
+/// Spawn the TytusOS control server on the stable localhost port and return it.
 ///
-/// Returns `None` if bind failed (very rare — only when 127.0.0.1 itself
-/// isn't available). Caller stores the returned port for `open_os()`.
+/// Returns `None` if bind failed, usually because another process already owns
+/// port 4242. That is a product-visible problem: fixed-origin browser flows and
+/// user docs depend on `http://localhost:4242/`.
 pub fn start() -> Option<u16> {
     // Capture boot timestamp before we bind, so /api/version reflects
     // when the *daemon* came up — not when it first served a version
@@ -1603,17 +1611,20 @@ pub fn start() -> Option<u16> {
     daemon_started_at();
     music_ytdlp_setup::start_background_install();
 
-    let server = match Server::http("127.0.0.1:0") {
+    let bind_addr = format!("{}:{}", TYTUS_OS_HOST, TYTUS_OS_PORT);
+    let server = match Server::http(&bind_addr) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[tray-web] failed to bind: {}", e);
+            eprintln!(
+                "[tray-web] failed to bind {} (fixed TytusOS URL {}): {}",
+                bind_addr, TYTUS_OS_PUBLIC_BASE_URL, e
+            );
             return None;
         }
     };
-    let port = server.server_addr().to_ip()?.port();
+    let port = TYTUS_OS_PORT;
 
-    // Persist the port so subsequent "Install Agent" clicks (which call
-    // `open_os`) can read it without a lookup.
+    // Persist the fixed port so legacy consumers and diagnostics can read it.
     if let Some(path) = port_file() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1664,12 +1675,10 @@ pub fn open_os_at(fragment: &str) {
         .unwrap_or(0);
 
     // Override — when TYTUS_OS_URL is set, route every "Open TytusOS"
-    // shortcut through that base URL instead of the tray's dynamic
-    // tray-web.port. Useful for pinning the tray to a fixed dev URL
-    // (e.g. the Vite dev server at http://localhost:4242/) so menubar
-    // clicks always land on the same origin as the developer's open
-    // tabs. Set via `launchctl setenv TYTUS_OS_URL http://localhost:4242/`
-    // for it to reach the GUI app launched from the Dock / menubar.
+    // shortcut through that base URL instead of the built-in fixed server.
+    // Useful for pointing the tray at a Vite dev server or staging bundle.
+    // Set via `launchctl setenv TYTUS_OS_URL http://localhost:5173/` for
+    // it to reach the GUI app launched from the Dock / menubar.
     if let Ok(raw) = std::env::var("TYTUS_OS_URL") {
         let base = raw.trim().trim_end_matches('/');
         if !base.is_empty() {
@@ -1689,20 +1698,18 @@ pub fn open_os_at(fragment: &str) {
         }
     }
 
-    let port = match current_port() {
-        Some(p) => p,
-        None => {
-            eprintln!("[tray-web] no port recorded — is the server running?");
-            return;
-        }
-    };
-    let url = if fragment.is_empty() {
-        format!("http://127.0.0.1:{}/", port)
+    let url = os_url_for_fragment(TYTUS_OS_PUBLIC_BASE_URL, &fragment, nonce);
+    open_url(&url);
+}
+
+fn os_url_for_fragment(base: &str, fragment: &str, nonce: u128) -> String {
+    let base = base.trim_end_matches('/');
+    if fragment.is_empty() {
+        format!("{base}/")
     } else {
         let sep = if fragment.contains('?') { '&' } else { '?' };
-        format!("http://127.0.0.1:{}/{}{}n={:x}", port, fragment, sep, nonce)
-    };
-    open_url(&url);
+        format!("{base}/{fragment}{sep}n={nonce:x}")
+    }
 }
 
 #[allow(dead_code)]
@@ -1732,11 +1739,6 @@ fn legacy_tower_enabled() -> bool {
 
 fn port_file() -> Option<PathBuf> {
     Some(atomek_core::platform::paths::tray_web_port_file())
-}
-
-fn current_port() -> Option<u16> {
-    let raw = std::fs::read_to_string(port_file()?).ok()?;
-    raw.trim().parse().ok()
 }
 
 fn handle_music_status(request: Request) {
@@ -1872,9 +1874,7 @@ fn handle_music_stream(request: Request, query: &str) {
     match music_ytdlp::stream(&video_id) {
         Ok(info) => {
             let encoded = music_proxy::encode_proxy_path(&info.stream_url);
-            let proxy_url = current_port()
-                .map(|port| format!("http://127.0.0.1:{port}/api/music/proxy/{encoded}"))
-                .unwrap_or_else(|| format!("/api/music/proxy/{encoded}"));
+            let proxy_url = format!("{TYTUS_OS_PUBLIC_BASE_URL}/api/music/proxy/{encoded}");
             respond_json(
                 request,
                 200,
@@ -7904,6 +7904,28 @@ mod tests {
                 None => std::env::remove_var("TYTUS_STATE_PATH"),
             }
         }
+    }
+
+    #[test]
+    fn tytus_os_origin_is_fixed_to_public_contract() {
+        assert_eq!(TYTUS_OS_PORT, 4242);
+        assert_eq!(TYTUS_OS_PUBLIC_BASE_URL, "http://localhost:4242");
+        assert_eq!(
+            os_url_for_fragment(TYTUS_OS_PUBLIC_BASE_URL, "", 0xabc),
+            "http://localhost:4242/"
+        );
+        assert_eq!(
+            os_url_for_fragment(TYTUS_OS_PUBLIC_BASE_URL, "#/files", 0xabc),
+            "http://localhost:4242/#/files?n=abc"
+        );
+        assert_eq!(
+            os_url_for_fragment(
+                TYTUS_OS_PUBLIC_BASE_URL,
+                "#/pod/02/channels?action=add",
+                0xabc
+            ),
+            "http://localhost:4242/#/pod/02/channels?action=add&n=abc"
+        );
     }
 
     #[test]

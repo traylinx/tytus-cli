@@ -1,6 +1,6 @@
 # Tytus ecosystem guide
 
-Last updated: 2026-05-07. Applies to public beta `tytus` v0.6.14-beta.3.
+Last updated: 2026-05-07. Applies to public beta `tytus` v0.6.14-beta.4.
 
 Tytus is three pieces that should feel like one product:
 
@@ -10,7 +10,7 @@ Tytus is three pieces that should feel like one product:
 
 ## Current release status
 
-| Surface | Status in v0.6.14-beta.3 |
+| Surface | Status in v0.6.14-beta.4 |
 |---|---|
 | macOS | Unsigned public beta `.pkg` for Apple Silicon and Intel. Full CLI + tray + TytusOS path. Gatekeeper warning expected; Control-click → Open. |
 | Linux | Unsigned public beta `.deb` for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, desktop entry, and systemd user service. |
@@ -50,11 +50,10 @@ tytus-tray
 
 Follow the setup wizard: sign in, pick your AI assistant, start the private tunnel, run the test.
 
-If the desktop tray is unavailable in your environment, run TytusOS from the local daemon URL printed by `tytus status` or open the tray web port manually:
+If the desktop tray is unavailable in your environment, open the fixed local TytusOS URL manually:
 
-```bash
-cat /tmp/tytus/tray-web.port
-open "http://127.0.0.1:$(cat /tmp/tytus/tray-web.port)/" 2>/dev/null || xdg-open "http://127.0.0.1:$(cat /tmp/tytus/tray-web.port)/"
+```text
+http://localhost:4242/
 ```
 
 ### Windows
@@ -62,7 +61,7 @@ open "http://127.0.0.1:$(cat /tmp/tytus/tray-web.port)/" 2>/dev/null || xdg-open
 Download `tytus-windows-x86_64.zip` from the public beta page or use:
 
 ```powershell
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.3"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.4"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 Windows is a CLI/MCP technical preview until MSI signing, SmartScreen behavior, Wintun/driver packaging, and fresh-VM tunnel smoke pass.
