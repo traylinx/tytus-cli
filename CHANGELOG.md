@@ -8,11 +8,12 @@ bumps are allowed to break compat.
 ## [Unreleased]
 
 ### Added
-- Public beta download page now points users at `v0.6.14-beta.1` with direct unsigned `.pkg` / `.deb` links and explicit GA warnings.
+- Public beta download page now points users at `v0.6.14-beta.2` with direct unsigned `.pkg` / `.deb` links and explicit GA warnings.
 - Installers now support `TYTUS_RELEASE_TAG` so public beta users can install a checksum-verified pre-release without source builds.
 
 ### Fixed
 - Installer checksum matching now accepts both `asset` and `./asset` entries in `SHA256SUMS`.
+- Linux `.deb` postinstall copy now says unsigned public beta / not GA instead of old dry-run-only wording.
 
 ## [0.6.14] — 2026-05-07
 

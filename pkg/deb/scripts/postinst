@@ -15,7 +15,8 @@ Next steps:
   1. Open Tytus from your app launcher, or run: tytus-tray
   2. For background token refresh and tunnel autostart: tytus autostart install
 
-This dry-run package is unsigned and must not be distributed to end users.
+This is an unsigned public beta package. Expect normal OS trust warnings.
+It is intended for technical-preview testers, not production GA.
 MSG
 
 exit 0
