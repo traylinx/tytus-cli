@@ -79,6 +79,7 @@ jobs:
             $output
             throw "Expected invalid mode error text"
           }
+          $global:LASTEXITCODE = 0
 
   rust:
     name: Rust ${{ matrix.os }}
