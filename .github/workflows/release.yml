@@ -118,6 +118,16 @@ jobs:
           cargo build --release -p tytus-tray --target ${{ matrix.target }}
         shell: bash
 
+      - name: Build unsigned macOS pkg dry-run
+        if: runner.os == 'macOS'
+        working-directory: tytus-cli
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          pkg/build-pkg.sh
+          ls -la target/Tytus-*-unsigned.pkg
+        shell: bash
+
       - name: Package
         working-directory: tytus-cli
         run: |
@@ -136,6 +146,14 @@ jobs:
           name: ${{ matrix.name }}
           path: tytus-cli/${{ matrix.name }}.${{ matrix.archive }}
 
+      - name: Upload unsigned macOS pkg dry-run artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.name }}-unsigned-DO-NOT-DISTRIBUTE-pkg
+          path: tytus-cli/target/Tytus-*-unsigned.pkg
+          retention-days: 7
+
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -149,6 +167,15 @@ jobs:
           mkdir -p dist
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} dist/ \;
           ls -la dist/
+
+      - name: Assert unsigned pkg artifacts are not public release payload
+        run: |
+          if find dist -type f \( -name '*.pkg' -o -name '*unsigned*' \) | grep -q .; then
+            echo "unsigned/internal pkg artifact reached public release payload" >&2
+            find dist -type f \( -name '*.pkg' -o -name '*unsigned*' \) -print >&2
+            exit 1
+          fi
+          echo "Public release payload excludes unsigned pkg dry-run artifacts."
 
       - name: Generate SHA256SUMS
         run: |

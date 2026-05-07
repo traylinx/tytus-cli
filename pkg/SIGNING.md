@@ -4,6 +4,10 @@
 This document covers the signed-installer path: Apple Developer ID,
 notarization, stapling, verification, and upload.
 
+Unsigned packages are internal build artifacts only. Gatekeeper may reject
+them, and they must never be linked from the public download page or uploaded
+as release assets.
+
 ## Prerequisites
 
 - **Xcode Command Line Tools** (`xcode-select --install`). Provides
@@ -44,6 +48,11 @@ cargo build --release
 ./pkg/build-pkg.sh
 # → target/Tytus-<version>-unsigned.pkg
 
+# CI/release dry-run path for a specific target triple:
+TARGET_TRIPLE=x86_64-apple-darwin ./pkg/build-pkg.sh
+TARGET_TRIPLE=aarch64-apple-darwin ./pkg/build-pkg.sh
+# → target/Tytus-<version>-<target-triple>-unsigned.pkg
+
 # 2. Sign it. Replace <Your Name> + <Team> with your cert's Common Name
 #    (find via: security find-identity -v -p basic | grep "Developer ID Installer")
 productsign \
@@ -77,6 +86,15 @@ gh release upload "v<version>" "target/Tytus-<version>.pkg"
 # Common patterns: rsync to a static-site bucket, S3 sync, or a redirect
 # rule from tytus.traylinx.com/Tytus.pkg to the GitHub release artifact.
 ```
+
+## CI dry-run policy
+
+`.github/workflows/release.yml` builds unsigned macOS `.pkg` files on the
+macOS release matrix and stores them as short-lived workflow artifacts named
+`*-unsigned-DO-NOT-DISTRIBUTE-pkg`. The release job deliberately publishes only
+`.tar.gz`, `.zip`, and `SHA256SUMS` until signing/notarization secrets are
+configured. A release guard fails the workflow if an unsigned `.pkg` reaches
+the public release payload.
 
 ## What the .pkg does on install
 
