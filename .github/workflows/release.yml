@@ -383,23 +383,49 @@ jobs:
 
       - name: Flatten artifacts
         run: |
+          set -euo pipefail
           mkdir -p dist
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} dist/ \;
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} dist/ \;
+
+          if [ "${{ inputs.release_tier }}" = "private-beta" ]; then
+            while IFS= read -r -d '' f; do
+              base="$(basename "$f" .pkg)"
+              cp "$f" "dist/${base}-PUBLIC-BETA-UNSIGNED.pkg"
+            done < <(find artifacts -type f -name '*.pkg' -print0)
+            while IFS= read -r -d '' f; do
+              base="$(basename "$f" .deb)"
+              cp "$f" "dist/${base}-PUBLIC-BETA-UNSIGNED.deb"
+            done < <(find artifacts -type f -name '*.deb' -print0)
+          fi
+
           ls -la dist/
 
-      - name: Assert unsigned native package artifacts are not public release payload
+      - name: Assert native package public-release policy
         run: |
-          if find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' -o -name '*unsigned*' \) | grep -q .; then
-            echo "unsigned/internal native package artifact reached public release payload" >&2
-            find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' -o -name '*unsigned*' \) -print >&2
-            exit 1
+          set -euo pipefail
+          if [ "${{ inputs.release_tier }}" = "private-beta" ]; then
+            if find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' \) | grep -q .; then
+              bad="$(find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' \) ! -name '*PUBLIC-BETA-UNSIGNED*' -print)"
+              if [ -n "$bad" ]; then
+                echo "Private beta native packages must be explicitly named PUBLIC-BETA-UNSIGNED:" >&2
+                echo "$bad" >&2
+                exit 1
+              fi
+              echo "Private beta release includes explicitly labeled unsigned native packages."
+            fi
+          else
+            if find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' -o -name '*unsigned*' -o -name '*UNSIGNED*' \) | grep -q .; then
+              echo "unsigned/internal native package artifact reached non-beta public release payload" >&2
+              find dist -type f \( -name '*.pkg' -o -name '*.deb' -o -name '*.rpm' -o -name '*unsigned*' -o -name '*UNSIGNED*' \) -print >&2
+              exit 1
+            fi
+            echo "Public release payload excludes unsigned native package artifacts."
           fi
-          echo "Public release payload excludes unsigned native package dry-run artifacts."
 
       - name: Generate SHA256SUMS
         run: |
           cd dist
-          sha256sum *.tar.gz *.zip 2>/dev/null > SHA256SUMS || sha256sum *.tar.gz > SHA256SUMS
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS
           echo "── SHA256SUMS ──"
           cat SHA256SUMS
 
@@ -451,7 +477,22 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.pkg
+            dist/*.deb
             dist/SHA256SUMS
+          body: |
+            # Tytus public beta — unsigned installer preview
+
+            This is a public beta / technical preview, not production GA.
+
+            The macOS `.pkg` and Linux `.deb` assets are deliberately named `PUBLIC-BETA-UNSIGNED`.
+            They are provided so early testers can try the one-action install flow before paid signing/cert infrastructure is wired.
+
+            Expect OS trust warnings, especially on macOS Gatekeeper and Windows SmartScreen. If you need the safest path, use the tar/zip artifacts or wait for the signed GA release.
+
+            Windows is included as a zip technical preview only. The signed MSI + Wintun/WireGuard service path is not GA yet.
+
+            Do not describe this release as "installs on every user's computer" or "production-ready".
           generate_release_notes: true
           fail_on_unmatched_files: false
 

@@ -132,6 +132,15 @@ secrets or environment approval.
 - When we have customers, add a signing step to release.yml using
   `codesign --sign "Developer ID Application: Traylinx" ...`
 
+
+## Public beta with unsigned installers
+
+Sebastian explicitly allowed unsigned native installers for public beta while Apple/Windows/Linux signing is deferred. This does **not** change the GA bar.
+
+Use `release_tier=private-beta` and `publish_release=true`. The workflow may publish macOS `.pkg` and Linux `.deb` assets only when their filenames contain `PUBLIC-BETA-UNSIGNED`; production still fails closed. Release copy must say public beta / technical preview and warn about Gatekeeper/SmartScreen trust prompts.
+
+Never use this path for `release_tier=production`.
+
 ## Security checks before posting the one-liner publicly
 
 - [x] Checksum verification in install.sh (C1)
