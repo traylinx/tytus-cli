@@ -67,7 +67,14 @@ fi
 
 hash_dir() {
   local dir="$1"
-  (cd "${dir}" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')
+  if command -v shasum >/dev/null 2>&1; then
+    (cd "${dir}" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    (cd "${dir}" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+  else
+    echo "missing SHA-256 tool: install shasum or sha256sum" >&2
+    exit 1
+  fi
 }
 
 src_sha="$(hash_dir "${OS_DIST}")"

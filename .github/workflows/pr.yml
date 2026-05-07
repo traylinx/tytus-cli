@@ -57,6 +57,11 @@ jobs:
           for forbidden in ["/sbin/route", "/sbin/ifconfig", "/usr/sbin/sysctl", "wg-quick", "wireguard-go"]:
               assert forbidden not in postinstall, forbidden
 
+          sync_script = Path("scripts/sync-tytus-os-dist.sh").read_text()
+          assert "command -v shasum" in sync_script
+          assert "command -v sha256sum" in sync_script
+          assert "missing SHA-256 tool" in sync_script
+
           release = Path(".github/workflows/release.yml").read_text()
           assert "Build unsigned macOS pkg dry-run" in release
           assert "Build canonical TytusOS dist" in release
