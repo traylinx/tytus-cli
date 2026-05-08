@@ -2441,6 +2441,14 @@ fn handle(request: Request, registry: Registry) {
                 .trim_matches('/');
             handle_pod_readiness(request, pod);
         }
+        (Method::Get, p) if parse_pod_proxy_path(p).is_some() => {
+            let (pod_id, proxy_path) = parse_pod_proxy_path(p).expect("checked");
+            handle_pod_proxy(request, pod_id, proxy_path);
+        }
+        (Method::Post, p) if parse_pod_proxy_path(p).is_some() => {
+            let (pod_id, proxy_path) = parse_pod_proxy_path(p).expect("checked");
+            handle_pod_proxy(request, pod_id, proxy_path);
+        }
         // Per-pod env vars (manifest A.exist A3.5). Spawns `tytus agent
         // env --pod NN [--reveal-secrets] --json` and forwards the parsed
         // JSON. Provider does redaction + plan-tier gating; daemon is a
@@ -3645,6 +3653,140 @@ fn read_if_none_match(headers: &[Header]) -> Option<String> {
         }
     }
     None
+}
+
+fn parse_pod_proxy_path(path: &str) -> Option<(String, String)> {
+    let rest = path.strip_prefix("/api/pods/")?;
+    let (pod_id, suffix) = rest.split_once("/proxy/")?;
+    if pod_id.is_empty()
+        || !pod_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let proxy_path = format!("/{}", suffix.trim_start_matches('/'));
+    if !proxy_path.starts_with("/v1/") && proxy_path != "/v1" {
+        return None;
+    }
+    Some((pod_id.to_string(), proxy_path))
+}
+
+fn join_proxy_url(public_url: &str, proxy_path: &str) -> String {
+    format!("{}{}", public_url.trim_end_matches('/'), proxy_path)
+}
+
+fn handle_pod_proxy(mut request: Request, pod_id: String, proxy_path: String) {
+    let method = request.method().clone();
+    let snap = compute_state_snapshot();
+    let Some(slot) = snap.included.iter().find(|p| p.pod_id == pod_id) else {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({ "error": "pod_not_found", "pod": pod_id }),
+        );
+        return;
+    };
+    let Some(public_url) = slot.public_url.as_ref().filter(|s| !s.is_empty()) else {
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({ "error": "pod_public_url_missing", "pod": pod_id }),
+        );
+        return;
+    };
+    if slot.user_key.is_empty() {
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({ "error": "pod_user_key_missing", "pod": pod_id }),
+        );
+        return;
+    }
+
+    let mut body = Vec::new();
+    if let Err(e) = request.as_reader().read_to_end(&mut body) {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({ "error": "request_body_read_failed", "detail": e.to_string() }),
+        );
+        return;
+    }
+
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": "proxy_client_failed", "detail": e.to_string() }),
+            );
+            return;
+        }
+    };
+    let req_method = match method {
+        Method::Get => reqwest::Method::GET,
+        Method::Post => reqwest::Method::POST,
+        _ => {
+            respond_json(
+                request,
+                405,
+                &serde_json::json!({ "error": "method_not_allowed" }),
+            );
+            return;
+        }
+    };
+    let mut upstream = client
+        .request(req_method, join_proxy_url(public_url, &proxy_path))
+        .bearer_auth(&slot.user_key);
+    for h in request.headers() {
+        let name = h.field.as_str().as_str().to_ascii_lowercase();
+        if matches!(name.as_str(), "accept" | "content-type") {
+            upstream = upstream.header(name.as_str(), h.value.as_str());
+        }
+    }
+    if !body.is_empty() {
+        upstream = upstream.body(body);
+    }
+
+    let upstream_res = match upstream.send() {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(
+                request,
+                502,
+                &serde_json::json!({ "error": "pod_proxy_failed", "detail": e.to_string() }),
+            );
+            return;
+        }
+    };
+    let status = upstream_res.status().as_u16();
+    let content_type = upstream_res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let bytes = match upstream_res.bytes() {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(
+                request,
+                502,
+                &serde_json::json!({ "error": "pod_proxy_body_failed", "detail": e.to_string() }),
+            );
+            return;
+        }
+    };
+    let resp = Response::from_data(bytes.to_vec())
+        .with_status_code(StatusCode(status))
+        .with_header(header("Content-Type", &content_type))
+        .with_header(header("X-Content-Type-Options", "nosniff"));
+    let _ = request.respond(resp);
 }
 
 /// Build the rich state snapshot that the wizard's budget strip, the
@@ -8022,6 +8164,27 @@ mod tests {
         assert!(os_asset("/index.html").is_some());
         assert!(os_asset("/").is_some());
         assert!(os_asset("/assets/does-not-exist.js").is_none());
+    }
+    #[test]
+    fn pod_proxy_path_parser_accepts_only_v1_routes() {
+        assert_eq!(
+            parse_pod_proxy_path("/api/pods/p04/proxy/v1/models"),
+            Some(("p04".to_string(), "/v1/models".to_string()))
+        );
+        assert_eq!(
+            parse_pod_proxy_path("/api/pods/p04/proxy/v1/chat/completions"),
+            Some(("p04".to_string(), "/v1/chat/completions".to_string()))
+        );
+        assert!(parse_pod_proxy_path("/api/pods/p04/proxy/api/private").is_none());
+        assert!(parse_pod_proxy_path("/api/pods/../../proxy/v1/models").is_none());
+    }
+
+    #[test]
+    fn pod_proxy_url_join_preserves_pod_origin() {
+        assert_eq!(
+            join_proxy_url("https://slug-p04.tytus.traylinx.com/", "/v1/models"),
+            "https://slug-p04.tytus.traylinx.com/v1/models"
+        );
     }
 
     #[test]
