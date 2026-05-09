@@ -1,0 +1,14 @@
+# Vendored TytusOS text assets must keep byte-stable line endings across OSes.
+# The tray CSP hashes inline import maps from these bytes; Windows checkout CRLF
+# conversion breaks the hash contract.
+tray/web/os/**/*.html text eol=lf
+tray/web/os/**/*.js text eol=lf
+tray/web/os/**/*.css text eol=lf
+tray/web/os/**/*.json text eol=lf
+tray/web/os/**/*.svg text eol=lf
+tray/web/os/**/*.wasm binary
+tray/web/os/**/*.png binary
+tray/web/os/**/*.jpg binary
+tray/web/os/**/*.jpeg binary
+tray/web/os/**/*.ico binary
+tray/web/os/**/*.wav binary
