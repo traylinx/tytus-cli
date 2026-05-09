@@ -1161,6 +1161,336 @@ fn query_value(query: &str, key: &str) -> Option<String> {
     None
 }
 
+fn command_path(command: &str) -> Option<String> {
+    let output = Command::new("which").arg(command).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn command_version(command: &str) -> Option<String> {
+    let output = Command::new(command)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let raw = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr).to_string()
+    } else {
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    raw.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(120).collect::<String>())
+}
+
+fn local_tool(
+    id: &str,
+    label: &str,
+    command: Option<&str>,
+    kind: &str,
+    description: &str,
+) -> serde_json::Value {
+    let status = command
+        .and_then(command_path)
+        .map(|_| "available")
+        .unwrap_or("missing");
+    serde_json::json!({
+        "id": id,
+        "label": label,
+        "command": command,
+        "kind": kind,
+        "status": status,
+        "version": command.filter(|_| status == "available").and_then(command_version),
+        "description": description,
+    })
+}
+
+fn handle_local_tools(request: Request) {
+    let mut tools = Vec::new();
+    tools.push(serde_json::json!({
+        "id": "terminal",
+        "label": "Tytus Terminal",
+        "command": "shell",
+        "kind": "terminal",
+        "status": "available",
+        "version": null,
+        "description": "Browser terminal backed by the Tytus tray PTY bridge."
+    }));
+    for (id, label, command, kind, description) in [
+        ("pi", "pi", "pi", "ai-cli", "Local pi agent CLI."),
+        (
+            "opencode",
+            "OpenCode",
+            "opencode",
+            "ai-cli",
+            "Local OpenCode agent CLI.",
+        ),
+        ("codex", "Codex", "codex", "ai-cli", "Local Codex CLI."),
+        (
+            "claude",
+            "Claude",
+            "claude",
+            "ai-cli",
+            "Local Claude Code CLI.",
+        ),
+        ("gemini", "Gemini", "gemini", "ai-cli", "Local Gemini CLI."),
+        ("qwen", "Qwen", "qwen", "ai-cli", "Local Qwen Code CLI."),
+        ("aider", "Aider", "aider", "ai-cli", "Local Aider CLI."),
+        (
+            "goose",
+            "Goose",
+            "goose",
+            "ai-cli",
+            "Local Goose agent CLI.",
+        ),
+    ] {
+        tools.push(local_tool(id, label, Some(command), kind, description));
+    }
+    respond_json(request, 200, &serde_json::json!({ "tools": tools }));
+}
+
+fn makakoo_home() -> PathBuf {
+    std::env::var_os("MAKAKOO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join("MAKAKOO")))
+        .unwrap_or_else(|| PathBuf::from("/Users/sebastian/MAKAKOO"))
+}
+
+fn blender_skill_path() -> PathBuf {
+    makakoo_home().join("plugins/skill-ai-ml-blender-mcp/src/SKILL.md")
+}
+
+fn skill_summary(
+    id: &str,
+    title: &str,
+    description: &str,
+    driver: &str,
+    source: &str,
+    status: &str,
+    app_id: Option<&str>,
+    triggers: &[&str],
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "title": title,
+        "description": description,
+        "driver": driver,
+        "source": source,
+        "status": status,
+        "appId": app_id,
+        "triggers": triggers,
+    })
+}
+
+fn tytus_skill_summaries() -> Vec<serde_json::Value> {
+    let blender_status = if blender_skill_path().exists() {
+        "needs_setup"
+    } else {
+        "missing"
+    };
+    vec![
+        skill_summary(
+            "atomek.inspect-project",
+            "Inspect Atomek workspace",
+            "Use open files, project index, and Cortex context to answer or plan safely.",
+            "host-api",
+            "app",
+            "available",
+            Some("atomek"),
+            &["workspace", "files", "code", "plan"],
+        ),
+        skill_summary(
+            "local.terminal.open",
+            "Open local tool in Tytus Terminal",
+            "Launch allowlisted local CLIs through the existing tray terminal bridge.",
+            "terminal",
+            "system",
+            "available",
+            None,
+            &["terminal", "shell", "pi", "opencode", "codex", "claude"],
+        ),
+        skill_summary(
+            "juli3ta.create-song",
+            "Create music with JULI3TA",
+            "Route music creation intent to the JULI3TA app and its host-backed music pipeline.",
+            "tytus-app",
+            "app",
+            "available",
+            Some("juli3ta"),
+            &["music", "song", "track", "juli3ta"],
+        ),
+        skill_summary(
+            "blender-mcp.create-scene",
+            "Drive Blender via MCP",
+            "Use the installed Blender MCP skill when Blender and the MCP bridge are configured.",
+            "mcp",
+            "makakoo",
+            blender_status,
+            None,
+            &["blender", "3d", "scene", "model"],
+        ),
+    ]
+}
+
+fn skill_body_for(id: &str) -> Option<String> {
+    match id {
+        "atomek.inspect-project" => Some(
+            [
+                "# Atomek Project Inspection",
+                "- Use Atomek's open editors, selected files, semantic project context, and artifacts.",
+                "- Do not invent file contents. Ask Tytus host for context or tell the user what is missing.",
+                "- Proposed changes must become preview edits/artifacts before writes.",
+                "- Model selection stays in global AIL settings; never hardcode provider model IDs.",
+            ]
+            .join("\n"),
+        ),
+        "local.terminal.open" => Some(
+            [
+                "# Local Terminal Tool Launch",
+                "- Use `host.local.listTools()` to discover allowlisted local tools.",
+                "- Use `host.local.openTerminal()` to open the existing Tytus Terminal bridge.",
+                "- Do not execute arbitrary model-generated shell in the background.",
+                "- For background agents, wait for the safe local-job runner phase.",
+            ]
+            .join("\n"),
+        ),
+        "juli3ta.create-song" => Some(
+            [
+                "# JULI3TA Music App Skill",
+                "- Treat JULI3TA as a separate app; do not modify it from Atomek.",
+                "- Route user music intent through Tytus app/window context and host-backed endpoints.",
+                "- Avoid direct browser fetches to pod/tunnel origins; use the same-origin host bridge.",
+            ]
+            .join("\n"),
+        ),
+        "blender-mcp.create-scene" => Some(
+            fs::read_to_string(blender_skill_path()).unwrap_or_else(|_| {
+                [
+                    "# Blender MCP Skill",
+                    "- Blender MCP skill is not installed in this Makakoo home.",
+                    "- Show setup state instead of pretending Blender control exists.",
+                ]
+                .join("\n")
+            }),
+        ),
+        _ => None,
+    }
+}
+
+fn handle_skills_list(request: Request, query: &str) {
+    let app_id = query_value(query, "appId");
+    let source = query_value(query, "source");
+    let skills: Vec<serde_json::Value> = tytus_skill_summaries()
+        .into_iter()
+        .filter(|skill| {
+            let app_ok = app_id
+                .as_deref()
+                .map(|wanted| skill.get("appId").and_then(|v| v.as_str()) == Some(wanted))
+                .unwrap_or(true);
+            let source_ok = source
+                .as_deref()
+                .map(|wanted| skill.get("source").and_then(|v| v.as_str()) == Some(wanted))
+                .unwrap_or(true);
+            app_ok && source_ok
+        })
+        .collect();
+    respond_json(request, 200, &serde_json::json!({ "skills": skills }));
+}
+
+fn handle_skill_get(request: Request, path: &str) {
+    let id = path.trim_start_matches("/api/skills/").trim();
+    if id.is_empty() || id == "resolve" {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({ "error": "skill not found" }),
+        );
+        return;
+    }
+    let Some(summary) = tytus_skill_summaries()
+        .into_iter()
+        .find(|skill| skill.get("id").and_then(|v| v.as_str()) == Some(id))
+    else {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({ "error": "skill not found" }),
+        );
+        return;
+    };
+    let Some(body) = skill_body_for(id) else {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({ "error": "skill body not found" }),
+        );
+        return;
+    };
+    let mut pack = summary.as_object().cloned().unwrap_or_default();
+    pack.insert("body".to_string(), serde_json::Value::String(body));
+    respond_json(request, 200, &serde_json::Value::Object(pack));
+}
+
+#[derive(serde::Deserialize)]
+struct SkillResolveRequest {
+    prompt: Option<String>,
+    #[allow(dead_code)]
+    app_id: Option<String>,
+    #[allow(dead_code)]
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+}
+
+fn handle_skills_resolve(mut request: Request) {
+    let mut body = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+        respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+        return;
+    }
+    let parsed: SkillResolveRequest = match serde_json::from_str(&body) {
+        Ok(value) => value,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+            return;
+        }
+    };
+    let prompt = parsed.prompt.unwrap_or_default().to_lowercase();
+    let skills: Vec<serde_json::Value> = tytus_skill_summaries()
+        .into_iter()
+        .filter(|skill| {
+            let id = skill.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let description = skill
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let haystack = format!("{id} {description}").to_lowercase();
+            haystack
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|token| token.len() >= 3)
+                .any(|token| prompt.contains(token))
+                || skill
+                    .get("triggers")
+                    .and_then(|v| v.as_array())
+                    .map(|triggers| {
+                        triggers
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .any(|trigger| prompt.contains(trigger))
+                    })
+                    .unwrap_or(false)
+        })
+        .collect();
+    respond_json(request, 200, &serde_json::json!({ "skills": skills }));
+}
+
 #[derive(serde::Deserialize)]
 struct TerminalStartBody {
     command: Option<String>,
@@ -2586,6 +2916,19 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Delete, "/api/terminal/session") => {
             handle_terminal_stop(request, &query);
+        }
+        // ── Atomek computer/agent controller bridge ───────────────────
+        (Method::Get, "/api/local/tools") => {
+            handle_local_tools(request);
+        }
+        (Method::Get, "/api/skills") => {
+            handle_skills_list(request, &query);
+        }
+        (Method::Post, "/api/skills/resolve") => {
+            handle_skills_resolve(request);
+        }
+        (Method::Get, p) if p.starts_with("/api/skills/") => {
+            handle_skill_get(request, p);
         }
         // ── TytusOS Wave 5 (v0.5.4): garagetytus shared-folders parity ──
         (Method::Get, "/api/garagetytus/status") => {

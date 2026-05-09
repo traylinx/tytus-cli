@@ -528,6 +528,41 @@ pub fn stream(video_id: &str) -> Result<MusicStreamInfo, String> {
     if let Some(info) = cached(&STREAM_CACHE, &video_id, Duration::from_secs(90 * 60)) {
         return Ok(info);
     }
+    let info = match stream_url_fast(&video_id) {
+        Ok(fast_url) => MusicStreamInfo {
+            video_id,
+            stream_url: fast_url,
+            duration_ms: None,
+            title: None,
+            container: None,
+            codec: None,
+        },
+        Err(_) => stream_with_metadata(&video_id)?,
+    };
+    store_cache(&STREAM_CACHE, info.video_id.clone(), info.clone());
+    Ok(info)
+}
+
+fn stream_url_fast(video_id: &str) -> Result<String, String> {
+    let url = format!("https://www.youtube.com/watch?v={video_id}");
+    let stdout = run_ytdlp(&[
+        "-f",
+        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+        "--get-url",
+        "--no-playlist",
+        "--no-warnings",
+        &url,
+    ])?;
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| "yt-dlp returned no stream URL".to_string())
+        .map(str::to_string)
+}
+
+fn stream_with_metadata(video_id: &str) -> Result<MusicStreamInfo, String> {
+    let video_id = validate_video_id(video_id)?;
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let stdout = run_ytdlp(&[
         "-f",
@@ -550,7 +585,6 @@ pub fn stream(video_id: &str) -> Result<MusicStreamInfo, String> {
         container: info.ext,
         codec: info.acodec,
     };
-    store_cache(&STREAM_CACHE, info.video_id.clone(), info.clone());
     Ok(info)
 }
 

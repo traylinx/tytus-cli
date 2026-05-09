@@ -8,6 +8,7 @@ bumps are allowed to break compat.
 ## [Unreleased]
 
 ### Added
+- Tray now exposes same-origin local tool and skill registry endpoints (`/api/local/tools`, `/api/skills`) so Atomek/TytusOS apps can discover agent capabilities without browser-side shell access.
 - Atomek AI chat now routes through the host-owned `host.ai` substrate with persistent SQLite conversation tables and public AIL fallback via the tray proxy.
 - JULI3TA Library/Favorites/Playlists now sync to a tray-backed host-file snapshot at `~/Music/JULI3TA/.music-state.json`, so saved streamed songs survive browser profile loss and computer restarts.
 - Tytus tray exposes `GET/POST /api/juli3ta/music-state` for durable JULI3TA music-state restore, while JULI3TA keeps a browser localStorage backup as a secondary cache.
@@ -17,6 +18,7 @@ bumps are allowed to break compat.
 
 ### Fixed
 - Host AI now exposes `ai.memory.write` and records failed chat sends in the SQLite-backed AI outbox for retry/audit durability.
+- JULI3TA remote stream startup now resolves YouTube playback URLs through a fast `yt-dlp --get-url` path with the previous metadata resolve kept as fallback, preserving tray proxy safety while reducing first-play payload work.
 - TytusOS restored installed-app windows now survive browser reloads, so standalone JULI3TA/Forge windows remain open after refresh.
 - JULI3TA now receives live daemon state even if its host client boots before the shell bridge is wired, so it keeps using the remote AIL tunnel instead of falling back to “needs a stage”.
 - Tray-served TytusOS now binds to the fixed public contract `http://localhost:4242/` instead of a random `127.0.0.1:<port>` origin.
