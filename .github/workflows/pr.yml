@@ -11,14 +11,14 @@ on:
       tytus_os_ref:
         description: 'tytus-os ref to build for dist embedding checks'
         required: false
-        default: '2ffa8c6a2e5e68dceef49d8a417809e0c9453edc'
+        default: '2ffa8c621c553a5abb14a4b3d8d7c6a465e1c34f'
         type: string
 
 permissions:
   contents: read
 
 env:
-  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || '2ffa8c6a2e5e68dceef49d8a417809e0c9453edc' }}
+  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || '2ffa8c621c553a5abb14a4b3d8d7c6a465e1c34f' }}
 
 jobs:
   installer-contract:
@@ -67,10 +67,10 @@ jobs:
           assert "(\./)?" in powershell_installer
 
           web_index = Path("web/index.html").read_text()
-          assert "v0.6.14-beta.11" in web_index
+          assert "v0.6.14-beta.12" in web_index
           assert "PUBLIC-BETA-UNSIGNED" in web_index
           assert "Not production GA" in web_index
-          assert "TYTUS_RELEASE_TAG=v0.6.14-beta.11" in web_index
+          assert "TYTUS_RELEASE_TAG=v0.6.14-beta.12" in web_index
 
           sync_script = Path("scripts/sync-tytus-os-dist.sh").read_text()
           assert "command -v shasum" in sync_script
