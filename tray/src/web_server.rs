@@ -3771,21 +3771,27 @@ fn handle_pod_proxy(mut request: Request, pod_id: String, proxy_path: String) {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    let bytes = match upstream_res.bytes() {
-        Ok(b) => b,
-        Err(e) => {
-            respond_json(
-                request,
-                502,
-                &serde_json::json!({ "error": "pod_proxy_body_failed", "detail": e.to_string() }),
-            );
-            return;
-        }
+    let is_event_stream = content_type
+        .split(';')
+        .next()
+        .map(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+        .unwrap_or(false);
+    let len = if is_event_stream {
+        None
+    } else {
+        upstream_res
+            .content_length()
+            .and_then(|n| usize::try_from(n).ok())
     };
-    let resp = Response::from_data(bytes.to_vec())
-        .with_status_code(StatusCode(status))
-        .with_header(header("Content-Type", &content_type))
-        .with_header(header("X-Content-Type-Options", "nosniff"));
+    let mut headers = vec![
+        header("Content-Type", &content_type),
+        header("X-Content-Type-Options", "nosniff"),
+    ];
+    if is_event_stream {
+        headers.push(header("Cache-Control", "no-cache"));
+        headers.push(header("X-Accel-Buffering", "no"));
+    }
+    let resp = Response::new(StatusCode(status), headers, upstream_res, len, None);
     let _ = request.respond(resp);
 }
 
