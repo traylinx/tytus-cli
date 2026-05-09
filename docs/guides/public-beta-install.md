@@ -1,6 +1,6 @@
 # Public Beta Install Guide
 
-> For `v0.6.14-beta.9`. This is a technical preview, not production GA.
+> For `v0.6.14-beta.10`. This is a technical preview, not production GA.
 
 ## Start here
 
@@ -68,7 +68,7 @@ Unzip it and run from PowerShell. Windows is still CLI/MCP technical preview: MS
 Optional PowerShell installer:
 
 ```powershell
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.9"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.10"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 ## Command-line installers
@@ -76,13 +76,13 @@ $env:TYTUS_RELEASE_TAG="v0.6.14-beta.9"; irm https://get.traylinx.com/install.ps
 macOS/Linux:
 
 ```bash
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.9 sh
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.10 sh
 ```
 
 Windows:
 
 ```powershell
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.9"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.10"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 ## First-run wizard
