@@ -11,14 +11,14 @@ on:
       tytus_os_ref:
         description: 'tytus-os ref to build for dist embedding checks'
         required: false
-        default: 'b5f302b60bf50a2d097ede848a660855d148a79d'
+        default: '30aed19c13b618c357f4c8919a434e96726fd3a0'
         type: string
 
 permissions:
   contents: read
 
 env:
-  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || 'b5f302b60bf50a2d097ede848a660855d148a79d' }}
+  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || '30aed19c13b618c357f4c8919a434e96726fd3a0' }}
 
 jobs:
   installer-contract:
