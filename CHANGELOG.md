@@ -9,16 +9,17 @@ bumps are allowed to break compat.
 
 ### Added
 - Tray local bridge can now launch supervised local jobs and stream job events for TytusOS/Atomek agent workflows.
-- Bundled TytusOS dist refreshed from `tytus-os` `v1.0.6-apps-platform`, including JULI3TA 0.3.8 and Atomek 0.4.6 fallback/catalog pins.
+- Bundled TytusOS dist refreshed from `tytus-os` `v1.0.7-apps-platform`, including JULI3TA 0.3.9 and Atomek 0.4.7 fallback/catalog pins.
 - Tray now exposes same-origin local tool and skill registry endpoints (`/api/local/tools`, `/api/skills`) so Atomek/TytusOS apps can discover agent capabilities without browser-side shell access.
 - Atomek AI chat now routes through the host-owned `host.ai` substrate with persistent SQLite conversation tables and public AIL fallback via the tray proxy.
 - JULI3TA Library/Favorites/Playlists now sync to a tray-backed host-file snapshot at `~/Music/JULI3TA/.music-state.json`, so saved streamed songs survive browser profile loss and computer restarts.
 - Tytus tray exposes `GET/POST /api/juli3ta/music-state` for durable JULI3TA music-state restore, while JULI3TA keeps a browser localStorage backup as a secondary cache.
-- Public beta download page now points users at `v0.6.14-beta.12` with direct unsigned `.pkg` / `.deb` links, one-file install guidance, and explicit GA warnings.
+- Public beta download page now points users at `v0.6.14-beta.13` with direct unsigned `.pkg` / `.deb` links, one-file install guidance, and explicit GA warnings.
 - Added `docs/guides/public-beta-install.md` and refreshed user manuals for one-file pkg/deb install, unsigned OS warnings, and setup wizard flow.
 - Installers now support `TYTUS_RELEASE_TAG` so public beta users can install a checksum-verified pre-release without source builds.
 
 ### Fixed
+- Standalone JULI3TA account AIL calls now route through the tray same-origin pod proxy, avoiding browser CORS failures against public pod gateway URLs.
 - Host AI now exposes `ai.memory.write` and records failed chat sends in the SQLite-backed AI outbox for retry/audit durability.
 - JULI3TA remote stream startup now resolves YouTube playback URLs through a fast `yt-dlp --get-url` path with the previous metadata resolve kept as fallback, preserving tray proxy safety while reducing first-play payload work.
 - TytusOS restored installed-app windows now survive browser reloads, so standalone JULI3TA/Forge windows remain open after refresh.

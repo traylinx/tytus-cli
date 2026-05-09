@@ -1162,9 +1162,20 @@ fn query_value(query: &str, key: &str) -> Option<String> {
 }
 
 fn command_path(command: &str) -> Option<String> {
+    // Fast, side-effect-free discovery. Do not use an interactive shell here:
+    // Sebastian's zshrc can run nvm/agent hooks that block the single-threaded
+    // tray HTTP server. This endpoint must never hang Atomek.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let enriched_path = format!(
+        "/opt/homebrew/bin:/usr/local/bin:{}/.local/bin:{}/.cargo/bin:{}",
+        std::env::var("HOME").unwrap_or_default(),
+        std::env::var("HOME").unwrap_or_default(),
+        path
+    );
     let output = Command::new("/bin/zsh")
-        .arg("-ic")
+        .arg("-fc")
         .arg(format!("command -v {command}"))
+        .env("PATH", enriched_path)
         .output()
         .ok()?;
     if !output.status.success() {
@@ -1177,24 +1188,6 @@ fn command_path(command: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn command_version(command: &str) -> Option<String> {
-    let output = Command::new("/bin/zsh")
-        .arg("-ic")
-        .arg(format!("{command} --version"))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()?;
-    let raw = if output.stdout.is_empty() {
-        String::from_utf8_lossy(&output.stderr).to_string()
-    } else {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    };
-    raw.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.chars().take(120).collect::<String>())
-}
 
 fn local_tool(
     id: &str,
@@ -1213,7 +1206,9 @@ fn local_tool(
         "command": command,
         "kind": kind,
         "status": status,
-        "version": command.filter(|_| status == "available").and_then(command_version),
+        // Do not run `<tool> --version` here. Some agent CLIs/aliases can block
+        // or open interactive auth flows; discovery must stay fast and side-effect-free.
+        "version": null,
         "description": description,
     })
 }

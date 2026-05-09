@@ -1,4 +1,4 @@
-import{r as s,j as t,f as F,P as U,h as B,b as V,C as X,D as Z,T as ee}from"./index-CGZxDBHI.js";const te=r=>({id:r.id,name:r.name,durationMs:r.duration_ms,createdAt:r.created_at,mimeType:r.mime_type,audioDataUrl:r.audio_data_url}),re=async r=>(await r.query(`SELECT id, name, duration_ms, created_at, mime_type, audio_data_url
+import{r as s,j as t,f as F,P as U,h as B,b as V,C as X,D as Z,T as ee}from"./index-BdwZcwSD.js";const te=r=>({id:r.id,name:r.name,durationMs:r.duration_ms,createdAt:r.created_at,mimeType:r.mime_type,audioDataUrl:r.audio_data_url}),re=async r=>(await r.query(`SELECT id, name, duration_ms, created_at, mime_type, audio_data_url
        FROM app_voice_recorder_recordings
       ORDER BY created_at DESC`)).map(te),ne=async(r,a)=>{await r.run(`INSERT OR REPLACE INTO app_voice_recorder_recordings
        (id, name, duration_ms, created_at, mime_type, audio_data_url)
