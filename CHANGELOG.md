@@ -9,7 +9,7 @@ bumps are allowed to break compat.
 
 ### Added
 - Tray local bridge can now launch supervised local jobs and stream job events for TytusOS/Atomek agent workflows.
-- Bundled TytusOS dist refreshed from `tytus-os` `v1.0.5-apps-platform`, including JULI3TA 0.3.8 fallback/catalog pins.
+- Bundled TytusOS dist refreshed from `tytus-os` `v1.0.6-apps-platform`, including JULI3TA 0.3.8 and Atomek 0.4.6 fallback/catalog pins.
 - Tray now exposes same-origin local tool and skill registry endpoints (`/api/local/tools`, `/api/skills`) so Atomek/TytusOS apps can discover agent capabilities without browser-side shell access.
 - Atomek AI chat now routes through the host-owned `host.ai` substrate with persistent SQLite conversation tables and public AIL fallback via the tray proxy.
 - JULI3TA Library/Favorites/Playlists now sync to a tray-backed host-file snapshot at `~/Music/JULI3TA/.music-state.json`, so saved streamed songs survive browser profile loss and computer restarts.
