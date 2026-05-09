@@ -30,7 +30,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1116,7 +1116,7 @@ fn random_job_id() -> String {
 #[cfg(unix)]
 struct TerminalSession {
     writer: Arc<Mutex<File>>,
-    output: Arc<Mutex<String>>,
+    output: Arc<(Mutex<String>, Condvar)>,
     alive: Arc<Mutex<bool>>,
     exit_code: Arc<Mutex<Option<i32>>>,
     pid: u32,
@@ -1365,7 +1365,7 @@ __tytus_prompt_title"#;
     drop(slave_file);
 
     let id = random_job_id();
-    let output = Arc::new(Mutex::new(String::new()));
+    let output = Arc::new((Mutex::new(String::new()), Condvar::new()));
     let alive = Arc::new(Mutex::new(true));
     let exit_code = Arc::new(Mutex::new(None));
     let pid = child.id();
@@ -1389,7 +1389,9 @@ __tytus_prompt_title"#;
                 Ok(0) => break,
                 Ok(n) => {
                     let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                    output.lock().unwrap().push_str(&text);
+                    let (output_lock, output_ready) = &*output;
+                    output_lock.lock().unwrap().push_str(&text);
+                    output_ready.notify_all();
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
@@ -1397,10 +1399,15 @@ __tytus_prompt_title"#;
         }
     });
 
+    let wait_id = id.clone();
     thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
         *exit_code.lock().unwrap() = Some(code);
         *alive.lock().unwrap() = false;
+        if let Some(session) = terminal_sessions().lock().unwrap().get(&wait_id).cloned() {
+            let (_, output_ready) = &*session.output;
+            output_ready.notify_all();
+        }
     });
 
     Ok(id)
@@ -1434,12 +1441,22 @@ fn handle_terminal_read(request: Request, query: &str) {
             );
             return;
         };
-        let output = {
-            let mut guard = session.output.lock().unwrap();
-            let text = guard.clone();
-            guard.clear();
-            text
-        };
+        let (output_lock, output_ready) = &*session.output;
+        let mut guard = output_lock.lock().unwrap();
+        if guard.is_empty() && *session.alive.lock().unwrap() {
+            // Long-poll instead of client-side hammering. The browser keeps a
+            // single pending request while the PTY is idle; reader/exit threads
+            // notify this Condvar immediately when bytes arrive or the child
+            // exits. Timeout is only a keepalive so proxies/devtools don't
+            // make the terminal look dead.
+            let (g, _) = output_ready
+                .wait_timeout(guard, Duration::from_secs(30))
+                .unwrap();
+            guard = g;
+        }
+        let output = guard.clone();
+        guard.clear();
+        drop(guard);
         let alive = *session.alive.lock().unwrap();
         let exit_code = *session.exit_code.lock().unwrap();
         respond_json(
