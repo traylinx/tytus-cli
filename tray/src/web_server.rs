@@ -1162,7 +1162,11 @@ fn query_value(query: &str, key: &str) -> Option<String> {
 }
 
 fn command_path(command: &str) -> Option<String> {
-    let output = Command::new("which").arg(command).output().ok()?;
+    let output = Command::new("/bin/zsh")
+        .arg("-ic")
+        .arg(format!("command -v {command}"))
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1174,8 +1178,9 @@ fn command_path(command: &str) -> Option<String> {
 }
 
 fn command_version(command: &str) -> Option<String> {
-    let output = Command::new(command)
-        .arg("--version")
+    let output = Command::new("/bin/zsh")
+        .arg("-ic")
+        .arg(format!("{command} --version"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -1243,6 +1248,7 @@ fn handle_local_tools(request: Request) {
         ),
         ("gemini", "Gemini", "gemini", "ai-cli", "Local Gemini CLI."),
         ("qwen", "Qwen", "qwen", "ai-cli", "Local Qwen Code CLI."),
+        ("kimi", "Kimi", "kimi", "ai-cli", "Local Kimi agent CLI."),
         ("aider", "Aider", "aider", "ai-cli", "Local Aider CLI."),
         (
             "goose",
@@ -1266,6 +1272,15 @@ fn makakoo_home() -> PathBuf {
 
 fn blender_skill_path() -> PathBuf {
     makakoo_home().join("plugins/skill-ai-ml-blender-mcp/src/SKILL.md")
+}
+
+fn tytus_apps_root() -> PathBuf {
+    std::env::var_os("TYTUS_APPS_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Projects/tytus-apps"))
+        })
+        .unwrap_or_else(|| PathBuf::from("/Users/sebastian/Projects/tytus-apps"))
 }
 
 fn skill_summary(
@@ -1296,7 +1311,8 @@ fn tytus_skill_summaries() -> Vec<serde_json::Value> {
     } else {
         "missing"
     };
-    vec![
+    let mut skills = manifest_skill_summaries();
+    for skill in [
         skill_summary(
             "atomek.inspect-project",
             "Inspect Atomek workspace",
@@ -1337,10 +1353,105 @@ fn tytus_skill_summaries() -> Vec<serde_json::Value> {
             None,
             &["blender", "3d", "scene", "model"],
         ),
-    ]
+    ] {
+        let id = skill.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !skills
+            .iter()
+            .any(|existing| existing.get("id").and_then(|v| v.as_str()) == Some(id))
+        {
+            skills.push(skill);
+        }
+    }
+    skills
+}
+
+fn manifest_skill_summaries() -> Vec<serde_json::Value> {
+    let root = tytus_apps_root();
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let manifest_path = entry.path().join("tytus-app.json");
+        let Ok(raw) = fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let app_id = manifest
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let Some(skills) = manifest
+            .get("contributes")
+            .and_then(|v| v.get("agentSkills"))
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        for skill in skills {
+            let Some(id) = skill.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let mut summary = skill.as_object().cloned().unwrap_or_default();
+            summary.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+            summary
+                .entry("source".to_string())
+                .or_insert_with(|| serde_json::Value::String("app".to_string()));
+            summary
+                .entry("status".to_string())
+                .or_insert_with(|| serde_json::Value::String("available".to_string()));
+            summary.insert(
+                "appId".to_string(),
+                serde_json::Value::String(app_id.to_string()),
+            );
+            out.push(serde_json::Value::Object(summary));
+        }
+    }
+    out
+}
+
+fn manifest_skill_body(id: &str) -> Option<String> {
+    let root = tytus_apps_root();
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let app_dir = entry.path();
+        let manifest_path = app_dir.join("tytus-app.json");
+        let Ok(raw) = fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(skills) = manifest
+            .get("contributes")
+            .and_then(|v| v.get("agentSkills"))
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        for skill in skills {
+            if skill.get("id").and_then(|v| v.as_str()) != Some(id) {
+                continue;
+            }
+            let skill_url = skill.get("skillUrl").and_then(|v| v.as_str())?;
+            if skill_url.starts_with("http://")
+                || skill_url.starts_with("https://")
+                || skill_url.contains("..")
+            {
+                return Some(format!("# {id}\n\nRemote or unsafe skillUrl is not loaded by local tray: `{skill_url}`"));
+            }
+            return fs::read_to_string(app_dir.join(skill_url)).ok();
+        }
+    }
+    None
 }
 
 fn skill_body_for(id: &str) -> Option<String> {
+    if let Some(body) = manifest_skill_body(id) {
+        return Some(body);
+    }
     match id {
         "atomek.inspect-project" => Some(
             [
@@ -1489,6 +1600,191 @@ fn handle_skills_resolve(mut request: Request) {
         })
         .collect();
     respond_json(request, 200, &serde_json::json!({ "skills": skills }));
+}
+
+#[derive(serde::Deserialize)]
+struct LocalJobRequest {
+    #[serde(rename = "toolId")]
+    tool_id: String,
+    prompt: String,
+    cwd: Option<String>,
+    context: Option<String>,
+}
+
+struct LocalJobSpec {
+    bin: String,
+    args: Vec<String>,
+    stdin: Option<String>,
+    envs: Vec<(String, String)>,
+}
+
+fn local_job_prompt(body: &LocalJobRequest) -> Result<String, String> {
+    let prompt = body.prompt.trim();
+    if prompt.is_empty() {
+        return Err("prompt cannot be empty".to_string());
+    }
+    let mut full = String::new();
+    if let Some(context) = body
+        .context
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        full.push_str("Tytus context:\n");
+        full.push_str(context);
+        full.push_str("\n\nUser task:\n");
+    }
+    full.push_str(prompt);
+    if full.len() > 24_000 {
+        full.truncate(24_000);
+        full.push_str("\n\n[truncated by Tytus local job runner]");
+    }
+    Ok(full)
+}
+
+fn local_job_cwd(cwd: Option<&str>) -> PathBuf {
+    cwd.map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(crate::workspace::ensure_tytus_home)
+}
+
+fn local_job_spec(tool_id: &str, prompt: String) -> Result<LocalJobSpec, String> {
+    let spec = match tool_id {
+        "codex" => LocalJobSpec {
+            bin: "codex".to_string(),
+            args: vec![
+                "exec".to_string(),
+                "--sandbox".to_string(),
+                "read-only".to_string(),
+                "--skip-git-repo-check".to_string(),
+                "-".to_string(),
+            ],
+            stdin: Some(prompt),
+            envs: vec![],
+        },
+        "claude" => LocalJobSpec {
+            bin: "claude".to_string(),
+            args: vec![
+                "--print".to_string(),
+                "--permission-mode".to_string(),
+                "plan".to_string(),
+                "--output-format".to_string(),
+                "text".to_string(),
+                prompt,
+            ],
+            stdin: None,
+            envs: vec![],
+        },
+        "opencode" => LocalJobSpec {
+            bin: "opencode".to_string(),
+            args: vec!["run".to_string(), prompt],
+            stdin: None,
+            envs: vec![],
+        },
+        "gemini" => LocalJobSpec {
+            bin: "gemini".to_string(),
+            args: vec![
+                "--prompt".to_string(),
+                prompt,
+                "--approval-mode".to_string(),
+                "plan".to_string(),
+                "--output-format".to_string(),
+                "text".to_string(),
+            ],
+            stdin: None,
+            envs: vec![],
+        },
+        "qwen" => LocalJobSpec {
+            bin: "qwen".to_string(),
+            args: vec![
+                "--bare".to_string(),
+                "--approval-mode".to_string(),
+                "plan".to_string(),
+                "--output-format".to_string(),
+                "text".to_string(),
+                prompt,
+            ],
+            stdin: None,
+            envs: vec![],
+        },
+        "aider" => LocalJobSpec {
+            bin: "aider".to_string(),
+            args: vec![
+                "--yes".to_string(),
+                "--dry-run".to_string(),
+                "--no-auto-commits".to_string(),
+                "--message".to_string(),
+                prompt,
+            ],
+            stdin: None,
+            envs: vec![],
+        },
+        "pi" | "kimi" => {
+            let prompt_path =
+                std::env::temp_dir().join(format!("tytus-local-job-{}.txt", random_job_id()));
+            fs::write(&prompt_path, prompt)
+                .map_err(|e| format!("failed to write prompt file: {e}"))?;
+            LocalJobSpec {
+                bin: "/bin/zsh".to_string(),
+                args: vec![
+                    "-ic".to_string(),
+                    format!("{tool_id} < \"$TYTUS_LOCAL_JOB_PROMPT\""),
+                ],
+                stdin: None,
+                envs: vec![(
+                    "TYTUS_LOCAL_JOB_PROMPT".to_string(),
+                    prompt_path.to_string_lossy().to_string(),
+                )],
+            }
+        }
+        _ => return Err("unsupported local job tool".to_string()),
+    };
+    Ok(spec)
+}
+
+fn handle_local_job_start(request: Request, registry: &Registry) {
+    let (request, body) = match parse_json_body::<LocalJobRequest>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e }));
+            return;
+        }
+    };
+    let prompt = match local_job_prompt(&body) {
+        Ok(prompt) => prompt,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e }));
+            return;
+        }
+    };
+    let spec = match local_job_spec(&body.tool_id, prompt) {
+        Ok(spec) => spec,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e }));
+            return;
+        }
+    };
+    if command_path(&spec.bin).is_none() && !Path::new(&spec.bin).exists() {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({ "error": format!("tool `{}` is not available", body.tool_id) }),
+        );
+        return;
+    }
+    let cwd = local_job_cwd(body.cwd.as_deref());
+    let (job_id, job) = registry.create();
+    spawn_external_command_with_options(job, spec.bin, spec.args, spec.stdin, spec.envs, Some(cwd));
+    respond_json(
+        request,
+        202,
+        &serde_json::json!({
+            "id": job_id,
+            "toolId": body.tool_id,
+            "status": "running",
+            "streamUrl": format!("/api/jobs/{}/stream", job_id),
+        }),
+    );
 }
 
 #[derive(serde::Deserialize)]
@@ -2920,6 +3216,9 @@ fn handle(request: Request, registry: Registry) {
         // ── Atomek computer/agent controller bridge ───────────────────
         (Method::Get, "/api/local/tools") => {
             handle_local_tools(request);
+        }
+        (Method::Post, "/api/local/jobs") => {
+            handle_local_job_start(request, &registry);
         }
         (Method::Get, "/api/skills") => {
             handle_skills_list(request, &query);
@@ -4923,14 +5222,34 @@ fn resolve_garagetytus_binary_path() -> Option<PathBuf> {
 /// parameterized over the binary path so we can spawn any
 /// garagetytus-* helper.
 fn spawn_external_command(job: Arc<Mutex<Job>>, bin: String, args: Vec<String>) {
+    spawn_external_command_with_options(job, bin, args, None, vec![], None);
+}
+
+fn spawn_external_command_with_options(
+    job: Arc<Mutex<Job>>,
+    bin: String,
+    args: Vec<String>,
+    stdin_text: Option<String>,
+    envs: Vec<(String, String)>,
+    cwd: Option<PathBuf>,
+) {
     thread::spawn(move || {
         let mut cmd = Command::new(&bin);
         for a in &args {
             cmd.arg(a);
         }
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        if stdin_text.is_some() {
+            cmd.stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -4945,6 +5264,12 @@ fn spawn_external_command(job: Arc<Mutex<Job>>, bin: String, args: Vec<String>) 
             }
         };
         job.lock().unwrap().child_pid = Some(child.id());
+
+        if let Some(text) = stdin_text {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+        }
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
