@@ -140,13 +140,21 @@ your-tool-here
 
 ## Available Models
 
+AIL model IDs are gateway aliases. Treat the list returned by the gateway/global AIL configuration as source of truth; do not hardcode provider model names inside apps.
+
+Common aliases:
+
 | Model | What it does | Use for |
 |---|---|---|
-| `ail-compound` | Text, vision, audio (MiniMax M2.7) | General coding, chat, analysis |
-| `ail-image` | Image generation (MiniMax image-01) | Creating images |
-| `ail-embed` | Embeddings (mistral-embed) | Vector search, RAG |
+| `ail-compound` | Text, vision, audio through the configured AIL route | General coding, chat, analysis |
+| `ail-image` | Image generation through the configured AIL route | Creating images |
+| `ail-embed` | Embeddings through the configured AIL route | Vector search, RAG |
 
 ---
+
+## Atomek Computer / Agents
+
+TytusOS also exposes installed local tools from Atomek. Open **Atomek -> Computer / Agents** to launch the Tytus terminal or allowlisted local CLIs with the active file/folder context. This is the right path for local computer resources. Do not make browser apps call local shells or remote pod URLs directly.
 
 ## The Tray Icon Shortcut
 

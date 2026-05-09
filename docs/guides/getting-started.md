@@ -40,12 +40,12 @@ Checksum-verified command-line install is also available:
 
 ```bash
 # macOS / Linux public beta
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.15 sh
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.19 sh
 ```
 
 ```powershell
 # Windows public beta preview
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.15"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.19"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 **What the installer does:**
@@ -64,7 +64,7 @@ cargo install --path cli --bin tytus --bin tytus-mcp
 
 ## Platform notes
 
-| Platform | v0.6.14-beta.15 status |
+| Platform | v0.6.14-beta.19 status |
 |---|---|
 | macOS | Public beta unsigned pkg for Apple Silicon and Intel. Full CLI + tray + TytusOS path. |
 | Linux | Public beta unsigned deb for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, and desktop entries. |
@@ -123,7 +123,7 @@ tytus tray install
 open -a Tytus  # macOS
 ```
 
-From TytusOS you can use Pod Inspector, Files, Channels, Settings, Terminal, and app workflows without remembering CLI commands. The tray opens TytusOS by default; legacy Tower is hidden rollback only.
+From TytusOS you can use Pod Inspector, Files, Channels, Settings, Terminal, Atomek, and app workflows without remembering CLI commands. Atomek is the editor/chat/workbench for local files and Computer / Agents local-tool control. The tray opens TytusOS by default; legacy Tower is hidden rollback only.
 
 ---
 

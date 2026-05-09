@@ -88,6 +88,23 @@ Now every new terminal has `OPENAI_API_KEY` and `OPENAI_BASE_URL` set. Any tool 
 
 ---
 
+## "I want to edit files and use local agents from TytusOS"
+
+```bash
+tytus tray start
+tytus open
+```
+
+Then open **Atomek**. Use **Open Folder** to select a local project. Use chat with the active-file context chip for explanations or patch previews. Use **Computer / Agents** to open the Tytus terminal or launch installed local CLIs such as pi, OpenCode, Codex, Claude Code, Gemini, Qwen, Kimi, or Aider when they are available.
+
+Rules to remember:
+
+- Atomek uses the host bridge, not direct browser fetches to remote pod/model URLs.
+- Atomek uses global AIL model settings, not hardcoded app model IDs.
+- Agent output should become artifacts or preview edits before files are written.
+
+---
+
 ## "I want to run a command inside my pod"
 
 ```bash
@@ -171,7 +188,7 @@ You can't share pods (each user gets their own key). But you can share the setup
 # Then they open Tytus and follow the setup wizard.
 
 # Command-line beta path, if they prefer terminal:
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.15 sh
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.19 sh
 tytus setup
 ```
 

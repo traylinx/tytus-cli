@@ -28,6 +28,7 @@ ORDER=(
     "launcher.md"
     "keyboard-shortcuts.md"
     "files.md"
+    "atomek.md"
     "settings.md"
     "apps-catalog.md"
     "troubleshooting.md"

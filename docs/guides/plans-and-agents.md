@@ -60,13 +60,15 @@ Your stable URL and API key remain the same after the switch.
 
 ## Models
 
-Your pod gateway exposes these models via the OpenAI-compatible API:
+Your pod gateway exposes AIL aliases via the OpenAI-compatible API. These aliases are configured globally by the selected AIL route. Apps should discover or receive the model list from the gateway/host, not hardcode provider model names.
 
-| Model ID | Backed by | Capabilities | Use for |
-|---|---|---|---|
-| `ail-compound` | MiniMax M2.7 | Text, vision, audio | Coding, chat, analysis (default) |
-| `ail-image` | MiniMax image-01 | Image generation | Creating images from text |
-| `ail-embed` | mistral-embed | Embeddings | Vector search, RAG applications |
+Common aliases:
+
+| Model ID | Capabilities | Use for |
+|---|---|---|
+| `ail-compound` | Text, vision, audio through the configured AIL route | Coding, chat, analysis |
+| `ail-image` | Image generation through the configured AIL route | Creating images from text |
+| `ail-embed` | Embeddings through the configured AIL route | Vector search, RAG applications |
 
 ### Using a specific model
 
@@ -85,9 +87,9 @@ client = OpenAI(base_url="http://10.42.42.1:18080/v1", api_key="sk-tytus-user-..
 response = client.chat.completions.create(model="ail-compound", messages=[...])
 ```
 
-### What models are NOT available
+### Model source of truth
 
-Your pod runs specific models from the SwitchAILocal gateway. Standard model IDs like `gpt-4`, `claude-3`, `llama-3` are **not available**. If a tool asks for a model, use `ail-compound`.
+Use the aliases returned by the gateway/model list or global AIL configuration. If a tool asks for a default chat model, `ail-compound` is the normal alias. Do not document a provider model as permanent unless it comes from current AIL configuration.
 
 ---
 

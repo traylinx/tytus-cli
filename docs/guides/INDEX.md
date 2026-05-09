@@ -9,6 +9,7 @@ Welcome to Tytus — your private AI pod, driven from any terminal.
 | [Public Beta Install](public-beta-install.md) | One-file beta installers, OS warnings, and first wizard run |
 | [Getting Started](getting-started.md) | Install, setup, first connection — 2 minutes to a working pod |
 | [Use with AI Tools](use-with-ai-tools.md) | Claude Code, Cursor, OpenCode, Gemini, Aider, Vibe — one pod, every tool |
+| [Atomek Workbench](atomek-workbench.md) | TytusOS editor, chat, artifacts, Computer / Agents, local app skills |
 | [Plans, Agents, and Models](plans-and-agents.md) | Subscription tiers, nemoclaw vs hermes, available models |
 | [Auto-Start and Daemon](autostart-and-daemon.md) | Survive reboots, background token refresh, tray icon |
 | [Common Use Cases](common-use-cases.md) | Copy-paste recipes for real-world scenarios |

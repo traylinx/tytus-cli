@@ -60,6 +60,8 @@ If the top bar says **Session expired**, your pods are still running. Open **Set
 | Copy OpenAI-compatible env vars | Pod Inspector -> Copy env |
 | Browse local workspace | Files -> Tytus Home |
 | Browse a pod workspace | Files -> Pod NN workspace |
+| Edit local files and ask AI with file context | Atomek |
+| Launch local agents with active file context | Atomek -> Computer / Agents |
 | Configure Telegram/Discord/Slack/etc. | Channels |
 | Fix expired login | Settings -> Daemon |
 | Check shared folders | Settings -> Sharing or Files -> Shared |
@@ -93,6 +95,7 @@ Real production surfaces:
 - Files over Tytus Home, shared folders, and pod workspaces
 - Channels setup
 - Terminal backed by the host shell through the tray daemon
+- Atomek workbench for local files, chat, artifacts, app skills, and local Computer / Agents
 - Settings for account, daemon, sharing, appearance, dock, language, privacy, updates
 - Music Creator and other Tytus apps that use the included gateway
 
@@ -472,7 +475,7 @@ The shortcut router lives at `app/src/lib/shortcuts.ts`. It dispatches by scope 
 
 # Files
 
-Files is the Finder-like browser for Tytus. It covers local Tytus Home, shared folders, and pod workspaces.
+Files is the Finder-like browser for Tytus. It covers local Tytus Home, shared folders, and pod workspaces. Use Atomek when you need an editor, markdown preview, chat context, patch previews, or local agent work against those files.
 
 ## Sources
 
@@ -496,6 +499,18 @@ Files is the Finder-like browser for Tytus. It covers local Tytus Home, shared f
 
 A missing pod inbox or downloads directory should render as a friendly empty state, not raw CLI stderr. If you see `tytus ls: no such path`, report it as a Files empty-state bug.
 
+## Files vs Atomek
+
+| Need | Use |
+|---|---|
+| Browse or move through Tytus Home, Shared, Inbox, Outbox, Downloads | Files |
+| Open a local folder for editing | Atomek |
+| Ask AI about the active file | Atomek chat |
+| Run tests or local tools with folder context | Atomek -> Computer / Agents or Terminal |
+| Inspect generated artifacts and patch previews | Atomek Outputs |
+
+Files owns broad navigation. Atomek owns editing and agent interaction. Do not duplicate full editor behavior in Files.
+
 ## Safety
 
 File operations must be root-anchored to the selected source. Path traversal, symlink escape, null bytes, and double-encoded traversal must be rejected by daemon-side tests before write operations ship broadly.
@@ -503,6 +518,161 @@ File operations must be root-anchored to the selected source. Path traversal, sy
 ## Shared folders
 
 Shared folders use the account-level sharing system. Manage global defaults and diagnostics in **Settings -> Sharing**. Use Files -> Shared for browsing/opening the configured source.
+
+
+<!-- ==== atomek.md ==== -->
+
+# Atomek
+
+Atomek is the TytusOS workbench for local files, code, markdown, chat, artifacts, and local computer agents. It runs inside TytusOS, but it is published as its own Tytus app so it can move faster than the OS shell.
+
+Use Atomek when you want to open a real folder, inspect or edit files, ask an AI about the active file, preview patches, or launch an installed local agent with the same context.
+
+## Open files and folders
+
+Atomek uses the browser File System Access API when the browser supports it.
+
+Normal flow:
+
+1. Open **Atomek** from the launcher or dock.
+2. Click **Open Folder** or **Open File**.
+3. Pick the local folder or file in the browser permission picker.
+4. The Explorer shows the selected tree and recent folders.
+5. Click a file to open it in a tab.
+
+Folder rows are clickable. Use the chevron to expand or collapse child folders. Text files open in the Monaco editor. Markdown files can be edited and previewed.
+
+## Editing
+
+Atomek is a real editor surface, not a static preview.
+
+- Open tabs show the current files.
+- Text and markdown files are editable in Monaco.
+- Save writes through the browser file handle after the browser has granted permission.
+- Dirty files stay in memory until saved.
+- Markdown preview is available from the editor surface.
+- The layout reflows when the window resizes.
+
+If the editor is blank after a release, hard-refresh TytusOS and reopen the file. A blank editor with a known text file usually means the browser still has an old Atomek bundle cached.
+
+## Chat and context
+
+The right panel is the Atomek chat surface. It is not separate from the workspace.
+
+The chat can attach:
+
+- the active file
+- selected/open editor context
+- typed prompt text
+- generated artifacts
+- preview edits
+- resolved local app skills
+
+Use the context chips above the input to see what will be sent. Deselect a chip when you do not want that context included.
+
+Chat uses the Tytus host AI bridge. It must not hardcode model IDs in the app. Model/provider selection comes from the global AIL configuration exposed by the host. When global AIL changes, Atomek should pick up the new model list through settings and host state, not through source edits.
+
+## Local AIL and remote AIL
+
+Atomek can route chat through the host AIL settings:
+
+- **Remote AIL**: the Tytus pod/gateway route.
+- **Local AIL**: the local/private route exposed by the host if installed and enabled.
+
+The model picker should show models discovered from the selected AIL route. If the picker shows an old model, check the global AIL configuration first. Do not patch Atomek with a hardcoded replacement model.
+
+## Artifacts and patch previews
+
+Atomek should convert AI output into reviewable artifacts, not blind writes.
+
+Expected flow:
+
+1. Ask for an edit or generated file.
+2. Atomek stores the answer as an artifact or preview edit.
+3. You inspect the diff or generated content.
+4. You explicitly save/apply the result.
+
+Use **Outputs** to inspect saved artifacts and agent job output. Code blocks should render as rich output with copy controls.
+
+## Computer / Agents
+
+The **Computer / Agents** activity is the bridge to real tools installed on the machine. It replaces duplicate extension panels.
+
+It discovers local capabilities through the Tytus host bridge, for example:
+
+- Tytus Terminal
+- pi
+- OpenCode
+- Codex
+- Claude Code
+- Gemini
+- Qwen
+- Kimi
+- Aider
+
+Only allowlisted tools should launch from Atomek. The browser must not run arbitrary shell commands and must not direct-fetch pod or model endpoints that fail CORS. Local work goes through the same-origin Tytus tray/host bridge.
+
+## Open in Terminal
+
+**Open in Terminal** launches the TytusOS terminal with the current workspace context. Use it when you want the full interactive shell and can supervise the command.
+
+Good uses:
+
+- run tests
+- inspect git state
+- launch a local CLI manually
+- run a project command that needs a real terminal
+
+The terminal is backed by the Tytus tray PTY bridge and starts in the relevant local workspace when possible.
+
+## Run local job
+
+A local job is for supervised background work by an installed local agent. It should receive a typed task plus Atomek context, stream output into **Outputs**, and return reviewable artifacts or patch previews.
+
+Rules:
+
+- local jobs use allowlisted tools only
+- outputs stream back into Atomek
+- edits become previews before write/apply
+- model selection remains global through AIL
+- no arbitrary shell from model text
+
+## Agentic app skills
+
+Tytus apps can expose skills through manifests or sidecar docs. Atomek uses those skills to attach the right instructions and launch the right driver.
+
+Examples:
+
+| Skill | Current meaning |
+|---|---|
+| Atomek inspect project | Ask an agent to review the active workspace context. |
+| Atomek patch preview | Ask for a unified diff or fenced replacement block for Atomek to preview. |
+| Local terminal open | Open the TytusOS terminal with context. |
+| JULI3TA create song | Hand off a music-generation task to JULI3TA where supported. |
+| Blender MCP create scene | Use a Blender MCP/socket bridge when the Blender skill and local server are installed. |
+
+Do not show fake support. If a skill or app driver is not installed, show it as unavailable with the missing dependency.
+
+## Troubleshooting Atomek
+
+| Problem | Fix |
+|---|---|
+| Old UI or duplicate Computer/Agents icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.11` or newer. |
+| Files are listed but editor is blank | Reopen the file, then hard-refresh. If still broken, report the file type and console error. |
+| Folder does not expand/collapse | You are likely on an older bundle. Refresh and check the Atomek version. |
+| Chat answer appears only after completion | Streaming path is degraded. Check browser console and host `/v1/chat/completions` proxy errors. |
+| Remote pod call gets CORS errors | The app is calling a remote endpoint directly. Route through the Tytus host proxy instead. |
+| Local tool missing | Install the CLI/tool, then click **Refresh capabilities** in Computer / Agents. |
+| Model picker shows an obsolete model | Update global AIL configuration. Do not hardcode the model in Atomek. |
+
+## Contributor rules
+
+- Keep Atomek app code in the standalone `tytus-app-atomek` repo.
+- Keep TytusOS as the shell/host, not a forked Atomek implementation.
+- Do not change JULI3TA internals while fixing Atomek.
+- Do not hardcode AIL model IDs.
+- Do not bypass the host bridge for pod, local-tool, or remote-model access.
+- User-visible behavior changes must update this manual and regenerate `tytus-cli/os-docs.md`.
 
 
 <!-- ==== settings.md ==== -->
@@ -585,6 +755,7 @@ TytusOS apps fall into two groups:
 | Files | Finder-like browser for `~/Tytus`, Inbox, Outbox, Downloads, Shared, and pod workspaces |
 | Channels | Per-pod messenger/channel setup with token-safe flows |
 | Terminal | Host-backed shell through the local tray daemon, starting in `~/Tytus` |
+| Atomek | Monaco workbench for files, chat, artifacts, AIL routing, Computer / Agents, and app skills |
 | Browser | Registered launchers and safe web/app links |
 | Help | Bundled manual, troubleshooting, diagnostic links |
 | Chat | Opens agent chat surfaces and pod UIs |
@@ -599,6 +770,20 @@ The All LLM Gateway is not a normal pod app. It is always included, OpenAI-compa
 Demo utilities can be present behind **Settings -> Appearance -> Show demo apps**. Keep them clearly marked and never document them as required platform capability.
 
 Examples: games, ASCII Art, Matrix Rain, local notes/todos/calculator, API Tester, media viewers.
+
+
+## Agentic app skills
+
+Some apps publish skills that Atomek and other agent surfaces can attach dynamically. A skill may describe how to inspect a project, generate a patch preview, launch a local tool, drive a media app, or connect to an external app bridge such as Blender MCP.
+
+Rules for production skills:
+
+- declare the dependency honestly
+- show unavailable when the dependency is not installed
+- run through the Tytus host bridge
+- never direct-fetch pod/model endpoints from the browser
+- never hardcode AIL model IDs in app code
+- return reviewable artifacts or patch previews before writing files
 
 ## App documentation rule
 
@@ -662,6 +847,35 @@ Browser shortcuts differ by OS. The terminal should support:
 - Windows/Linux: Ctrl+Shift+C/Ctrl+Shift+V for terminal copy/paste; Ctrl+C interrupts the shell process.
 
 If this regresses, compare against Ghostty behavior and ensure the terminal app handles platform-specific modifier keys.
+
+
+## Atomek editor is blank or files are not editable
+
+A blank editor with a normal text file usually means an old Atomek bundle is cached or the file type did not get a text model.
+
+Fix:
+
+1. Hard-refresh TytusOS.
+2. Reopen Atomek.
+3. Reopen the file from Explorer.
+4. Confirm Atomek loads `tytus-app-atomek@v0.4.11` or newer.
+5. If still broken, include the file extension and browser console error in the bug report.
+
+## Atomek folder rows do not expand or collapse
+
+Use the folder chevron or click the folder row. If nothing changes, you are likely on an old bundle. Hard-refresh TytusOS and reopen the folder.
+
+## Atomek shows duplicate Computer / Agents and Extensions icons
+
+That was an old app bundle. The current surface has one **Computer / Agents** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.11` or newer.
+
+## Atomek local tools are missing
+
+Open **Atomek -> Computer / Agents** and click **Refresh capabilities**. If a tool is still missing, install the local CLI first, then refresh again. Atomek only launches allowlisted tools discovered through the host bridge.
+
+## Atomek model list shows an obsolete model
+
+AIL model selection is global. Fix the global AIL configuration or selected route. Do not hardcode a replacement model in Atomek or TytusOS app code.
 
 ## `garagetytus-shared` missing inside a pod
 
