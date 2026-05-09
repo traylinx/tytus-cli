@@ -205,6 +205,15 @@ pub fn poll_daemon_status() -> super::TrayState {
         out.pods = d.pods.clone();
         out.keychain_healthy = d.keychain_healthy;
         out.last_refresh_error = d.last_refresh_error.clone();
+    } else if let Some(pid) = daemon_pidfile_live() {
+        // Command channel can be temporarily unavailable while the daemon
+        // process is still alive (socket/control restart, stale HTTP control
+        // port, or slow auth loop). Keep `/api/state` aligned with
+        // `/api/daemon/status`: liveness comes from the pidfile/process
+        // substrate, richer auth fields come from the command response when
+        // available. Uptime is unknown in this fallback, so leave it at 0.
+        out.daemon_running = true;
+        out.daemon_pid = pid;
     }
 
     // Overlay state.json. The file is the atomic source of truth for auth
@@ -288,6 +297,24 @@ struct DaemonSnap {
     // stays in sync with the daemon's schema.
     #[allow(dead_code)]
     stuck_for_secs: Option<u64>,
+}
+
+fn daemon_pidfile_live() -> Option<u64> {
+    let pid_text = std::fs::read_to_string(atomek_core::platform::paths::daemon_pid_file()).ok()?;
+    daemon_pidfile_live_from_text(Some(pid_text.trim()), |pid| {
+        atomek_core::platform::process::process_exists(pid)
+    })
+}
+
+fn daemon_pidfile_live_from_text(
+    pid_text: Option<&str>,
+    exists: impl Fn(u32) -> bool,
+) -> Option<u64> {
+    let pid = pid_text?.trim().parse::<u32>().ok()?;
+    if pid <= 1 || !exists(pid) {
+        return None;
+    }
+    Some(pid as u64)
 }
 
 fn daemon_status() -> Option<DaemonSnap> {
@@ -513,7 +540,22 @@ fn effective_last_refresh_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_last_refresh_error, refresh_error_requires_login};
+    use super::{
+        daemon_pidfile_live_from_text, effective_last_refresh_error, refresh_error_requires_login,
+    };
+
+    #[test]
+    fn daemon_pidfile_live_accepts_existing_pid() {
+        assert_eq!(daemon_pidfile_live_from_text(Some("4242"), |pid| pid == 4242), Some(4242));
+    }
+
+    #[test]
+    fn daemon_pidfile_live_rejects_missing_invalid_or_dead_pid() {
+        assert_eq!(daemon_pidfile_live_from_text(None, |_| true), None);
+        assert_eq!(daemon_pidfile_live_from_text(Some("nope"), |_| true), None);
+        assert_eq!(daemon_pidfile_live_from_text(Some("1"), |_| true), None);
+        assert_eq!(daemon_pidfile_live_from_text(Some("4242"), |_| false), None);
+    }
 
     #[test]
     fn classifies_login_required_refresh_errors() {
