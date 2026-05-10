@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.14-beta.35 - 2026-05-10
+
+- Bundles TytusOS `v1.0.27-apps-platform`.
+- Pins the Tytus app catalog to version 50 so Atomek `0.4.18` persists mission run history in `RUNS.jsonl` and reloads transcript timelines after refresh.
+- Adds tray `GET /api/missions/runs` plus mission-root hardening for run history reads/writes under Tytus Home/Missions.
+- Extends the host missions contract with `host.missions.listRuns(rootPath)`.
+- Refreshes the vendored TytusOS dist, OS docs, and public beta installer/download references.
+
 All notable changes to the `tytus` CLI, `tytus-mcp` server, and
 `Tytus.app` menu bar tray. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor

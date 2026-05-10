@@ -1523,6 +1523,12 @@ struct MissionWriteRequest {
     files: Vec<MissionWriteFile>,
 }
 
+#[derive(serde::Deserialize)]
+struct MissionRunsQuery {
+    #[serde(rename = "rootPath")]
+    root_path: String,
+}
+
 fn sanitize_mission_slug(input: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;
@@ -1588,6 +1594,70 @@ fn count_mission_runs(root: &Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+fn mission_runs_index_path(root: &Path) -> PathBuf {
+    root.join("RUNS.jsonl")
+}
+
+fn read_mission_runs(root: &Path) -> Vec<serde_json::Value> {
+    let mut runs = Vec::new();
+    let mut known_transcripts = std::collections::HashSet::new();
+    if let Ok(raw) = fs::read_to_string(mission_runs_index_path(root)) {
+        for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(path) = value.get("transcriptPath").and_then(|v| v.as_str()) {
+                    known_transcripts.insert(path.to_string());
+                }
+                runs.push(value);
+            }
+        }
+    }
+    let runs_dir = root.join("runs");
+    if let Ok(entries) = fs::read_dir(&runs_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+                continue;
+            };
+            let rel = format!("runs/{name}");
+            if known_transcripts.contains(&rel) {
+                continue;
+            }
+            let meta = fs::metadata(&path).ok();
+            let updated_at = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(system_time_to_rfc3339);
+            runs.push(serde_json::json!({
+                "id": format!("transcript-{name}"),
+                "status": "complete",
+                "label": name,
+                "toolId": "unknown",
+                "startedAt": updated_at,
+                "finishedAt": updated_at,
+                "transcriptPath": rel,
+                "summary": "Transcript saved before RUNS.jsonl existed",
+            }));
+        }
+    }
+    runs.sort_by(|a, b| {
+        let am = a
+            .get("finishedAt")
+            .or_else(|| a.get("startedAt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let bm = b
+            .get("finishedAt")
+            .or_else(|| b.get("startedAt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        bm.cmp(am)
+    });
+    runs
 }
 
 fn system_time_to_rfc3339(value: std::time::SystemTime) -> Option<String> {
@@ -1661,6 +1731,66 @@ fn safe_relative_join(base: &Path, rel: &str) -> Result<PathBuf, String> {
 
 fn path_is_under(child: &Path, parent: &Path) -> bool {
     child.starts_with(parent)
+}
+
+fn mission_root_allowed(root: &Path) -> bool {
+    if root.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::CurDir | Component::Prefix(_)
+        )
+    }) {
+        return false;
+    }
+    path_is_under(root, &missions_root())
+}
+
+fn handle_mission_runs(request: Request, query: &str) {
+    let root_path = match query_value_decoded(query, "rootPath") {
+        Ok(Some(value)) if !value.trim().is_empty() => value,
+        Ok(_) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({ "error": "rootPath query is required" }),
+            );
+            return;
+        }
+        Err(e) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({ "error": "bad_query", "message": e }),
+            );
+            return;
+        }
+    };
+    let parsed = MissionRunsQuery { root_path };
+    let root = PathBuf::from(&parsed.root_path);
+    if !mission_root_allowed(&root) {
+        respond_json(
+            request,
+            403,
+            &serde_json::json!({
+                "error": "mission_root_forbidden",
+                "message": "mission runs are confined to Tytus Home/Missions",
+            }),
+        );
+        return;
+    }
+    if !root.is_dir() {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({ "error": "mission_not_found" }),
+        );
+        return;
+    }
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({ "runs": read_mission_runs(&root) }),
+    );
 }
 
 fn handle_mission_create(mut request: Request) {
@@ -1750,8 +1880,7 @@ fn handle_mission_write(mut request: Request) {
         return;
     }
     let root = PathBuf::from(&parsed.root_path);
-    let missions = missions_root();
-    if !path_is_under(&root, &missions) {
+    if !mission_root_allowed(&root) {
         respond_json(
             request,
             403,
@@ -2172,6 +2301,21 @@ struct LocalJobRequest {
     prompt: String,
     cwd: Option<String>,
     context: Option<String>,
+    mission: Option<LocalJobMissionContext>,
+}
+
+#[derive(serde::Deserialize)]
+struct LocalJobMissionContext {
+    #[serde(rename = "missionId")]
+    mission_id: Option<String>,
+    #[serde(rename = "rootPath")]
+    root_path: Option<String>,
+    #[serde(rename = "taskId")]
+    task_id: Option<String>,
+    #[serde(rename = "taskTitle")]
+    task_title: Option<String>,
+    #[serde(rename = "resourceId")]
+    resource_id: Option<String>,
 }
 
 struct LocalJobSpec {
@@ -2336,6 +2480,26 @@ fn handle_local_job_start(request: Request, registry: &Registry) {
         return;
     }
     let cwd = local_job_cwd(body.cwd.as_deref());
+    let (mission_id, transcript_path) = body
+        .mission
+        .as_ref()
+        .and_then(|mission| {
+            let _ = (&mission.task_title, &mission.resource_id);
+            let root = PathBuf::from(mission.root_path.as_deref()?);
+            if !mission_root_allowed(&root) {
+                return None;
+            }
+            let stamp = chrono::Utc::now().to_rfc3339().replace([':', '.'], "-");
+            Some((
+                mission.mission_id.clone(),
+                Some(format!(
+                    "runs/{stamp}-{}-{}.md",
+                    mission.task_id.as_deref().unwrap_or("manual"),
+                    body.tool_id
+                )),
+            ))
+        })
+        .unwrap_or((None, None));
     let (job_id, job) = registry.create();
     spawn_external_command_with_options(job, spec.bin, spec.args, spec.stdin, spec.envs, Some(cwd));
     respond_json(
@@ -2346,6 +2510,8 @@ fn handle_local_job_start(request: Request, registry: &Registry) {
             "toolId": body.tool_id,
             "status": "running",
             "streamUrl": format!("/api/jobs/{}/stream", job_id),
+            "missionId": mission_id,
+            "transcriptPath": transcript_path,
         }),
     );
 }
@@ -3782,6 +3948,9 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Get, "/api/missions") => {
             handle_missions_list(request);
+        }
+        (Method::Get, "/api/missions/runs") => {
+            handle_mission_runs(request, &query);
         }
         (Method::Post, "/api/missions") => {
             handle_mission_create(request);
@@ -10763,6 +10932,44 @@ mod tests {
         assert!(safe_relative_join(&base, "../escape.md").is_err());
         assert!(safe_relative_join(&base, "/tmp/escape.md").is_err());
         assert!(safe_relative_join(&base, "runs/../../escape.md").is_err());
+    }
+
+    #[test]
+    fn mission_root_guard_blocks_parent_escape() {
+        let missions = missions_root();
+        assert!(mission_root_allowed(&missions.join("mission-1")));
+        assert!(!mission_root_allowed(&missions.join("../escape")));
+        assert!(!mission_root_allowed(Path::new("/tmp/not-tytus-mission")));
+    }
+
+    #[test]
+    fn read_mission_runs_merges_index_and_legacy_transcripts() {
+        let root = std::env::temp_dir().join(format!(
+            "tytus-test-runs-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("runs")).unwrap();
+        fs::write(
+            root.join("RUNS.jsonl"),
+            r#"{"id":"run-1","status":"complete","toolId":"codex","label":"Codex","startedAt":"2026-05-10T10:00:00Z","transcriptPath":"runs/run-1.md"}"#,
+        )
+        .unwrap();
+        fs::write(root.join("runs/run-1.md"), "known").unwrap();
+        fs::write(root.join("runs/legacy.md"), "legacy").unwrap();
+
+        let runs = read_mission_runs(&root);
+        let ids: Vec<_> = runs
+            .iter()
+            .filter_map(|run| run.get("id").and_then(|value| value.as_str()))
+            .collect();
+        assert!(ids.contains(&"run-1"));
+        assert!(ids.contains(&"transcript-legacy.md"));
+        assert_eq!(ids.iter().filter(|id| **id == "run-1").count(), 1);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

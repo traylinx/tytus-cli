@@ -76,9 +76,9 @@ Use **Atomek** for editing and agent work against selected files or folders.
 
 | Problem | Fix |
 |---|---|
-| Old Atomek UI or duplicate Control Tower icons | Hard-refresh TytusOS. Current app should be `tytus-app-atomek@v0.4.17` or newer. |
+| Old Atomek UI or duplicate Control Tower icons | Hard-refresh TytusOS. Current app should be `tytus-app-atomek@v0.4.18` or newer. |
 | Files appear but editor is blank | Reopen the file, hard-refresh, then check the browser console. |
-| Folder does not expand/collapse | Hard-refresh. Mission Control and folder fixes ship in Atomek `v0.4.17`. |
+| Folder does not expand/collapse | Hard-refresh. Mission Control and folder fixes ship in Atomek `v0.4.18`. |
 | Local tool missing | Install the local CLI/tool, then click **Refresh capabilities**. |
 | Remote model/pod fetch gets CORS | Route through the Tytus host proxy. Browser apps should not direct-fetch pod public URLs. |
 | Model list shows an old model | Fix global AIL config. Do not hardcode models in Atomek. |
