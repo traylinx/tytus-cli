@@ -5,6 +5,13 @@ All notable changes to the `tytus` CLI, `tytus-mcp` server, and
 conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
 bumps are allowed to break compat.
 
+## v0.6.14-beta.34 - 2026-05-10
+
+- Bundles TytusOS `v1.0.26-apps-platform`.
+- Pins the Tytus app catalog to version 49 so Atomek `0.4.17` launches with task-selected mission runs, visible transcript paths, and cancel controls for local-agent jobs.
+- Extends the host local-job contract with optional mission/task metadata and `host.local.cancelJob()` routed to the tray job bridge.
+- Refreshes the vendored TytusOS dist, OS docs, and public beta installer/download references.
+
 ## v0.6.14-beta.33 - 2026-05-10
 
 - Bundles TytusOS `v1.0.25-apps-platform`.

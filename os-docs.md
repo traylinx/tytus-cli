@@ -660,7 +660,9 @@ The terminal is backed by the Tytus tray PTY bridge and starts in the relevant l
 
 ## Run local job
 
-A local job is for supervised background work by an installed local agent. It should receive a typed task plus Atomek context, stream output into **Outputs**, and return reviewable artifacts or patch previews.
+A local job is for supervised background work by an installed local agent. It receives a selected mission task, the mission folder, selected resources, and Atomek context. Output streams into Control Tower, is saved under `runs/`, and is also captured in **Outputs** so patches can become reviewable edit previews.
+
+Use **Cancel** to stop a running job through the tray job bridge. Canceling sends a safe terminate request to the tracked child process; it does not delete the mission folder or prior transcript output.
 
 Rules:
 
@@ -690,7 +692,7 @@ Do not show fake support. If a skill or app driver is not installed, show it as 
 
 | Problem | Fix |
 |---|---|
-| Old UI or duplicate Control Tower icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.16` or newer. |
+| Old UI or duplicate Control Tower icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.17` or newer. |
 | Files are listed but editor is blank | Reopen the file, then hard-refresh. If still broken, report the file type and console error. |
 | Folder does not expand/collapse | You are likely on an older bundle. Refresh and check the Atomek version. |
 | Chat answer appears only after completion | Streaming path is degraded. Check browser console and host `/v1/chat/completions` proxy errors. |
@@ -891,7 +893,7 @@ Fix:
 1. Hard-refresh TytusOS.
 2. Reopen Atomek.
 3. Reopen the file from Explorer.
-4. Confirm Atomek loads `tytus-app-atomek@v0.4.16` or newer.
+4. Confirm Atomek loads `tytus-app-atomek@v0.4.17` or newer.
 5. If still broken, include the file extension and browser console error in the bug report.
 
 ## Atomek folder rows do not expand or collapse
@@ -900,7 +902,7 @@ Use the folder chevron or click the folder row. If nothing changes, you are like
 
 ## Atomek shows duplicate Control Tower and Extensions icons
 
-That was an old app bundle. The current surface has one **Control Tower** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.16` or newer.
+That was an old app bundle. The current surface has one **Control Tower** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.17` or newer.
 
 ## Atomek local tools are missing
 
