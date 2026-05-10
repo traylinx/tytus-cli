@@ -5,6 +5,12 @@ All notable changes to the `tytus` CLI, `tytus-mcp` server, and
 conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
 bumps are allowed to break compat.
 
+## v0.6.14-beta.32 - 2026-05-10
+
+- Bundles TytusOS `v1.0.24-apps-platform`.
+- Pins the Tytus app catalog to version 47 so Atomek `0.4.15` launches as Mission Control by default with Control Tower resource/mission orchestration UX.
+- Refreshes vendored TytusOS dist and public beta installer/download references.
+
 ## v0.6.14-beta.31 - 2026-05-10
 
 - Bundles TytusOS `v1.0.23-apps-platform`.

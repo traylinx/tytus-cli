@@ -152,9 +152,9 @@ Common aliases:
 
 ---
 
-## Atomek Computer / Agents
+## Atomek Control Tower
 
-TytusOS also exposes installed local tools from Atomek. Open **Atomek -> Computer / Agents** to launch the Tytus terminal or allowlisted local CLIs with the active file/folder context. This is the right path for local computer resources. Do not make browser apps call local shells or remote pod URLs directly.
+TytusOS also exposes installed local tools from Atomek. Open **Atomek -> Control Tower** to launch the Tytus terminal or allowlisted local CLIs with the active file/folder context. This is the right path for local Control Tower resources. Do not make browser apps call local shells or remote pod URLs directly.
 
 ## The Tray Icon Shortcut
 

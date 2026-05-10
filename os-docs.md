@@ -61,7 +61,7 @@ If the top bar says **Session expired**, your pods are still running. Open **Set
 | Browse local workspace | Files -> Tytus Home |
 | Browse a pod workspace | Files -> Pod NN workspace |
 | Edit local files and ask AI with file context | Atomek |
-| Launch local agents with active file context | Atomek -> Computer / Agents |
+| Launch local agents with active file context | Atomek -> Control Tower |
 | Configure Telegram/Discord/Slack/etc. | Channels |
 | Fix expired login | Settings -> Daemon |
 | Check shared folders | Settings -> Sharing or Files -> Shared |
@@ -95,7 +95,7 @@ Real production surfaces:
 - Files over Tytus Home, shared folders, and pod workspaces
 - Channels setup
 - Terminal backed by the host shell through the tray daemon
-- Atomek workbench for local files, chat, artifacts, app skills, and local Computer / Agents
+- Atomek workbench for local files, chat, artifacts, app skills, and local Control Tower
 - Settings for account, daemon, sharing, appearance, dock, language, privacy, updates
 - Music Creator and other Tytus apps that use the included gateway
 
@@ -506,7 +506,7 @@ A missing pod inbox or downloads directory should render as a friendly empty sta
 | Browse or move through Tytus Home, Shared, Inbox, Outbox, Downloads | Files |
 | Open a local folder for editing | Atomek |
 | Ask AI about the active file | Atomek chat |
-| Run tests or local tools with folder context | Atomek -> Computer / Agents or Terminal |
+| Run tests or local tools with folder context | Atomek -> Control Tower or Terminal |
 | Inspect generated artifacts and patch previews | Atomek Outputs |
 
 Files owns broad navigation. Atomek owns editing and agent interaction. Do not duplicate full editor behavior in Files.
@@ -594,9 +594,9 @@ Expected flow:
 
 Use **Outputs** to inspect saved artifacts and agent job output. Code blocks should render as rich output with copy controls.
 
-## Computer / Agents
+## Control Tower
 
-The **Computer / Agents** activity is the bridge to real tools installed on the machine. It replaces duplicate extension panels.
+The **Control Tower** activity is the bridge to real tools installed on the machine. It replaces duplicate extension panels.
 
 It discovers local capabilities through the Tytus host bridge, for example:
 
@@ -657,12 +657,12 @@ Do not show fake support. If a skill or app driver is not installed, show it as 
 
 | Problem | Fix |
 |---|---|
-| Old UI or duplicate Computer/Agents icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.12` or newer. |
+| Old UI or duplicate Control Tower icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.15` or newer. |
 | Files are listed but editor is blank | Reopen the file, then hard-refresh. If still broken, report the file type and console error. |
 | Folder does not expand/collapse | You are likely on an older bundle. Refresh and check the Atomek version. |
 | Chat answer appears only after completion | Streaming path is degraded. Check browser console and host `/v1/chat/completions` proxy errors. |
 | Remote pod call gets CORS errors | The app is calling a remote endpoint directly. Route through the Tytus host proxy instead. |
-| Local tool missing | Install the CLI/tool, then click **Refresh capabilities** in Computer / Agents. |
+| Local tool missing | Install the CLI/tool, then click **Refresh capabilities** in Control Tower. |
 | Model picker shows an obsolete model | Update global AIL configuration. Do not hardcode the model in Atomek. |
 
 ## Contributor rules
@@ -755,7 +755,7 @@ TytusOS apps fall into two groups:
 | Files | Finder-like browser for `~/Tytus`, Inbox, Outbox, Downloads, Shared, and pod workspaces |
 | Channels | Per-pod messenger/channel setup with token-safe flows |
 | Terminal | Host-backed shell through the local tray daemon, starting in `~/Tytus` |
-| Atomek | Monaco workbench for files, chat, artifacts, AIL routing, Computer / Agents, and app skills |
+| Atomek | Monaco workbench for files, chat, artifacts, AIL routing, Control Tower, and app skills |
 | Browser | Registered launchers and safe web/app links |
 | Help | Bundled manual, troubleshooting, diagnostic links |
 | Chat | Opens agent chat surfaces and pod UIs |
@@ -858,20 +858,20 @@ Fix:
 1. Hard-refresh TytusOS.
 2. Reopen Atomek.
 3. Reopen the file from Explorer.
-4. Confirm Atomek loads `tytus-app-atomek@v0.4.12` or newer.
+4. Confirm Atomek loads `tytus-app-atomek@v0.4.15` or newer.
 5. If still broken, include the file extension and browser console error in the bug report.
 
 ## Atomek folder rows do not expand or collapse
 
 Use the folder chevron or click the folder row. If nothing changes, you are likely on an old bundle. Hard-refresh TytusOS and reopen the folder.
 
-## Atomek shows duplicate Computer / Agents and Extensions icons
+## Atomek shows duplicate Control Tower and Extensions icons
 
-That was an old app bundle. The current surface has one **Computer / Agents** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.12` or newer.
+That was an old app bundle. The current surface has one **Control Tower** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.15` or newer.
 
 ## Atomek local tools are missing
 
-Open **Atomek -> Computer / Agents** and click **Refresh capabilities**. If a tool is still missing, install the local CLI first, then refresh again. Atomek only launches allowlisted tools discovered through the host bridge.
+Open **Atomek -> Control Tower** and click **Refresh capabilities**. If a tool is still missing, install the local CLI first, then refresh again. Atomek only launches allowlisted tools discovered through the host bridge.
 
 ## Atomek model list shows an obsolete model
 
