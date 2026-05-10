@@ -5,6 +5,11 @@ All notable changes to the `tytus` CLI, `tytus-mcp` server, and
 conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
 bumps are allowed to break compat.
 
+## v0.6.14-beta.21 - 2026-05-10
+
+- Bundled TytusOS dist refreshed from `tytus-os` `v1.0.14-apps-platform`, including JULI3TA 0.3.10 fallback/catalog pins.
+- JULI3TA Restyle Inspire/Suggest now skips the broken `minimax/ail-compound` chat alias and treats provider-incompatible 400s as retryable model fallbacks instead of user-visible hard failures.
+
 ## v0.6.14-beta.20 - 2026-05-10
 
 - Bundled TytusOS dist refreshed from `tytus-os` `v1.0.13-apps-platform`, including Atomek 0.4.12 fallback/catalog pins.
@@ -19,7 +24,7 @@ bumps are allowed to break compat.
 - Atomek AI chat now routes through the host-owned `host.ai` substrate with persistent SQLite conversation tables and public AIL fallback via the tray proxy.
 - JULI3TA Library/Favorites/Playlists now sync to a tray-backed host-file snapshot at `~/Music/JULI3TA/.music-state.json`, so saved streamed songs survive browser profile loss and computer restarts.
 - Tytus tray exposes `GET/POST /api/juli3ta/music-state` for durable JULI3TA music-state restore, while JULI3TA keeps a browser localStorage backup as a secondary cache.
-- Public beta download page now points users at `v0.6.14-beta.20` with direct unsigned `.pkg` / `.deb` links, one-file install guidance, and explicit GA warnings.
+- Public beta download page now points users at `v0.6.14-beta.21` with direct unsigned `.pkg` / `.deb` links, one-file install guidance, and explicit GA warnings.
 - Added `docs/guides/public-beta-install.md` and refreshed user manuals for one-file pkg/deb install, unsigned OS warnings, and setup wizard flow.
 - Installers now support `TYTUS_RELEASE_TAG` so public beta users can install a checksum-verified pre-release without source builds.
 
