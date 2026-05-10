@@ -1188,7 +1188,6 @@ fn command_path(command: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-
 fn local_tool(
     id: &str,
     label: &str,
@@ -1213,7 +1212,7 @@ fn local_tool(
     })
 }
 
-fn handle_local_tools(request: Request) {
+fn local_tools_json() -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
     tools.push(serde_json::json!({
         "id": "terminal",
@@ -1255,7 +1254,484 @@ fn handle_local_tools(request: Request) {
     ] {
         tools.push(local_tool(id, label, Some(command), kind, description));
     }
+    tools
+}
+
+fn handle_local_tools(request: Request) {
+    let tools = local_tools_json();
     respond_json(request, 200, &serde_json::json!({ "tools": tools }));
+}
+
+fn normalized_shared_folder_bindings() -> Vec<serde_json::Value> {
+    shared_bindings_from_cache()
+        .into_iter()
+        .enumerate()
+        .map(|(idx, binding)| {
+            let bucket = binding
+                .get("bucket")
+                .and_then(|v| v.as_str())
+                .unwrap_or("shared")
+                .to_string();
+            let local_path = binding
+                .get("local_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let label = binding
+                .get("label")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(&bucket)
+                .to_string();
+            let auto_sync = binding
+                .get("auto_sync")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let pods_provisioned = binding
+                .get("pods_provisioned")
+                .and_then(|v| v.as_array())
+                .map(|pods| {
+                    pods.iter()
+                        .filter_map(|v| {
+                            v.as_str().map(|s| serde_json::Value::String(s.to_string()))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let path_exists = !local_path.is_empty() && Path::new(&local_path).exists();
+            serde_json::json!({
+                "id": format!("shared-folder-{}-{}", bucket, idx),
+                "label": label,
+                "localPath": local_path,
+                "bucket": bucket,
+                "autoSync": auto_sync,
+                "status": if path_exists { "ready" } else { "missing" },
+                "podsProvisioned": pods_provisioned,
+            })
+        })
+        .collect()
+}
+
+fn resource_cost(unit: &str, tier: &str) -> serde_json::Value {
+    serde_json::json!({ "unit": unit, "tier": tier })
+}
+
+fn handle_shared_folders_normalized(request: Request) {
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({ "bindings": normalized_shared_folder_bindings() }),
+    );
+}
+
+fn handle_resources(request: Request) {
+    let mut resources: Vec<serde_json::Value> = Vec::new();
+    let mut warnings: Vec<serde_json::Value> = Vec::new();
+
+    let tytus_home = crate::workspace::ensure_tytus_home()
+        .to_string_lossy()
+        .to_string();
+    resources.push(serde_json::json!({
+        "id": "workspace.tytus-home",
+        "kind": "workspace",
+        "label": "Tytus Home",
+        "status": "ready",
+        "capabilities": ["file-read", "file-write-preview"],
+        "trustTier": "local-private",
+        "sandbox": "mission-folder",
+        "allowedRoots": [tytus_home],
+        "cost": resource_cost("free", "low"),
+        "metadata": { "source": "tray.workspace" },
+    }));
+
+    for tool in local_tools_json() {
+        let id = tool.get("id").and_then(|v| v.as_str()).unwrap_or("tool");
+        let kind = tool
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("system-cli");
+        let status = match tool
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("missing")
+        {
+            "available" => "ready",
+            "missing" => "needs-setup",
+            other => other,
+        };
+        let capabilities = if kind == "terminal" {
+            serde_json::json!(["shell-exec-allowlist"])
+        } else if kind == "ai-cli" {
+            serde_json::json!(["text-gen", "code-review", "code-edit", "file-write-preview"])
+        } else {
+            serde_json::json!(["shell-exec-allowlist"])
+        };
+        if status == "needs-setup" {
+            warnings.push(serde_json::json!({
+                "code": "local_tool_missing",
+                "message": format!("{} is not installed or not on PATH", id),
+                "resourceId": format!("local-cli.{}", id),
+            }));
+        }
+        resources.push(serde_json::json!({
+            "id": format!("local-cli.{}", id),
+            "kind": "local-cli",
+            "label": tool.get("label").cloned().unwrap_or_else(|| serde_json::Value::String(id.to_string())),
+            "status": status,
+            "reason": if status == "ready" { serde_json::Value::Null } else { serde_json::Value::String("command not found on PATH".to_string()) },
+            "capabilities": capabilities,
+            "trustTier": "local-private",
+            "sandbox": "process",
+            "allowedRoots": [],
+            "cost": resource_cost("free", "low"),
+            "setupAction": if status == "ready" { serde_json::Value::Null } else { serde_json::json!({ "label": "Install local CLI", "commandPreview": tool.get("command").cloned().unwrap_or(serde_json::Value::Null) }) },
+            "metadata": tool,
+        }));
+    }
+
+    let shared_folders = normalized_shared_folder_bindings();
+    if shared_folders.is_empty() {
+        warnings.push(serde_json::json!({
+            "code": "no_shared_folders",
+            "message": "No garagetytus shared folders are bound yet",
+        }));
+    }
+    for binding in shared_folders {
+        let id = binding
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("shared-folder");
+        let local_path = binding
+            .get("localPath")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        resources.push(serde_json::json!({
+            "id": id,
+            "kind": "shared-folder",
+            "label": binding.get("label").cloned().unwrap_or_else(|| serde_json::Value::String("Shared folder".to_string())),
+            "status": binding.get("status").cloned().unwrap_or_else(|| serde_json::Value::String("needs-setup".to_string())),
+            "reason": if local_path.is_empty() { serde_json::Value::String("local path missing".to_string()) } else { serde_json::Value::Null },
+            "capabilities": ["file-read", "file-write-preview", "file-write-direct"],
+            "trustTier": "local-private",
+            "sandbox": "mission-folder",
+            "allowedRoots": if local_path.is_empty() { serde_json::json!([]) } else { serde_json::json!([local_path]) },
+            "cost": resource_cost("free", "low"),
+            "metadata": binding,
+        }));
+    }
+
+    let snap = compute_state_snapshot();
+    for agent in snap.agents {
+        let ready = matches!(agent.status, AgentStatus::Ready);
+        resources.push(serde_json::json!({
+            "id": format!("pod-agent.{}", agent.pod_id),
+            "kind": "pod-agent",
+            "label": format!("{} pod {}", agent.agent_type, agent.pod_id),
+            "status": if ready { "ready" } else { "degraded" },
+            "reason": if ready { serde_json::Value::Null } else { serde_json::Value::String(agent_status_label(agent.status).to_string()) },
+            "capabilities": ["text-gen", "code-review", "web-fetch"],
+            "trustTier": "tytus-pod",
+            "sandbox": "pod",
+            "allowedRoots": [],
+            "cost": resource_cost("tytus-units", if agent.units > 1 { "mid" } else { "low" }),
+            "metadata": {
+                "podId": agent.pod_id,
+                "agentType": agent.agent_type,
+                "units": agent.units,
+                "publicUrl": agent.public_url,
+                "apiUrl": agent.api_url,
+            },
+        }));
+    }
+    for included in snap.included {
+        resources.push(serde_json::json!({
+            "id": format!("ail-route.{}", included.pod_id),
+            "kind": "ail-route",
+            "label": format!("AIL gateway {}", included.pod_id),
+            "status": if included.endpoint.is_empty() { "degraded" } else { "ready" },
+            "reason": if included.endpoint.is_empty() { serde_json::Value::String("endpoint missing".to_string()) } else { serde_json::Value::Null },
+            "capabilities": ["text-gen"],
+            "trustTier": "remote-ail",
+            "sandbox": "pod",
+            "allowedRoots": [],
+            "cost": resource_cost("tytus-units", "low"),
+            "metadata": {
+                "podId": included.pod_id,
+                "kind": included.kind,
+                "endpoint": included.endpoint,
+                "publicUrl": included.public_url,
+            },
+        }));
+    }
+
+    for skill in tytus_skill_summaries() {
+        let id = skill.get("id").and_then(|v| v.as_str()).unwrap_or("skill");
+        let status = match skill
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("missing")
+        {
+            "available" => "ready",
+            "missing" => "needs-setup",
+            "needs_setup" => "needs-setup",
+            other => other,
+        };
+        resources.push(serde_json::json!({
+            "id": format!("app-skill.{}", id),
+            "kind": "app-skill",
+            "label": skill.get("title").cloned().unwrap_or_else(|| serde_json::Value::String(id.to_string())),
+            "status": status,
+            "reason": if status == "ready" { serde_json::Value::Null } else { serde_json::Value::String("skill driver requires setup".to_string()) },
+            "capabilities": ["text-gen", "file-write-preview"],
+            "trustTier": "third-party-app",
+            "sandbox": "browser-app",
+            "allowedRoots": [],
+            "cost": resource_cost("free", "low"),
+            "setupAction": if status == "ready" { serde_json::Value::Null } else { serde_json::json!({ "label": "Configure skill driver" }) },
+            "metadata": skill,
+        }));
+    }
+
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({
+            "generatedAt": current_unix_secs().to_string(),
+            "resources": resources,
+            "warnings": warnings,
+        }),
+    );
+}
+
+#[derive(serde::Deserialize)]
+struct MissionCreateRequest {
+    title: Option<String>,
+    goal: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct MissionWriteFile {
+    path: String,
+    content: String,
+}
+
+#[derive(serde::Deserialize)]
+struct MissionWriteRequest {
+    #[serde(rename = "rootPath")]
+    root_path: String,
+    files: Vec<MissionWriteFile>,
+}
+
+fn sanitize_mission_slug(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in input.chars().flat_map(|c| c.to_lowercase()) {
+        let ok = ch.is_ascii_alphanumeric();
+        if ok {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+        if out.len() >= 42 {
+            break;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "mission".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn missions_root() -> PathBuf {
+    crate::workspace::ensure_tytus_home().join("Missions")
+}
+
+fn safe_relative_join(base: &Path, rel: &str) -> Result<PathBuf, String> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        return Err("absolute mission file paths are not allowed".to_string());
+    }
+    let mut out = base.to_path_buf();
+    for component in rel_path.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            _ => return Err("mission file path may not escape mission folder".to_string()),
+        }
+    }
+    Ok(out)
+}
+
+fn path_is_under(child: &Path, parent: &Path) -> bool {
+    child.starts_with(parent)
+}
+
+fn handle_mission_create(mut request: Request) {
+    let mut body = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({ "error": "body_read_failed", "message": e.to_string() }),
+        );
+        return;
+    }
+    let parsed: MissionCreateRequest = if body.trim().is_empty() {
+        MissionCreateRequest {
+            title: None,
+            goal: None,
+        }
+    } else {
+        match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(e) => {
+                respond_json(
+                    request,
+                    400,
+                    &serde_json::json!({ "error": "invalid_json", "message": e.to_string() }),
+                );
+                return;
+            }
+        }
+    };
+    let title = parsed
+        .title
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "Atomek mission".to_string());
+    let goal = parsed.goal.unwrap_or_default();
+    let mission_id = format!("{}-{}", current_unix_secs(), sanitize_mission_slug(&title));
+    let root = missions_root().join(&mission_id);
+    if let Err(e) = fs::create_dir_all(root.join("runs")) {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({ "error": "mission_create_failed", "message": e.to_string() }),
+        );
+        return;
+    }
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({
+            "missionId": mission_id,
+            "title": title,
+            "goal": goal,
+            "rootPath": root.to_string_lossy().to_string(),
+        }),
+    );
+}
+
+fn handle_mission_write(mut request: Request) {
+    const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
+    const MAX_FILES: usize = 32;
+    let mut body = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({ "error": "body_read_failed", "message": e.to_string() }),
+        );
+        return;
+    }
+    let parsed: MissionWriteRequest = match serde_json::from_str(&body) {
+        Ok(value) => value,
+        Err(e) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({ "error": "invalid_json", "message": e.to_string() }),
+            );
+            return;
+        }
+    };
+    if parsed.files.len() > MAX_FILES {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({ "error": "too_many_files", "max": MAX_FILES }),
+        );
+        return;
+    }
+    let root = PathBuf::from(&parsed.root_path);
+    let missions = missions_root();
+    if !path_is_under(&root, &missions) {
+        respond_json(
+            request,
+            403,
+            &serde_json::json!({
+                "error": "mission_root_forbidden",
+                "message": "mission writes are confined to Tytus Home/Missions",
+            }),
+        );
+        return;
+    }
+    if let Err(e) = fs::create_dir_all(&root) {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({ "error": "mission_root_create_failed", "message": e.to_string() }),
+        );
+        return;
+    }
+    let mut written = Vec::new();
+    for file in parsed.files {
+        if file.content.len() > MAX_FILE_BYTES {
+            respond_json(
+                request,
+                413,
+                &serde_json::json!({ "error": "mission_file_too_large", "path": file.path }),
+            );
+            return;
+        }
+        let path = match safe_relative_join(&root, &file.path) {
+            Ok(path) => path,
+            Err(message) => {
+                respond_json(
+                    request,
+                    400,
+                    &serde_json::json!({ "error": "invalid_mission_path", "message": message }),
+                );
+                return;
+            }
+        };
+        if !path_is_under(&path, &root) {
+            respond_json(
+                request,
+                403,
+                &serde_json::json!({ "error": "mission_path_escape", "path": file.path }),
+            );
+            return;
+        }
+        if let Some(parent) = path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                respond_json(
+                    request,
+                    500,
+                    &serde_json::json!({ "error": "mission_parent_create_failed", "message": e.to_string() }),
+                );
+                return;
+            }
+        }
+        if let Err(e) = fs::write(&path, file.content.as_bytes()) {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": "mission_file_write_failed", "message": e.to_string() }),
+            );
+            return;
+        }
+        written.push(path.to_string_lossy().to_string());
+    }
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({ "ok": true, "rootPath": root.to_string_lossy().to_string(), "written": written }),
+    );
 }
 
 fn makakoo_home() -> PathBuf {
@@ -3209,6 +3685,15 @@ fn handle(request: Request, registry: Registry) {
             handle_terminal_stop(request, &query);
         }
         // ── Atomek computer/agent controller bridge ───────────────────
+        (Method::Get, "/api/resources") => {
+            handle_resources(request);
+        }
+        (Method::Post, "/api/missions") => {
+            handle_mission_create(request);
+        }
+        (Method::Post, "/api/missions/write") => {
+            handle_mission_write(request);
+        }
         (Method::Get, "/api/local/tools") => {
             handle_local_tools(request);
         }
@@ -3236,6 +3721,9 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Get, "/api/shared-folders/list") => {
             handle_shared_folders_list(request);
+        }
+        (Method::Get, "/api/shared-folders") => {
+            handle_shared_folders_normalized(request);
         }
         (Method::Post, "/api/shared-folders/run-streamed") => {
             handle_shared_folders_run_streamed(request, &registry, &query);
@@ -10162,6 +10650,24 @@ mod tests {
         .is_err());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mission_slug_and_safe_join_block_escape() {
+        assert_eq!(
+            sanitize_mission_slug("Build Product Video!"),
+            "build-product-video"
+        );
+        assert_eq!(sanitize_mission_slug(""), "mission");
+
+        let base = PathBuf::from("/tmp/tytus/Missions/mission-1");
+        assert_eq!(
+            safe_relative_join(&base, "runs/out.md").unwrap(),
+            base.join("runs/out.md")
+        );
+        assert!(safe_relative_join(&base, "../escape.md").is_err());
+        assert!(safe_relative_join(&base, "/tmp/escape.md").is_err());
+        assert!(safe_relative_join(&base, "runs/../../escape.md").is_err());
     }
 
     #[test]
