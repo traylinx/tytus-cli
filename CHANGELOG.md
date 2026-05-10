@@ -5,6 +5,13 @@ All notable changes to the `tytus` CLI, `tytus-mcp` server, and
 conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
 bumps are allowed to break compat.
 
+## v0.6.14-beta.27 - 2026-05-10
+
+- Bundles TytusOS `v1.0.19-apps-platform`.
+- Publishes Atomek `v0.4.13` with the Mission Pack MVP: resource graph, tray-managed mission folder, local-agent mission cwd, saved transcripts, and approval-gated edits.
+- Adds tray APIs for orchestration: `GET /api/resources`, normalized `GET /api/shared-folders`, `POST /api/missions`, and `POST /api/missions/write`.
+- Updates public beta docs and download page references to `v0.6.14-beta.27`.
+
 ## v0.6.14-beta.23 - 2026-05-10
 
 - Bundled TytusOS dist refreshed from `tytus-os` `v1.0.16-apps-platform`, including JULI3TA 0.3.12 Restyle payload hardening.
