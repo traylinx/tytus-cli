@@ -5,6 +5,12 @@ All notable changes to the `tytus` CLI, `tytus-mcp` server, and
 conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
 bumps are allowed to break compat.
 
+## v0.6.14-beta.31 - 2026-05-10
+
+- Bundles TytusOS `v1.0.23-apps-platform`.
+- Pins the Tytus app catalog to version 46 so JULI3TA `0.3.15` resolves from the immutable catalog snapshot with the reference-preview fix.
+- Refreshes vendored TytusOS dist and public beta installer/download references.
+
 ## v0.6.14-beta.30 - 2026-05-10
 
 - Bundles TytusOS `v1.0.22-apps-platform`.
