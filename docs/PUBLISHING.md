@@ -20,13 +20,13 @@ https://github.com/traylinx/homebrew-tap     ← brew install traylinx/tap/tytus
 curl -fsSL https://get.traylinx.com/install.sh | bash
 
 # macOS / Linux — explicit public beta/pre-release
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.29 sh
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.30 sh
 
 # Windows — stable/latest production release
 powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
 
 # Windows — explicit public beta/pre-release
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.29"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.30"; irm https://get.traylinx.com/install.ps1 | iex
 
 # Homebrew
 brew install traylinx/tap/tytus
