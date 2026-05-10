@@ -156,6 +156,8 @@ Common aliases:
 
 TytusOS also exposes installed local tools from Atomek. Open **Atomek -> Control Tower** to launch the Tytus terminal or allowlisted local CLIs with the active file/folder context. This is the right path for local Control Tower resources. Do not make browser apps call local shells or remote pod URLs directly.
 
+For multi-agent work, create a mission pack in Atomek first. The mission pack gives Claude/OpenCode/Codex/pi/Kimi-style tools a shared `MISSION.md`, `TASKS.md`, `INBOX.md`, `OUTBOX.md`, and `HANDOFF.md` folder. Use `GET /api/missions` through the tray bridge to discover and resume existing packs.
+
 ## The Tray Icon Shortcut
 
 If `tytus-tray` is running in your menu bar:

@@ -1551,6 +1551,98 @@ fn missions_root() -> PathBuf {
     crate::workspace::ensure_tytus_home().join("Missions")
 }
 
+fn mission_file_string(root: &Path, rel: &str) -> Option<String> {
+    fs::read_to_string(root.join(rel)).ok()
+}
+
+fn mission_json_field(root: &Path, field: &str) -> Option<String> {
+    let raw = mission_file_string(root, "MISSION.json")?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+}
+
+fn mission_json_count(root: &Path, field: &str) -> usize {
+    let Some(raw) = mission_file_string(root, "MISSION.json") else {
+        return 0;
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return 0;
+    };
+    parsed
+        .get(field)
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0)
+}
+
+fn count_mission_runs(root: &Path) -> usize {
+    let runs = root.join("runs");
+    fs::read_dir(runs)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_file())
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn system_time_to_rfc3339(value: std::time::SystemTime) -> Option<String> {
+    let datetime: chrono::DateTime<chrono::Utc> = value.into();
+    Some(datetime.to_rfc3339())
+}
+
+fn handle_missions_list(request: Request) {
+    let root = missions_root();
+    let mut missions = Vec::new();
+    if let Ok(entries) = fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let mission_id = path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or("mission")
+                .to_string();
+            let meta = fs::metadata(&path).ok();
+            let updated_at = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(system_time_to_rfc3339);
+            let created_at = meta
+                .as_ref()
+                .and_then(|m| m.created().ok())
+                .and_then(system_time_to_rfc3339);
+            let title = mission_json_field(&path, "title").unwrap_or_else(|| mission_id.clone());
+            let goal = mission_json_field(&path, "goal").unwrap_or_default();
+            let status =
+                mission_json_field(&path, "status").unwrap_or_else(|| "active".to_string());
+            missions.push(serde_json::json!({
+                "missionId": mission_json_field(&path, "missionId").unwrap_or_else(|| mission_id.clone()),
+                "title": title,
+                "goal": goal,
+                "rootPath": path.to_string_lossy().to_string(),
+                "createdAt": created_at,
+                "updatedAt": updated_at,
+                "status": status,
+                "taskCount": mission_json_count(&path, "tasks"),
+                "runCount": count_mission_runs(&path),
+            }));
+        }
+    }
+    missions.sort_by(|a, b| {
+        let am = a.get("updatedAt").and_then(|v| v.as_str()).unwrap_or("");
+        let bm = b.get("updatedAt").and_then(|v| v.as_str()).unwrap_or("");
+        bm.cmp(am)
+    });
+    respond_json(request, 200, &serde_json::json!({ "missions": missions }));
+}
+
 fn safe_relative_join(base: &Path, rel: &str) -> Result<PathBuf, String> {
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() {
@@ -3687,6 +3779,9 @@ fn handle(request: Request, registry: Registry) {
         // ── Atomek computer/agent controller bridge ───────────────────
         (Method::Get, "/api/resources") => {
             handle_resources(request);
+        }
+        (Method::Get, "/api/missions") => {
+            handle_missions_list(request);
         }
         (Method::Post, "/api/missions") => {
             handle_mission_create(request);

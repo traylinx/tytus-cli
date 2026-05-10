@@ -546,7 +546,10 @@ mod tests {
 
     #[test]
     fn daemon_pidfile_live_accepts_existing_pid() {
-        assert_eq!(daemon_pidfile_live_from_text(Some("4242"), |pid| pid == 4242), Some(4242));
+        assert_eq!(
+            daemon_pidfile_live_from_text(Some("4242"), |pid| pid == 4242),
+            Some(4242)
+        );
     }
 
     #[test]

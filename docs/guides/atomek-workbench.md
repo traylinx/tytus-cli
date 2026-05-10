@@ -49,6 +49,14 @@ The **Control Tower** panel discovers allowlisted local tools through the tray/h
 
 Use **Open Terminal** for supervised interactive work. Use local jobs for background agent work that streams output back into Atomek and returns artifacts or patch previews.
 
+## Mission packs and resource graph
+
+Atomek mission packs live under **Tytus Home / Missions**. They are shared working folders for coordinating pods, local agents, app skills, and shared-folder handoffs without giving agents blind write access to the source workspace.
+
+A mission pack contains `MISSION.md`, `MISSION.json`, `RESOURCES.md`, `TASKS.md`, `HANDOFF.md`, `INBOX.md`, `OUTBOX.md`, `AUDIT.jsonl`, and `NEXT.md`. Atomek can list and resume existing packs through the tray `GET /api/missions` bridge, then restore the mission badge, task graph, selected resources, and handoff prompt.
+
+The resource graph shows pods, local CLIs, app skills, shared folders, and the active workspace. Use **Use** to attach a resource to the current mission prompt. Use **Setup** when the resource exists conceptually but needs a local install command, app launch, or bridge.
+
 Security rules:
 
 - no arbitrary shell command execution from model text
@@ -66,9 +74,9 @@ Use **Atomek** for editing and agent work against selected files or folders.
 
 | Problem | Fix |
 |---|---|
-| Old Atomek UI or duplicate Control Tower icons | Hard-refresh TytusOS. Current app should be `tytus-app-atomek@v0.4.15` or newer. |
+| Old Atomek UI or duplicate Control Tower icons | Hard-refresh TytusOS. Current app should be `tytus-app-atomek@v0.4.16` or newer. |
 | Files appear but editor is blank | Reopen the file, hard-refresh, then check the browser console. |
-| Folder does not expand/collapse | Hard-refresh. Mission Control and folder fixes ship in Atomek `v0.4.15`. |
+| Folder does not expand/collapse | Hard-refresh. Mission Control and folder fixes ship in Atomek `v0.4.16`. |
 | Local tool missing | Install the local CLI/tool, then click **Refresh capabilities**. |
 | Remote model/pod fetch gets CORS | Route through the Tytus host proxy. Browser apps should not direct-fetch pod public URLs. |
 | Model list shows an old model | Fix global AIL config. Do not hardcode models in Atomek. |

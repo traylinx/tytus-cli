@@ -36,6 +36,7 @@ atomek-auth = { path = "../auth" }
 # 401 because they lack the ?token= query the edge plugin requires.
 sha2 = "0.10"
 hex = "0.4"
+chrono.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
