@@ -1,15 +1,21 @@
 # Changelog
 
+All notable changes to the `tytus` CLI, `tytus-mcp` server, and
+`Tytus.app` menu bar tray. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
+bumps are allowed to break compat.
+
+## v0.6.14-beta.29 - 2026-05-10
+
+- Bundles TytusOS `v1.0.21-apps-platform`.
+- Pins the Tytus app catalog to version 44 so Atomek `0.4.13` and JULI3TA `0.3.14` resolve from the same immutable catalog snapshot.
+- Refreshes vendored TytusOS dist and public beta installer/download references.
+
 ## v0.6.14-beta.28 - 2026-05-10
 
 - Embeds TytusOS `v1.0.20-apps-platform` with JULI3TA 0.3.14.
 - Fixes JULI3TA Restyle to let MiniMax cover extract lyrics from reference audio unless the user supplies edited lyrics.
 - Improves Restyle reference quality with 24 kHz compact samples, preview controls, prompt bounds, and post-generate Player handoff.
-
-All notable changes to the `tytus` CLI, `tytus-mcp` server, and
-`Tytus.app` menu bar tray. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
-conventions; versioning is [SemVer](https://semver.org/) — pre-1.0 minor
-bumps are allowed to break compat.
 
 ## v0.6.14-beta.27 - 2026-05-10
 
