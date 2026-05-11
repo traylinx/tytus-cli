@@ -47,7 +47,7 @@ tytus status --json
 Interpretation:
 
 - not logged in or session expired: run `tytus login`, then re-check status.
-- no pods: run `tytus setup` or `tytus agent install nemoclaw` after user intent is clear.
+- no pods: run `tytus setup` or `tytus agent install openclaw` after user intent is clear.
 - pods present: inspect readiness before claiming they are ready.
 
 Use `tytus doctor` for diagnostics. Do not delete pods to fix login/session expiry.
@@ -82,7 +82,7 @@ These are the only values to paste into user configs. Never hardcode per-pod URL
 
 | Agent | Cost | UI/API | Notes |
 |---|---:|---|---|
-| `nemoclaw` | 1 | OpenClaw/NemoClaw on port 3000 | Best default autonomous coding pod |
+| `openclaw` | 1 | OpenClaw on port 3000 | Best default autonomous coding pod |
 | `hermes` | 2 | dashboard 9119, gateway 8642 | Nous Hermes dashboard + gateway |
 
 ## Models
@@ -100,7 +100,7 @@ tytus tray install
 tytus env --export
 tytus os-docs
 tytus agent catalog
-tytus agent install nemoclaw
+tytus agent install openclaw
 tytus agent install hermes
 tytus agent list
 tytus exec --pod 01 "pwd && ls -la /app/workspace"

@@ -8,8 +8,8 @@ Every Tytus plan comes with a **unit budget** — a fixed number of units you ca
 
 | Plan | Price | Units | What you can run |
 |---|---|---|---|
-| Explorer | $39/mo | 1 unit | 1 nemoclaw |
-| Creator | $79/mo | 2 units | 2 nemoclaw, or 1 hermes |
+| Explorer | $39/mo | 1 unit | 1 OpenClaw pod |
+| Creator | $79/mo | 2 units | 2 OpenClaw pods, or 1 Hermes pod |
 | Operator | $149/mo | 4 units | Any mix up to 4 units |
 
 Check your current plan and usage:
@@ -23,13 +23,13 @@ tytus status
 
 An **agent** is the AI runtime that runs inside your pod. You choose your agent when you connect:
 
-### NemoClaw (1 unit) — Default
+### OpenClaw (1 unit) — Default
 
 ```bash
-tytus connect --agent nemoclaw
+tytus connect --agent openclaw
 ```
 
-OpenClaw runtime with the NemoClaw sandboxing blueprint. Lightweight, fast startup. Best for:
+OpenClaw runtime. Lightweight, fast startup. Best for:
 - General AI chat and coding assistance
 - Quick tasks and one-off queries
 - When you want maximum pods per plan
@@ -100,7 +100,7 @@ Use the aliases returned by the gateway/model list or global AIL configuration. 
 tytus status
 
 # Allocate a new pod
-tytus connect --agent nemoclaw
+tytus connect --agent openclaw
 
 # Restart the agent (applies config changes)
 tytus restart
@@ -118,10 +118,10 @@ tytus exec "ls /workspace"
 
 | You have | You can run |
 |---|---|
-| 1 unit (Explorer) | 1 nemoclaw |
-| 2 units (Creator) | 2 nemoclaw, OR 1 hermes |
-| 3 units | 3 nemoclaw, OR 1 hermes + 1 nemoclaw |
-| 4 units (Operator) | 4 nemoclaw, OR 2 hermes, OR 2 nemoclaw + 1 hermes |
+| 1 unit (Explorer) | 1 OpenClaw pod |
+| 2 units (Creator) | 2 OpenClaw pods, OR 1 Hermes pod |
+| 3 units | 3 OpenClaw pods, OR 1 Hermes pod + 1 OpenClaw pod |
+| 4 units (Operator) | 4 OpenClaw pods, OR 2 Hermes pods, OR 2 OpenClaw pods + 1 Hermes pod |
 
 If you try to allocate more than your budget allows:
 ```

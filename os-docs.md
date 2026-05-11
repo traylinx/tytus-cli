@@ -61,7 +61,7 @@ If the top bar says **Session expired**, your pods are still running. Open **Set
 | Browse local workspace | Files -> Tytus Home |
 | Browse a pod workspace | Files -> Pod NN workspace |
 | Edit local files and ask AI with file context | Atomek |
-| Launch local agents with active file context | Atomek -> Control Tower |
+| Launch local agents with active file context | Atomek -> Agent Team |
 | Configure Telegram/Discord/Slack/etc. | Channels |
 | Fix expired login | Settings -> Daemon |
 | Check shared folders | Settings -> Sharing or Files -> Shared |
@@ -95,7 +95,7 @@ Real production surfaces:
 - Files over Tytus Home, shared folders, and pod workspaces
 - Channels setup
 - Terminal backed by the host shell through the tray daemon
-- Atomek workbench for local files, chat, artifacts, app skills, and local Control Tower
+- Atomek workbench for local files, chat, artifacts, app skills, and local Resource Fabric cockpit
 - Settings for account, daemon, sharing, appearance, dock, language, privacy, updates
 - Music Creator and other Tytus apps that use the included gateway
 
@@ -506,7 +506,7 @@ A missing pod inbox or downloads directory should render as a friendly empty sta
 | Browse or move through Tytus Home, Shared, Inbox, Outbox, Downloads | Files |
 | Open a local folder for editing | Atomek |
 | Ask AI about the active file | Atomek chat |
-| Run tests or local tools with folder context | Atomek -> Control Tower or Terminal |
+| Run tests or local tools with folder context | Atomek -> Agent Team or Terminal |
 | Inspect generated artifacts and patch previews | Atomek Outputs |
 
 Files owns broad navigation. Atomek owns editing and agent interaction. Do not duplicate full editor behavior in Files.
@@ -633,9 +633,25 @@ A new mission writes a standard pack:
 - `HANDOFF.md` — copy-paste summary for another agent/window
 - `INBOX.md` / `OUTBOX.md` — lightweight shared-folder exchange points
 - `AUDIT.jsonl` — append-only mission events
+- `RUNS.jsonl` — reloadable run index for local/pod/app jobs
+- `runs/` — transcripts
+- `outputs/` — generated artifacts and handoff files
+- `proposals/` — patch/write/publish proposals before approval
+- `approvals/` — explicit approve/reject records
 - `NEXT.md` — immediate next action
 
 The Agent Team board can list and resume existing mission packs through `host.missions.list()`. Resuming a mission restores the mission badge, task graph, and context prompt.
+
+### Team presets
+
+Atomek does not ask the user to manually understand every tool. The front door offers presets generated from the live resource graph:
+
+- **Repo Repair** — local implementer plus independent reviewer.
+- **OpenClaw + Local** — OpenClaw/Hermes pod perspective plus local Claude/OpenCode/Codex/pi execution.
+- **Creative Production** — app skills such as JULI3TA, Blender, and Remotion plus shared assets.
+- **Research Watch** — pod/AIL research, local synthesis, shared-folder handoff, optional channels.
+
+Each preset maps roles to real resources: planner, implementer, reviewer, Team Desk, and app tool when relevant. Missing resources show as setup-needed instead of fake availability.
 
 ### Resource graph
 
@@ -645,11 +661,26 @@ The setup view shows resources as a graph: pods, local agents, apps, shared fold
 
 The default mission task graph is deliberately small:
 
-1. plan with selected resources
-2. execute through an allowlisted local/pod/app driver
-3. summarize handoff and outputs
+1. scope the mission and context with the planner role
+2. execute or produce an artifact through the implementer/app role
+3. run app-skill work when relevant
+4. review, approve, and prepare handoff with the reviewer role
 
 This keeps Atomek useful immediately while leaving room for richer multi-agent orchestration later.
+
+
+## Ask pod
+
+**Ask pod** sends the selected mission task to a ready pod agent through `host.daemon.callPodEndpoint()`. Atomek first asks the pod for `/v1/models`, selects the first live model returned by the pod metadata, then sends a non-streaming `/v1/chat/completions` request through the same-origin Tytus bridge. No model id is hardcoded in Atomek.
+
+The pod response is saved like any other run:
+
+- visible in the Runs panel
+- captured in Outputs
+- written under `runs/`
+- indexed in `RUNS.jsonl`
+
+If the pod gateway rejects the request or is unreachable, Atomek writes a failed run transcript instead of silently hiding the error.
 
 ## Open in Terminal
 
@@ -798,7 +829,7 @@ TytusOS apps fall into two groups:
 | Files | Finder-like browser for `~/Tytus`, Inbox, Outbox, Downloads, Shared, and pod workspaces |
 | Channels | Per-pod messenger/channel setup with token-safe flows |
 | Terminal | Host-backed shell through the local tray daemon, starting in `~/Tytus` |
-| Atomek | Monaco workbench for files, chat, artifacts, AIL routing, Control Tower, and app skills |
+| Atomek | Monaco workbench for files, chat, artifacts, AIL routing, Resource Fabric cockpit, and app skills |
 | Browser | Registered launchers and safe web/app links |
 | Help | Bundled manual, troubleshooting, diagnostic links |
 | Chat | Opens agent chat surfaces and pod UIs |
@@ -908,13 +939,13 @@ Fix:
 
 Use the folder chevron or click the folder row. If nothing changes, you are likely on an old bundle. Hard-refresh TytusOS and reopen the folder.
 
-## Atomek shows duplicate Control Tower and Extensions icons
+## Atomek shows duplicate Agent Team and stale App Skills icons
 
-That was an old app bundle. The current surface has one **Control Tower** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.18` or newer.
+That was an old app bundle. The current surface has one **Agent Team** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.18` or newer.
 
 ## Atomek local tools are missing
 
-Open **Atomek -> Control Tower** and click **Refresh capabilities**. If a tool is still missing, install the local CLI first, then refresh again. Atomek only launches allowlisted tools discovered through the host bridge.
+Open **Atomek -> Agent Team** and click **Refresh capabilities**. If a tool is still missing, install the local CLI first, then refresh again. Atomek only launches allowlisted tools discovered through the host bridge.
 
 ## Atomek model list shows an obsolete model
 

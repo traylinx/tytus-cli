@@ -11,7 +11,7 @@
 
 Tytus is a **private AI pod product**. Each subscriber gets one or more
 isolated pods that they reach via a **userspace WireGuard tunnel**. Inside
-each pod runs an **agent container** (OpenClaw + NemoClaw sandbox, or Hermes
+each pod runs an **agent container** (OpenClaw or Hermes
 from Nous Research). Behind the agent is **SwitchAILocal**, an OpenAI-
 compatible gateway that proxies to upstream providers (MiniMax today).
 
@@ -33,7 +33,7 @@ only — they never see prompts or responses.
 | Traylinx | Platform brand (subscriptions, auth, billing) |
 | Wannolot | Internal engineering codename |
 | Pod | One user's isolated slice: WG sidecar + agent container |
-| Agent | The AI runtime inside the pod (nemoclaw or hermes) |
+| Agent | The AI runtime inside the pod (OpenClaw or Hermes) |
 | Sidecar | The WireGuard container holding the netns |
 | Unit | Resource accounting unit; agents have a unit cost |
 | Plan | Subscription tier with a fixed unit budget |
@@ -65,8 +65,8 @@ Agents cost units when allocated:
 
 | Agent | Image | Cost | UI port | API port | Health path |
 |---|---|---|---|---|---|
-| nemoclaw | `tytus-nemoclaw:latest` (OpenClaw + NemoClaw blueprint) | 1 unit | 3000 | 3000 | `/healthz` |
-| hermes | `tytus-hermes:latest` (Nous Research) | 2 units | 9119 | 8642 | `/health` |
+| OpenClaw | `tytus-openclaw` / legacy backend image | 1 unit | 3000 | 3000 | `/healthz` |
+| Hermes | `tytus-hermes` | 2 units | 9119 | 8642 | `/health` |
 
 `tytus connect --agent <name>` is rejected by the control plane if the
 user would exceed their unit budget. The check is atomic in Scalesys
@@ -75,7 +75,7 @@ user would exceed their unit budget. The check is atomic in Scalesys
 **Two-port Hermes pods.** Hermes runs two HTTP servers inside the pod:
 the gateway (port 8642, OpenAI-compatible `/v1/*` + `/api/jobs*`) and
 the dashboard (port 9119, Vite/React management SPA with Config, Env,
-Sessions, Skills, Logs, Cron, Analytics, Status pages). nemoclaw runs
+Sessions, Skills, Logs, Cron, Analytics, Status pages). OpenClaw runs
 one server that serves both UI and API on 3000. The tytus forwarder
 **multiplexes** on hermes pods: requests matching `/v1/*`,
 `/api/jobs*`, or `/health*` go to the gateway (:8642), everything else
@@ -84,16 +84,17 @@ URL (`http://localhost:18700+pod_num/`).
 
 ## 4. Models on the SwitchAILocal gateway
 
-| Model id | Backed by | Capabilities |
-|---|---|---|
-| `ail-compound` | MiniMax M2.7 | text, vision, audio (default chat model) |
-| `minimax/ail-compound` | MiniMax M2.7 | text |
-| `ail-image` | MiniMax image-01 | image generation |
-| `minimax/ail-image` | MiniMax image-01 | image generation |
-| `ail-embed` | mistral-embed (via SwitchAI) | embeddings |
+The gateway model list is dynamic. Treat `/v1/models`, `tytus models`/MCP, or the global AIL route configuration as the source of truth. Apps must not hardcode provider model IDs.
 
-These are **all** the models available. There is no `gpt-4`, no `claude-*`,
-no `qwen3-8b` — do not invent models.
+Stable AIL aliases commonly exposed by the route include:
+
+| Model id | Capabilities |
+|---|---|
+| `ail-compound` | default text / multimodal chat alias for the configured AIL route |
+| `ail-image` | image generation alias for the configured AIL route |
+| `ail-embed` | embeddings alias for the configured AIL route |
+
+Provider-specific aliases may appear or disappear when AIL is reconfigured. Discover them at runtime.
 
 ## 5. The stable URL + stable user key
 
@@ -115,7 +116,7 @@ eval "$(tytus env --export)"
 # Legacy TYTUS_* aliases kept for pre-sprint scripts:
 # → TYTUS_AI_GATEWAY=http://10.42.42.1:18080
 # → TYTUS_API_KEY=sk-tytus-user-<32hex>
-# → TYTUS_AGENT_TYPE=nemoclaw
+# → TYTUS_AGENT_TYPE=<backend agent id>
 # → TYTUS_POD_ID=02
 ```
 
@@ -165,7 +166,7 @@ forwarder injects automatically. Users never see or paste a token.
 
 | Agent | Secret name | Derivation | Where it's read |
 |---|---|---|---|
-| nemoclaw | `gateway.auth.token` | generated in `nemoclaw-configure.sh` from `sha256(AIL_API_KEY + TYTUS_POD_ID)[:48]`; written into `config.json` | `/app/workspace/.openclaw/config.json` |
+| OpenClaw | `gateway.auth.token` | generated during OpenClaw setup from `sha256(AIL_API_KEY + TYTUS_POD_ID)[:48]`; written into `config.json` | `/app/workspace/.openclaw/config.json` |
 | hermes | `API_SERVER_KEY` | same formula, set as env var by `hermes/entrypoint.sh` when not injected externally | `/app/workspace/.hermes/api_server_key` |
 
 The forwarder (`tytus ui --pod NN`, or the tray's "Open in Browser"
@@ -176,7 +177,7 @@ field. On every proxied request, the forwarder **overrides** any
 client-side Authorization header with `Bearer <gateway_token>` — so
 SDK placeholders like `OpenAI(api_key="any-string")` work out of the
 box on hermes pods, and OpenClaw silent-local-pairing fires on
-nemoclaw without the browser ever seeing the token form.
+OpenClaw without the browser ever seeing the token form.
 
 ## 5d. Agent config overlays (survive container restart)
 
@@ -187,14 +188,14 @@ want to change.
 
 | Agent | Base (regenerated) | User overlay | Format |
 |---|---|---|---|
-| nemoclaw | `/app/workspace/.openclaw/config.json` | `/app/workspace/.openclaw/config.user.json` | JSON |
+| OpenClaw | `/app/workspace/.openclaw/config.json` | `/app/workspace/.openclaw/config.user.json` | JSON |
 | hermes | `/app/workspace/config.yaml` | `/app/workspace/config.user.yaml` | YAML |
 
 Precedence: **overlay wins on conflicts** for scalars; for arrays and
 maps, it's a recursive deep-merge (maps merge key-wise, arrays are
 replaced wholesale — not appended).
 
-The CLI writes `config.user.json` on nemoclaw at agent-install time
+The CLI writes `config.user.json` for OpenClaw at agent-install time
 to add the forwarder's `http://localhost:18700+N` origin to
 `gateway.controlUi.allowedOrigins` so the browser's WS upgrade passes
 origin-check AND satisfies silent-local-pairing (requires loopback
@@ -248,7 +249,7 @@ tytus setup                        Interactive wizard: login (if needed),
                                    tunnel, sample chat. Use this for
                                    first-run experiences.
 
-tytus connect [--pod NN] [--agent nemoclaw|hermes]
+tytus connect [--pod NN] [--agent openclaw|hermes]
                                    No flags: bring the tunnel up to the
                                    user's default pod (agent-less, 0
                                    units, always available). Allocates
@@ -263,7 +264,7 @@ tytus connect [--pod NN] [--agent nemoclaw|hermes]
                                    writes its PID to /tmp/tytus/tunnel-NN.pid.
 
 tytus agent install <name> [--pod NN] [--force]
-                                   Install an agent runtime (nemoclaw,
+                                   Install an agent runtime (openclaw,
                                    hermes, …). Without --pod: allocate a
                                    new pod slot and deploy the agent in
                                    one shot (costs plan units per the
@@ -332,7 +333,7 @@ tytus test                         End-to-end health: auth, pod, tunnel,
 
 tytus capabilities [--pod NN]      Discover the pod gateway's model
                                    catalog + provider-native tools (e.g.
-                                   MiniMax M2.7's autonomous web_search).
+                                   upstream autonomous web_search).
                                    Reads GET /v1/models using the same
                                    stable endpoint/key pair `tytus env`
                                    emits, so it works over the WG tunnel
@@ -512,7 +513,7 @@ what the user actually has, then branch based on that.
 ### Recipe A — Make sure the user has a working pod, then chat
 ```bash
 tytus status --json | jq -e '.pods | length > 0' \
-    || tytus connect --agent nemoclaw
+    || tytus connect --agent openclaw
 tytus test                                              # confirm green
 eval "$(tytus env --export)"                            # load stable pair
 curl -sS "$OPENAI_BASE_URL/chat/completions" \
@@ -521,7 +522,7 @@ curl -sS "$OPENAI_BASE_URL/chat/completions" \
     -d '{"model":"ail-compound","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### Recipe B — Switch a pod from nemoclaw to hermes
+### Recipe B — Switch a pod from OpenClaw to Hermes
 ```bash
 tytus disconnect --pod 02       # tear down tunnel only (allocation kept)
 tytus revoke 02                 # free the units (destroys workspace)
@@ -568,7 +569,7 @@ tytus restart                                # triggers DAM sync as a side effec
 
 ### Recipe F — Call AIL without installing an agent
 Users on the free tier (or who just want raw gateway access) don't have
-to spend a unit on NemoClaw / Hermes — the default pod covers this.
+to spend a unit on OpenClaw / Hermes — the default pod covers this.
 ```bash
 tytus login          # provisions the default pod automatically
 tytus connect        # no --agent: brings the tunnel up to the default pod
@@ -579,7 +580,7 @@ curl -sS "$AIL_URL/chat/completions" \
     -d '{"model":"ail-compound","messages":[{"role":"user","content":"hi"}]}'
 ```
 Install an agent later — units are only spent when the user actually
-wants one: `tytus agent install nemoclaw`.
+wants one: `tytus agent install openclaw`.
 
 ## 9. Error catalog
 
@@ -598,9 +599,7 @@ wants one: `tytus agent install nemoclaw`.
 
 ## 10. Hard rules for AI agents
 
-1. **Never invent models.** Only `ail-compound`, `ail-image`, `ail-embed`,
-   `minimax/ail-compound`, `minimax/ail-image` exist. If the user asks for
-   another model, say it's not available on this pod.
+1. **Never invent models.** Query the live gateway model list (`/v1/models`, MCP `tytus_models`, or global AIL config). Treat `ail-compound`, `ail-image`, and `ail-embed` as stable aliases, but never hardcode provider-specific model ids in apps.
 2. **Never hardcode `10.18.X.Y` IPs.** They change. Use `10.42.42.1`.
 3. **Never paste raw per-pod keys into source files.** Read from
    `tytus env` at runtime.

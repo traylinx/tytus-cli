@@ -40,12 +40,12 @@ Checksum-verified command-line install is also available:
 
 ```bash
 # macOS / Linux public beta
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.35 sh
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.36 sh
 ```
 
 ```powershell
 # Windows public beta preview
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.35"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.36"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 **What the installer does:**
@@ -64,7 +64,7 @@ cargo install --path cli --bin tytus --bin tytus-mcp
 
 ## Platform notes
 
-| Platform | v0.6.14-beta.35 status |
+| Platform | v0.6.14-beta.36 status |
 |---|---|
 | macOS | Public beta unsigned pkg for Apple Silicon and Intel. Full CLI + tray + TytusOS path. |
 | Linux | Public beta unsigned deb for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, and desktop entries. |
@@ -82,7 +82,7 @@ The setup wizard walks you through everything:
 
 1. **Sign in** — Opens your browser for secure login (no passwords typed in the terminal)
 2. **Plan check** — Shows your subscription tier and available units
-3. **Agent pick** — Choose nemoclaw (default, 1 unit) or hermes (2 units)
+3. **Agent pick** — Choose OpenClaw (default, 1 unit) or Hermes (2 units)
 4. **Connect** — Allocates your pod and opens the WireGuard tunnel
 5. **Test** — Sends a sample chat to verify everything works
 
@@ -123,7 +123,7 @@ tytus tray install
 open -a Tytus  # macOS
 ```
 
-From TytusOS you can use Pod Inspector, Files, Channels, Settings, Terminal, Atomek, and app workflows without remembering CLI commands. Atomek is the editor/chat/workbench for local files and Control Tower local-tool control. The tray opens TytusOS by default; legacy Tower is hidden rollback only.
+From TytusOS you can use Pod Inspector, Files, Channels, Settings, Terminal, Atomek, and app workflows without remembering CLI commands. Atomek is the editor/chat/workbench for local files and Agent Team local-tool control. The tray opens TytusOS by default; legacy Tower is hidden rollback only.
 
 ---
 

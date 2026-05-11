@@ -1,6 +1,6 @@
 # Public Beta Install Guide
 
-> For `v0.6.14-beta.35`. This is a technical preview, not production GA.
+> For `v0.6.14-beta.36`. This is a technical preview, not production GA.
 
 ## Start here
 
@@ -10,7 +10,7 @@ Open:
 https://get.traylinx.com/
 ```
 
-Download one file for your computer, open it, then open **Tytus** and follow the setup wizard. The wizard signs you in, lets you pick OpenClaw/NemoClaw or Hermes, starts the private tunnel, and runs the test.
+Download one file for your computer, open it, then open **Tytus** and follow the setup wizard. The wizard signs you in, lets you pick OpenClaw or Hermes, starts the private tunnel, and runs the test.
 
 ## macOS
 
@@ -68,7 +68,7 @@ Unzip it and run from PowerShell. Windows is still CLI/MCP technical preview: MS
 Optional PowerShell installer:
 
 ```powershell
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.35"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.36"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 ## Command-line installers
@@ -76,13 +76,13 @@ $env:TYTUS_RELEASE_TAG="v0.6.14-beta.35"; irm https://get.traylinx.com/install.p
 macOS/Linux:
 
 ```bash
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.35 sh
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.36 sh
 ```
 
 Windows:
 
 ```powershell
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.35"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.36"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 ## First-run wizard
@@ -91,7 +91,7 @@ The setup wizard does this:
 
 1. Sign in through the browser.
 2. Check your plan.
-3. Pick an assistant: OpenClaw/NemoClaw or Hermes.
+3. Pick an assistant: OpenClaw or Hermes.
 4. Start the private encrypted tunnel.
 5. Run a health test.
 

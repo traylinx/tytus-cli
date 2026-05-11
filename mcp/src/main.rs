@@ -113,7 +113,7 @@ fn tool_definitions() -> Vec<ToolInfo> {
     vec![
         ToolInfo {
             name: "tytus_docs".into(),
-            description: "Return the comprehensive LLM-facing reference for tytus-cli (same content as `tytus llm-docs`). Read this BEFORE driving any other tytus operation in a fresh session — it covers the command surface, agent types (nemoclaw=1u, hermes=2u), plan tiers, the only available models (ail-compound, ail-image, ail-embed, minimax/ail-compound, minimax/ail-image), the stable URL/key model, and the standard recipes. Cache the output in your context for the rest of the session.".into(),
+            description: "Return the comprehensive LLM-facing reference for tytus-cli (same content as `tytus llm-docs`). Read this BEFORE driving any other tytus operation in a fresh session — it covers the command surface, agent types (OpenClaw=1u, Hermes=2u), plan tiers, the only live AIL model aliases returned by the gateway, the stable URL/key model, and the standard recipes. Cache the output in your context for the rest of the session.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -159,7 +159,7 @@ fn tool_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "tytus_models".into(),
-            description: "List the LLM models available on the user's pod gateway. Returns the small fixed catalog: ail-compound (MiniMax M2.7, text+vision+audio), ail-image (MiniMax image-01), ail-embed (mistral-embed via SwitchAI), and the minimax/-prefixed aliases. Requires an active tunnel — call tytus_status first and tytus_setup_guide if no pod is connected.".into(),
+            description: "List the live LLM model aliases available on the user's pod gateway. The gateway is AIL-configured; apps must discover model ids at runtime instead of hardcoding provider names. Requires an active tunnel — call tytus_status first and tytus_setup_guide if no pod is connected.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -170,14 +170,13 @@ fn tool_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "tytus_chat".into(),
-            description: "Send a chat completion through the user's private pod gateway. The request is OpenAI-compatible and is routed via WireGuard tunnel through the droplet's SwitchAILocal proxy to MiniMax (no customer LLM traffic ever traverses Traylinx Cloud). The model parameter MUST be one of: ail-compound (default text/vision/audio), ail-image, ail-embed, minimax/ail-compound, minimax/ail-image. Do NOT pass any other model id — it will fail. Requires an active tunnel.".into(),
+            description: "Send a chat completion through the user's private pod gateway. The request is OpenAI-compatible and routed via WireGuard tunnel through the droplet's SwitchAILocal/AIL proxy. Use a model id returned by tytus_models or the gateway model list; default to ail-compound if the caller does not specify one. Requires an active tunnel.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "model": {
                         "type": "string",
-                        "enum": ["ail-compound", "ail-image", "ail-embed", "minimax/ail-compound", "minimax/ail-image"],
-                        "description": "One of the fixed model ids on the pod gateway. Default chat = ail-compound."
+                        "description": "Model id returned by the live pod gateway model list. Default chat alias = ail-compound."
                     },
                     "messages": {
                         "type": "array",
@@ -193,7 +192,7 @@ fn tool_definitions() -> Vec<ToolInfo> {
                     },
                     "max_tokens": {
                         "type": "integer",
-                        "description": "Max tokens to generate (default 1024). MiniMax M2.7 can spend most tokens on reasoning_content before producing visible text — bump this to 200+ if you see empty content."
+                        "description": "Max tokens to generate (default 1024). Some upstream models may spend tokens on reasoning_content before visible text — bump this if you see empty content."
                     },
                     "temperature": {
                         "type": "number",

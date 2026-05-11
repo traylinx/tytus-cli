@@ -155,7 +155,8 @@ struct Cli {
 
 #[derive(Clone, ValueEnum)]
 enum AgentType {
-    Nemoclaw,
+    #[value(alias = "nemoclaw")]
+    Openclaw,
     Hermes,
 }
 
@@ -172,7 +173,7 @@ enum AutostartAction {
 impl AgentType {
     fn as_str(&self) -> &str {
         match self {
-            AgentType::Nemoclaw => "nemoclaw",
+            AgentType::Openclaw => "openclaw",
             AgentType::Hermes => "hermes",
         }
     }
@@ -216,8 +217,7 @@ enum AgentAction {
     /// Install an agent. Without --pod, allocates a new pod. With --pod,
     /// deploys into that pod (use --force to replace an existing agent).
     Install {
-        /// Agent type — accepts `openclaw` (aliased to `nemoclaw` on the
-        /// backend), `hermes`, or any other id from `tytus agent catalog`.
+        /// Agent type — accepts `openclaw`, `hermes`, or any other id from `tytus agent catalog`.
         name: String,
         /// Existing pod slot to install into. Omit to allocate a new slot.
         #[arg(short, long)]
@@ -459,7 +459,7 @@ enum Commands {
     #[command(hide = true, alias = "tytus-os-docs")]
     OsDocs,
     /// Discover the pod's AI gateway catalog — models + provider-native
-    /// tools (e.g. MiniMax M2.7's autonomous web_search). One call covers
+    /// tools (e.g. upstream autonomous web_search). One call covers
     /// every model the pod exposes via `/v1/models`.
     ///
     /// Default output is a human tree; `--json` (global flag) passes the
@@ -3155,7 +3155,7 @@ async fn configure_agent_for_zero_auth(
 ) -> Result<(), String> {
     match agent_type {
         "hermes" => configure_hermes_for_zero_auth(client, pod_id, json).await,
-        // nemoclaw is the default; other values fall through to the
+        // OpenClaw is the default; other values fall through to the
         // openclaw-style path since they're all likely OpenClaw-derived.
         _ => configure_nemoclaw_for_zero_auth(client, pod_id, json).await,
     }
@@ -4316,6 +4316,11 @@ async fn cmd_channels_add(
         }
     }
 
+    if let Err(e) = ensure_channel_pod_can_run_agent(http, pod_id).await {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
+
     // 3. Persist each secret to the OS keychain.
     let env_var_names: Vec<String> = collected.iter().map(|(k, _)| k.clone()).collect();
     for (env_var, value) in &collected {
@@ -4386,6 +4391,14 @@ async fn cmd_channels_remove(
         }
     };
 
+    let agent_type = match channel_pod_agent_type(http, pod_id).await {
+        Ok(agent_type) => agent_type,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
     let mut manifest = channels_store::ChannelManifest::load();
     let removed = manifest.remove_channel(pod_id, spec.name);
 
@@ -4407,6 +4420,29 @@ async fn cmd_channels_remove(
     if let Err(e) = manifest.save() {
         eprintln!("Failed to update local manifest: {}", e);
         std::process::exit(1);
+    }
+
+    if agent_type == "none" {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "pod": pod_id,
+                    "channel": spec.name,
+                    "removed": true,
+                    "agent_restarted": false,
+                })
+            );
+        } else {
+            println!(
+                "{} {} removed locally for default pod {}. No agent is installed, so no container restart was needed.",
+                console::style("✓").green(),
+                spec.label,
+                pod_id
+            );
+        }
+        return;
     }
 
     if let Err(e) = push_channels_to_pod(http, &manifest, pod_id).await {
@@ -4455,6 +4491,50 @@ fn load_for_channel_op() -> CliState {
         file_state
     } else {
         CliState::load()
+    }
+}
+
+async fn channel_pod_agent_type(
+    http: &atomek_core::HttpClient,
+    pod_id: &str,
+) -> Result<String, String> {
+    let mut state = load_for_channel_op();
+    if state.email.as_deref().unwrap_or("").is_empty() {
+        return Err("Not logged in. Run: tytus login".to_string());
+    }
+    ensure_token(&mut state, http)
+        .await
+        .map_err(|e| format!("token refresh: {}", e))?;
+    sync_tytus(&mut state, http).await;
+    state.save();
+    let pod = state
+        .pods
+        .iter()
+        .find(|p| p.pod_id == pod_id)
+        .ok_or_else(|| format!("Pod {} not found. Run: tytus status", pod_id))?;
+    pod.agent_type.clone().ok_or_else(|| {
+        format!(
+            "Pod {} has no agent_type in state. Run: tytus status",
+            pod_id
+        )
+    })
+}
+
+async fn ensure_channel_pod_can_run_agent(
+    http: &atomek_core::HttpClient,
+    pod_id: &str,
+) -> Result<String, String> {
+    let agent_type = channel_pod_agent_type(http, pod_id).await?;
+    match agent_type.as_str() {
+        "nemoclaw" | "hermes" => Ok(agent_type),
+        "none" => Err(format!(
+            "Pod {} is the default AIL-only pod; channels need an installed agent. Run: tytus agent install openclaw --pod {}",
+            pod_id, pod_id
+        )),
+        other => Err(format!(
+            "Pod {} has unsupported agent_type '{}' for channels. Install OpenClaw or Hermes first.",
+            pod_id, other
+        )),
     }
 }
 
@@ -4519,6 +4599,8 @@ async fn redeploy_agent(http: &atomek_core::HttpClient, pod_id: &str) -> Result<
     ensure_token(&mut state, http)
         .await
         .map_err(|e| format!("token refresh: {}", e))?;
+    sync_tytus(&mut state, http).await;
+    state.save();
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
@@ -4528,7 +4610,18 @@ async fn redeploy_agent(http: &atomek_core::HttpClient, pod_id: &str) -> Result<
         .iter()
         .find(|p| p.pod_id == pod_id)
         .and_then(|p| p.agent_type.clone())
-        .unwrap_or_else(|| "nemoclaw".to_string());
+        .ok_or_else(|| {
+            format!(
+                "Pod {} has no agent_type in state. Run: tytus status",
+                pod_id
+            )
+        })?;
+    if agent_type != "nemoclaw" && agent_type != "hermes" {
+        return Err(format!(
+            "Pod {} has no deployable agent (agent_type='{}'). Install OpenClaw or Hermes first.",
+            pod_id, agent_type
+        ));
+    }
 
     atomek_pods::deploy_agent(&client, pod_id, &agent_type)
         .await
@@ -9033,13 +9126,12 @@ the CLI.
 - **Tytus** = customer name for the private AI pod product (Traylinx brand)
 - **Pod** = one user's isolated slice: a WireGuard sidecar + an agent container
 - **Agents** (containerised AIs running INSIDE a pod):
-  - `nemoclaw` = OpenClaw runtime + NemoClaw sandboxing blueprint (1 unit, port 3000)
+  - `openclaw` = OpenClaw runtime (1 unit, port 3000)
   - `hermes` = Nous Research Hermes gateway (2 units, port 8642)
 - **Plan tiers**: Explorer (1 unit), Creator (2 units), Operator (4 units).
   Unit budget is enforced atomically by Scalesys; you cannot overspend.
 - **SwitchAILocal**: the OpenAI-compatible LLM gateway on every droplet.
-  Available models on this droplet: `ail-compound`, `ail-image`, `ail-embed`,
-  `minimax/ail-compound`, `minimax/ail-image` (proxied to MiniMax M2.7).
+  Available models are live AIL aliases returned by the gateway. Do not hardcode provider model ids in apps.
 
 ### Stable URL + stable user key (do not invent your own values)
 ```bash
@@ -9062,7 +9154,7 @@ tytus doctor                 # full diagnostic (auth, tunnel, gateway, MCP)
 
 # Pods
 tytus setup                  # interactive wizard: auth → pick → tunnel → test
-tytus connect [--agent nemoclaw|hermes] [--pod NN]
+tytus connect [--agent openclaw|hermes] [--pod NN]
 tytus disconnect [--pod NN]  # tear down tunnel daemon, leave allocation
 tytus revoke <pod_id>        # free units (does NOT need disconnect first)
 tytus restart [--pod NN]     # restart agent container (re-runs entry script)
@@ -9085,7 +9177,7 @@ tytus os-docs                # Tytus OS user manual (desktop, windows, apps, set
 ### Recipe: ensure the user has a working pod, then chat
 ```bash
 tytus status --json | jq -e '.pods | length > 0' \
-    || tytus connect --agent nemoclaw
+    || tytus connect --agent openclaw
 tytus test                                                  # confirm green
 eval "$(tytus env --export)"                                # load stable pair
 curl -sS "$OPENAI_BASE_URL/chat/completions" \
@@ -9097,7 +9189,7 @@ curl -sS "$OPENAI_BASE_URL/chat/completions" \
 ### Recipe: deploy an agent INSIDE the pod (so it can run autonomously)
 The agent is a containerised AI with its own filesystem and config.
 ```bash
-tytus connect --agent nemoclaw                 # OpenClaw with NemoClaw sandbox
+tytus connect --agent openclaw                 # OpenClaw
 # OR
 tytus connect --agent hermes                   # Nous Research Hermes (2 units)
 
@@ -9162,11 +9254,10 @@ written to `.tytus/os-manual.md` in linked projects.
 ### What is Tytus
 - **Pod** = one user's isolated slice (WireGuard sidecar + agent container)
 - **Two agent types** runnable inside a pod:
-  - `nemoclaw` (1 unit, port 3000) — OpenClaw + NemoClaw sandbox blueprint
+  - `openclaw` (1 unit, port 3000) — OpenClaw runtime
   - `hermes` (2 units, port 8642) — Nous Research Hermes
 - **Plan tiers**: Explorer=1u, Creator=2u, Operator=4u
-- **Models** on the gateway: `ail-compound`, `ail-image`, `ail-embed`,
-  `minimax/ail-compound`, `minimax/ail-image`
+- **Models** on the gateway: live AIL aliases returned by `/v1/models`; do not hardcode provider ids
 
 ### Stable connection (the pair to use in tools)
 ```bash
@@ -9179,7 +9270,7 @@ eval "$(tytus env --export)"
 ```bash
 tytus status [--json]                       # account + pods + tunnel
 tytus doctor                                # full health diagnostic
-tytus connect [--agent nemoclaw|hermes]     # allocate + tunnel up
+tytus connect [--agent openclaw|hermes]     # allocate + tunnel up
 tytus disconnect [--pod NN]                 # tear down tunnel
 tytus revoke <pod_id>                       # free units
 tytus restart [--pod NN]                    # restart the agent container
@@ -9239,8 +9330,8 @@ Then dispatch on `$ARGUMENTS`:
   tunnel state. If `--json` is needed for parsing, use `tytus status --json`.
   Always run `tytus doctor` if anything looks off.
 
-- **connect**: `tytus connect [--agent nemoclaw|hermes]`. Default agent is
-  nemoclaw (1 unit). Hermes costs 2 units. Confirm with the user before
+- **connect**: `tytus connect [--agent openclaw|hermes]`. Default agent is
+  OpenClaw (1 unit). Hermes costs 2 units. Confirm with the user before
   spending units.
 
 - **test**: `tytus test` — full E2E health check (auth → pod → tunnel →
@@ -9257,7 +9348,7 @@ Then dispatch on `$ARGUMENTS`:
   OPENAI_API_KEY pair. Use `--raw` for the legacy per-pod values.
 
 - **deploy AGENT** or **--agent AGENT**: shorthand for `tytus connect
-  --agent <nemoclaw|hermes>`. Verify the user understands the unit cost.
+  --agent <openclaw|hermes>`. Verify the user understands the unit cost.
 
 - **disconnect**: `tytus disconnect` — tears down the tunnel daemon, leaves
   the allocation alive. Cheap to reconnect.
@@ -9296,7 +9387,7 @@ tytus os-docs        # Tytus OS user manual — desktop, windows, apps, settings
 ```
 
 `llm-docs` is the authoritative documentation for the `tytus` tool:
-every subcommand, the stable URL/key model, agent types (nemoclaw=1u,
+every subcommand, the stable URL/key model, agent types (OpenClaw=1u,
 hermes=2u), plan tiers (Explorer=1u, Creator=2u, Operator=4u), models
 (ail-compound, ail-image, ail-embed), and a troubleshooting catalog.
 
@@ -9310,7 +9401,7 @@ Common flow:
 
 ```bash
 tytus status                                   # what does the user have?
-tytus connect [--agent nemoclaw|hermes]        # if no pod yet
+tytus connect [--agent openclaw|hermes]        # if no pod yet
 tytus test                                     # E2E health
 eval "$(tytus env --export)"                   # load OPENAI_* envs
 tytus chat                                     # REPL, OR
@@ -9344,7 +9435,7 @@ tytus os-docs         # Tytus OS user manual (desktop, windows, apps, settings)
 Quick recipe:
 ```bash
 tytus status                       # account + pods
-tytus connect                      # allocate + tunnel (default: nemoclaw)
+tytus connect                      # allocate + tunnel (default AIL pod)
 tytus test                         # E2E sanity
 eval "$(tytus env --export)"       # OPENAI_BASE_URL + OPENAI_API_KEY
 ```
@@ -9354,7 +9445,7 @@ Stable endpoint pair (constant across pod rotations):
 - Key: `sk-tytus-user-<32hex>` (one per user, persisted by Scalesys)
 
 Agents you can deploy in a pod (`tytus connect --agent <name>`):
-- `nemoclaw` (1 unit) — OpenClaw + NemoClaw sandbox blueprint
+- `openclaw` (1 unit) — OpenClaw runtime
 - `hermes` (2 units) — Nous Research Hermes
 
 `tytus revoke <pod_id>` is destructive — confirm with the user.
@@ -9704,6 +9795,15 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
             let server_ids: Vec<String> = status.pods.iter().map(|p| p.pod_id.clone()).collect();
             // Remove pods no longer on server, but preserve local endpoint data
             state.pods.retain(|p| server_ids.contains(&p.pod_id));
+            // Reconcile server-owned fields on existing pods. Local state
+            // carries richer client-side data (tunnel_iface, gateway_token),
+            // but agent_type/accounting truth comes from Provider/Scalesys.
+            for pod in &status.pods {
+                if let Some(existing) = state.pods.iter_mut().find(|p| p.pod_id == pod.pod_id) {
+                    existing.droplet_id = pod.droplet_id.clone();
+                    existing.agent_type = pod.agent_type.clone();
+                }
+            }
             // Add new pods from server (don't overwrite existing entries with richer data)
             for pod in &status.pods {
                 if !state.pods.iter().any(|p| p.pod_id == pod.pod_id) {

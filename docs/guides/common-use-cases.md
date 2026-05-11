@@ -55,7 +55,7 @@ tytus autostart status
 
 ---
 
-## "I want to switch from nemoclaw to hermes"
+## "I want to switch from OpenClaw to Hermes"
 
 ```bash
 # See what's running
@@ -95,7 +95,7 @@ tytus tray start
 tytus open
 ```
 
-Then open **Atomek**. Use **Open Folder** to select a local project. Use chat with the active-file context chip for explanations or patch previews. Use **Control Tower** to open the Tytus terminal or launch installed local CLIs such as pi, OpenCode, Codex, Claude Code, Gemini, Qwen, Kimi, or Aider when they are available.
+Then open **Atomek**. Use **Open Folder** to select a local project. Use chat with the active-file context chip for explanations or patch previews. Use **Resource Fabric cockpit** to open the Tytus terminal or launch installed local CLIs such as pi, OpenCode, Codex, Claude Code, Gemini, Qwen, Kimi, or Aider when they are available.
 
 Rules to remember:
 
@@ -188,7 +188,7 @@ You can't share pods (each user gets their own key). But you can share the setup
 # Then they open Tytus and follow the setup wizard.
 
 # Command-line beta path, if they prefer terminal:
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.35 sh
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.36 sh
 tytus setup
 ```
 

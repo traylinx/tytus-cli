@@ -1,6 +1,6 @@
 # Tytus ecosystem guide
 
-Last updated: 2026-05-10. Applies to public beta `tytus` v0.6.14-beta.35.
+Last updated: 2026-05-10. Applies to public beta `tytus` v0.6.14-beta.36.
 
 Tytus is three pieces that should feel like one product:
 
@@ -10,7 +10,7 @@ Tytus is three pieces that should feel like one product:
 
 ## Current release status
 
-| Surface | Status in v0.6.14-beta.35 |
+| Surface | Status in v0.6.14-beta.36 |
 |---|---|
 | macOS | Unsigned public beta `.pkg` for Apple Silicon and Intel. Full CLI + tray + TytusOS path. Gatekeeper warning expected; Control-click → Open. |
 | Linux | Unsigned public beta `.deb` for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, desktop entry, and systemd user service. |
@@ -61,7 +61,7 @@ http://localhost:4242/
 Download `tytus-windows-x86_64.zip` from the public beta page or use:
 
 ```powershell
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.35"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.36"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 Windows is a CLI/MCP technical preview until MSI signing, SmartScreen behavior, Wintun/driver packaging, and fresh-VM tunnel smoke pass.
@@ -96,16 +96,16 @@ Core apps:
 | Files | Browse `~/Tytus`, shared folders, pod workspaces, inbox, downloads, and safe root-anchored sources. |
 | Channels | Configure Telegram/Discord/Slack/LINE-style pod channels without exposing tokens in URLs. |
 | Terminal | Real host-backed shell with Tytus Home as default cwd. Use for `tytus`, `claude`, `opencode`, project commands. |
-| Atomek | Local file workbench with Monaco editor, chat context, artifacts, global AIL routing, Control Tower, and app skills. |
+| Atomek | Local file workbench with Monaco editor, chat context, artifacts, global AIL routing, Resource Fabric cockpit, and app skills. |
 | Settings | Account, plan, daemon, sharing, background, appearance, dock, languages, notifications, privacy, about. |
 | Music Creator / JULI3TA | Uses the included AIL gateway and host-backed library persistence. |
 
 
 ## Atomek workbench
 
-Atomek is the TytusOS editor/chat/workbench. Use it for local folders, Monaco editing, markdown preview, AI chat with active-file context, artifacts, patch previews, and Control Tower local-tool launch.
+Atomek is the TytusOS editor/chat/workbench. Use it for local folders, Monaco editing, markdown preview, AI chat with active-file context, artifacts, patch previews, and Agent Team local-tool launch.
 
-Control Tower discovers allowlisted local tools through the tray/host bridge. It must not direct-fetch pod/model URLs from the browser and must not execute arbitrary shell from model output.
+Resource Fabric cockpit discovers allowlisted local tools through the tray/host bridge. It must not direct-fetch pod/model URLs from the browser and must not execute arbitrary shell from model output.
 
 AIL model selection stays global. If the active model alias changes, update AIL configuration rather than changing app source.
 
@@ -203,7 +203,7 @@ tytus login                  # refresh session
 tytus tray install           # install desktop app on macOS
 tytus env --export           # stable SDK env
 tytus agent catalog          # available agents
-tytus agent install nemoclaw # allocate/install OpenClaw/NemoClaw
+tytus agent install openclaw # allocate/install OpenClaw
 tytus agent install hermes   # allocate/install Hermes
 tytus ls /app/workspace --pod 01
 tytus push ./file.pdf --pod 01

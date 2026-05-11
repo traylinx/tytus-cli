@@ -1854,13 +1854,15 @@ fn handle_mission_create(mut request: Request) {
     let goal = parsed.goal.unwrap_or_default();
     let mission_id = format!("{}-{}", current_unix_secs(), sanitize_mission_slug(&title));
     let root = missions_root().join(&mission_id);
-    if let Err(e) = fs::create_dir_all(root.join("runs")) {
-        respond_json(
-            request,
-            500,
-            &serde_json::json!({ "error": "mission_create_failed", "message": e.to_string() }),
-        );
-        return;
+    for dir in ["runs", "outputs", "proposals", "approvals"] {
+        if let Err(e) = fs::create_dir_all(root.join(dir)) {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": "mission_create_failed", "message": e.to_string(), "dir": dir }),
+            );
+            return;
+        }
     }
     respond_json(
         request,
