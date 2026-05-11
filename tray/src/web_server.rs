@@ -45,6 +45,8 @@ static DAEMON_STARTED_AT: OnceLock<u64> = OnceLock::new();
 pub const TYTUS_OS_PORT: u16 = 4242;
 const TYTUS_OS_HOST: &str = "127.0.0.1";
 const TYTUS_OS_PUBLIC_BASE_URL: &str = "http://localhost:4242";
+const POD_PROXY_DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
+const POD_PROXY_MUSIC_GENERATION_TIMEOUT: Duration = Duration::from_secs(420);
 #[cfg(test)]
 const TYTUS_OS_IMPORTMAP_CSP_HASH: &str = "'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU='";
 const TYTUS_OS_CONTENT_SECURITY_POLICY: &str = concat!(
@@ -5157,6 +5159,14 @@ fn join_proxy_url(public_url: &str, proxy_path: &str) -> String {
     format!("{}{}", public_url.trim_end_matches('/'), proxy_path)
 }
 
+fn pod_proxy_timeout(proxy_path: &str) -> Duration {
+    if proxy_path == "/v1/music/generations" {
+        POD_PROXY_MUSIC_GENERATION_TIMEOUT
+    } else {
+        POD_PROXY_DEFAULT_TIMEOUT
+    }
+}
+
 fn handle_pod_proxy(mut request: Request, pod_id: String, proxy_path: String) {
     let method = request.method().clone();
     let snap = compute_state_snapshot();
@@ -5196,7 +5206,7 @@ fn handle_pod_proxy(mut request: Request, pod_id: String, proxy_path: String) {
     }
 
     let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(180))
+        .timeout(pod_proxy_timeout(&proxy_path))
         .build()
     {
         Ok(c) => c,
@@ -9698,6 +9708,15 @@ mod tests {
             join_proxy_url("https://slug-p04.tytus.traylinx.com/", "/v1/models"),
             "https://slug-p04.tytus.traylinx.com/v1/models"
         );
+    }
+
+    #[test]
+    fn pod_proxy_uses_long_timeout_for_music_generation() {
+        assert_eq!(
+            pod_proxy_timeout("/v1/music/generations"),
+            POD_PROXY_MUSIC_GENERATION_TIMEOUT
+        );
+        assert_eq!(pod_proxy_timeout("/v1/models"), POD_PROXY_DEFAULT_TIMEOUT);
     }
 
     #[test]

@@ -22,6 +22,10 @@ fi
 # then files/clipboard, then settings/apps catalog, then troubleshooting + about.
 ORDER=(
     "getting-started.md"
+    "resource-fabric.md"
+    "agents.md"
+    "shared-folders.md"
+    "use-cases.md"
     "windows.md"
     "desktop.md"
     "dock.md"

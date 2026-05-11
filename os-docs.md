@@ -54,6 +54,9 @@ If the top bar says **Session expired**, your pods are still running. Open **Set
 
 ## First useful actions
 
+If you are new to the agent-team workflow, read these next: **Tytus Resource Fabric**, **OpenClaw, Hermes, and Local Agents**, **Shared Folders**, and **Tytus Use Cases**. They explain how the local computer, pods, shared folders, local agents, channels, and apps work as one system.
+
+
 | Need | Open |
 |---|---|
 | See pods and gateway URLs | Pod Inspector |
@@ -62,6 +65,8 @@ If the top bar says **Session expired**, your pods are still running. Open **Set
 | Browse a pod workspace | Files -> Pod NN workspace |
 | Edit local files and ask AI with file context | Atomek |
 | Launch local agents with active file context | Atomek -> Agent Team |
+| Coordinate OpenClaw, Hermes, local agents, shared folders, and apps | Atomek -> Start mission |
+| Learn workflows inside the product | Help -> Resource Fabric / Agents / Shared Folders / Use Cases, or Atomek -> Docs & Skills |
 | Configure Telegram/Discord/Slack/etc. | Channels |
 | Fix expired login | Settings -> Daemon |
 | Check shared folders | Settings -> Sharing or Files -> Shared |
@@ -95,11 +100,391 @@ Real production surfaces:
 - Files over Tytus Home, shared folders, and pod workspaces
 - Channels setup
 - Terminal backed by the host shell through the tray daemon
-- Atomek workbench for local files, chat, artifacts, app skills, and local Resource Fabric cockpit
+- Atomek workbench for local files, chat, artifacts, embedded docs, app skills, and local Resource Fabric cockpit
 - Settings for account, daemon, sharing, appearance, dock, language, privacy, updates
 - Music Creator and other Tytus apps that use the included gateway
 
 Demo/optional apps may exist behind the demo-app toggle. They must not block core pod workflows.
+
+
+<!-- ==== resource-fabric.md ==== -->
+
+# Tytus Resource Fabric
+
+The Tytus Resource Fabric is the part of Tytus that turns separate tools into one working team. It connects the local computer, Tytus pods, OpenClaw, Hermes, shared folders, local agent CLIs, app skills, channels, and approval gates around a single user goal.
+
+Use it when work is bigger than one chat answer: repo repair, document production, media generation, research, app automation, or any job where local files and remote pods need to exchange context.
+
+## What the fabric connects
+
+| Resource | What it does | Where the user sees it |
+|---|---|---|
+| Local computer | Owns real files, terminals, installed apps, browser sessions, and local AI CLIs. | TytusOS Terminal, Files, Atomek, local apps |
+| Tytus Home | Default local workspace, logs, downloads, missions, and shared files. | `~/Tytus`, Files, Terminal |
+| Shared folders | Exchange layer between local agents, pods, and apps. | Files -> Shared, mission folders, Garage bindings |
+| OpenClaw | Fast Tytus pod agent for critique, planning, channel/app workflows, and remote execution. | Pod Inspector, Atomek Agent Team |
+| Hermes | Heavier reasoning pod family when allocated. Use for deeper planning, writing, and review. | Pod Inspector, Atomek Agent Team |
+| Local agents | Installed tools such as Claude Code, OpenCode, Codex, pi, Kimi, Gemini, Qwen, or Aider. | Terminal, Atomek local jobs |
+| App skills | Instructions and drivers for apps such as Atomek, JULI3TA, Blender, Remotion, and future local tools. | App manifests, Atomek Docs & Skills |
+| Channels | Telegram, Slack, Discord, LINE-style, and similar communication surfaces. | Channels app |
+| AIL routes | Global model routes for remote and local AI. Apps discover these; they do not hardcode model ids. | Settings, Atomek settings, top bar |
+
+## The core loop
+
+1. **Create a mission** in Atomek or a shared folder.
+2. **Collect context**: files, selected text, screenshots, links, task notes, resource list.
+3. **Choose resources**: OpenClaw, Hermes, local CLI, app skill, shared folder, channel.
+4. **Dispatch work** through Tytus host bridges, not raw browser fetches.
+5. **Save transcripts and outputs** into the mission folder.
+6. **Review changes** as previews, artifacts, or proposals.
+7. **Approve and publish** only after the user sees the result.
+
+This keeps autonomous work useful without turning the browser app into an unsafe shell.
+
+## Mission folders
+
+A mission folder is the safest default exchange format. It is ordinary files on disk, so every agent can understand it.
+
+Typical structure:
+
+```text
+~/Tytus/Missions/<mission>/
+├── MISSION.md        # human goal, rules, context
+├── MISSION.json      # machine-readable contract
+├── RESOURCES.md      # pods, local tools, folders, apps, skills
+├── TASKS.md          # current task graph
+├── HANDOFF.md        # copy-paste resume summary
+├── INBOX.md          # incoming notes from agents/pods
+├── OUTBOX.md         # approved outputs for user handoff
+├── AUDIT.jsonl       # append-only events
+├── RUNS.jsonl        # reloadable run index
+├── runs/             # transcripts
+├── outputs/          # generated files and final artifacts
+├── proposals/        # patch/write/publish proposals
+├── approvals/        # explicit approval records
+└── NEXT.md           # next action
+```
+
+Agents should write into `runs/`, `outputs/`, or `proposals/` first. They should not blindly edit the source project unless the user approved the exact patch or workflow.
+
+## What makes this useful
+
+The user can run several different agents without losing state:
+
+- OpenClaw writes a critique into the mission folder.
+- Hermes writes a deeper plan or final copy.
+- OpenCode or Claude Code runs against the local repo and writes a patch proposal.
+- Atomek previews the patch and keeps the active files visible.
+- JULI3TA, Blender, Remotion, or another app skill consumes the same mission assets.
+- Channels notify the user or route handoffs to another workspace.
+
+The important part is not one specific model. The important part is shared context, typed resources, visible outputs, and approval gates.
+
+## Safety rules
+
+- Apps must use the Tytus host/tray bridge for local files, pods, terminals, and model routes.
+- Browser apps must not direct-fetch pod or gateway URLs that need same-origin proxying.
+- Apps must not hardcode model names. AIL routes define available model aliases globally.
+- Local jobs must use allowlisted tools, not arbitrary shell from model text.
+- Destructive actions need explicit confirmation.
+- Generated edits should become previews or proposals before they touch project files.
+
+## First mission to try
+
+1. Open **Atomek**.
+2. Click **Start mission**.
+3. Use a goal such as: `Review this repo with OpenClaw and local OpenCode, write findings to the mission folder, then propose a patch for approval.`
+4. Attach the active folder or important files.
+5. Run the pod/local tasks.
+6. Open `runs/` and `proposals/` before applying anything.
+
+
+
+<!-- ==== agents.md ==== -->
+
+# OpenClaw, Hermes, and Local Agents
+
+Tytus works best when agents act as a team instead of isolated chat boxes. OpenClaw and Hermes run in Tytus pods. Local agents run on the user's computer. Atomek and shared folders connect both sides.
+
+## Agent families
+
+| Agent | Best for | Typical role |
+|---|---|---|
+| OpenClaw | Fast critique, planning, tactical execution, channel/app workflows. | reviewer, planner, remote worker |
+| Hermes | Deeper reasoning, synthesis, writing, long-form review when allocated. | architect, editor, senior reviewer |
+| Local Claude/OpenCode/Codex/pi/Kimi/Gemini/Qwen/Aider | Work against local repos, terminals, installed tools, and user files. | implementer, tester, local operator |
+
+Use the brand names **OpenClaw** and **Hermes** in user-facing docs and UI. Old internal labels should not leak into the product.
+
+## Install and check agents
+
+CLI examples:
+
+```bash
+tytus status
+tytus agent catalog
+tytus agent install openclaw
+tytus agent install hermes
+tytus agent list
+```
+
+TytusOS examples:
+
+1. Open **Pod Inspector**.
+2. Check which pods are allocated and ready.
+3. Open agent details to see readiness, routes, logs, and environment.
+4. Open **Atomek -> Agent Team** to see the same resources in mission context.
+
+Do not treat a pod URL as enough. A pod is useful when its health/readiness checks pass and the Tytus bridge can call it.
+
+## How agents should work together
+
+A strong agent-team workflow:
+
+1. **User defines mission** in Atomek.
+2. **OpenClaw** performs fast critique or task decomposition.
+3. **Local agent** performs repo/file work on the local machine.
+4. **Hermes** reviews architecture, copy, or final plan when available.
+5. **Atomek** collects transcripts and patch proposals.
+6. **User approves** edits or artifacts.
+
+The mission folder is the shared memory for this work. Every agent should leave enough evidence for the next agent to continue.
+
+## Dispatch surfaces
+
+| Surface | Use it for |
+|---|---|
+| Pod Inspector | install, inspect, restart, open pod UIs, check readiness |
+| Atomek Agent Team | choose resources, create missions, run local jobs, ask pods, inspect transcripts |
+| Terminal | supervised shell, project commands, manual local-agent CLI runs |
+| Files | browse Tytus Home, Shared, mission folders, pod workspaces |
+| Channels | connect agents to Telegram/Slack/Discord/etc. |
+
+Atomek should not replace Claude Code, OpenCode, Codex, or pi. It should orchestrate them with files, context, and approval gates.
+
+## Good use cases
+
+### Repo repair
+
+- Open local repo in Atomek.
+- Start mission: `Find root cause, propose patch, run tests, save proof.`
+- Ask OpenClaw for critique.
+- Run local OpenCode or Claude Code with mission context.
+- Ask Hermes or another reviewer for final risk review.
+- Apply only approved patches.
+
+### Research and synthesis
+
+- Put source docs in a mission folder.
+- Ask OpenClaw to extract claims and risks.
+- Ask Hermes for synthesis.
+- Ask local agent to format output and update docs.
+- Save final summary in `OUTBOX.md`.
+
+### Creative production
+
+- Store brief, references, lyrics, images, and audio in shared/mission folders.
+- Use JULI3TA, Blender, Remotion, or other app skills for media steps.
+- Use agents for prompts, review, edits, and packaging.
+- Keep source assets and final outputs in the same mission folder.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| OpenClaw or Hermes missing | Install/allocate the agent from Pod Inspector or CLI, then refresh Atomek capabilities. |
+| Pod says running but job fails | Check readiness in Pod Inspector and `tytus doctor`. Running is not the same as healthy. |
+| Local agent missing | Install the CLI on the computer, confirm it is on `PATH`, then refresh Atomek. |
+| Agent output disappears | Look in the mission folder `runs/`, `RUNS.jsonl`, and Atomek Outputs. |
+| Wrong model shown | Update global AIL route/model config; do not hardcode model ids in apps. |
+
+
+
+<!-- ==== shared-folders.md ==== -->
+
+# Shared Folders
+
+Shared folders are the exchange layer between the local computer, Tytus pods, local agents, app skills, and future remote workspaces. They make the agent team practical because every participant can read and write ordinary files instead of relying on one chat transcript.
+
+## Shared folder types
+
+| Type | Use | Typical path |
+|---|---|---|
+| Tytus Home Shared | Local drop-zone available from Files and Terminal. | `~/Tytus/Shared` |
+| Mission folder | Per-job context, transcripts, outputs, proposals, approvals. | `~/Tytus/Missions/<mission>` |
+| Pod workspace | Agent-side working directory. | `/app/workspace` |
+| Pod inbox/outbox | File transfer points for pods. | `/app/workspace/inbox`, `/app/workspace/out` |
+| Garage/garagetytus binding | Cross-machine or pod-synced folder when configured. | user-chosen local path |
+
+Use **Files** for browsing. Use **Atomek** when the shared folder is part of an agent mission and should be connected to chat, context, and approvals.
+
+## Local to pod exchange
+
+CLI examples:
+
+```bash
+tytus push ./brief.md --pod 01 --to /app/workspace/inbox/brief.md
+tytus ls /app/workspace/inbox --pod 01
+tytus pull /app/workspace/out/result.md --pod 01 --to ~/Tytus/Shared/result.md
+```
+
+TytusOS examples:
+
+1. Open **Files**.
+2. Browse **Tytus Home**, **Shared**, or a pod workspace.
+3. Open **Atomek** when you need editing, context, chat, or mission coordination.
+4. Keep final handoffs in the mission folder `OUTBOX.md` or `outputs/`.
+
+## Mission folder exchange
+
+Recommended convention:
+
+```text
+INBOX.md          incoming notes, findings, pod outputs
+OUTBOX.md         final user-ready handoff
+runs/             full transcripts from local or pod jobs
+outputs/          generated docs/assets
+proposals/        patches or write proposals before approval
+approvals/        approve/reject records
+```
+
+Agents should append a short note to `INBOX.md` when they leave a finding for another agent. Final artifacts should be copied or summarized into `OUTBOX.md`.
+
+## Garage / garagetytus
+
+When a folder needs to sync across machines or pods, use a Garage-backed binding instead of manual copy/paste. A binding maps a local folder to a shared bucket and keeps it synchronized.
+
+Typical intent:
+
+- share a project handoff with a pod
+- share media assets between local apps and remote agents
+- keep a mission folder visible on another machine
+- let one agent produce files another agent can consume
+
+If no binding exists, the local shared folder `~/Tytus/Shared` is still useful as a same-machine drop-zone.
+
+## Conflict rules
+
+- Prefer one writer per file at a time.
+- Use append-only logs (`AUDIT.jsonl`, `RUNS.jsonl`) for events.
+- Use separate files in `runs/` for transcripts.
+- Put proposed edits in `proposals/` before applying them.
+- If two agents produce conflicting outputs, keep both and ask a reviewer agent or the user to choose.
+
+## What not to do
+
+- Do not give agents broad blind write access to the whole home directory.
+- Do not use shared folders as a hidden command channel for destructive actions.
+- Do not store raw credentials in mission folders.
+- Do not assume pod paths and local paths are identical.
+- Do not bypass Tytus path guards with `..`, symlink escapes, or encoded traversal.
+
+## First shared-folder workflow
+
+1. Put input files in `~/Tytus/Shared/<project>/` or create an Atomek mission.
+2. Ask OpenClaw to review the files and write findings to `INBOX.md`.
+3. Ask a local agent to implement or format output and save a proposal.
+4. Use Atomek to preview and approve.
+5. Move final files to `OUTBOX.md` or `outputs/`.
+
+
+
+<!-- ==== use-cases.md ==== -->
+
+# Tytus Use Cases
+
+These workflows show how Tytus, OpenClaw, Hermes, local agents, shared folders, Atomek, and apps fit together.
+
+## 1. Repair a repo with a team
+
+Goal: fix a bug without losing evidence or letting one model blindly edit files.
+
+1. Open the repo folder in **Atomek**.
+2. Start a mission: `Find root cause, propose patch, run tests, save proof.`
+3. Attach the active file or folder context.
+4. Ask **OpenClaw** for a fast critique and task split.
+5. Run **OpenCode**, **Claude Code**, **Codex**, or **pi** locally through Terminal or Atomek local job.
+6. Save transcript under `runs/` and proposed patch under `proposals/`.
+7. Ask **Hermes** or another reviewer for risk review when available.
+8. Apply only approved diffs.
+9. Put final status in `OUTBOX.md`.
+
+## 2. Build a document package
+
+Goal: produce a client-ready brief from scattered notes.
+
+1. Create a mission folder.
+2. Put source notes, PDFs, screenshots, and requirements in `INBOX.md` or `inputs/`.
+3. Ask OpenClaw to extract claims, gaps, and risks.
+4. Ask Hermes to synthesize structure and tone.
+5. Ask a local agent to write markdown files.
+6. Review in Atomek markdown preview.
+7. Export final files to `outputs/`.
+
+## 3. Creative production across apps
+
+Goal: make a song/video/scene with agents and local apps.
+
+1. Store brief, references, lyrics, audio, and image assets in a mission folder.
+2. Use **JULI3TA** for music generation or restyle tasks.
+3. Use **Blender** or **Remotion** skills when installed for scenes and renders.
+4. Ask agents to generate prompts, check style consistency, and prepare handoffs.
+5. Keep every source asset and final render in `outputs/`.
+
+## 4. Shared-folder pod handoff
+
+Goal: let a remote pod consume files from the local computer and return output.
+
+1. Put files into `~/Tytus/Shared/<job>/` or a Garage-bound folder.
+2. Push/copy relevant inputs to the pod workspace if needed.
+3. Ask OpenClaw or Hermes to process the files.
+4. Pull outputs back or let sync return them.
+5. Review with Atomek.
+
+## 5. Channel-supervised agent work
+
+Goal: keep the user informed while agents work.
+
+1. Configure Channels for the pod or user account.
+2. Create a mission folder with clear rules.
+3. Dispatch an agent task.
+4. Agent writes status to the mission folder and sends channel updates when configured.
+5. User approves proposals from Atomek or the channel workflow.
+
+## 6. Local app automation
+
+Goal: use installed desktop apps without rebuilding them inside Atomek.
+
+1. Install the app and its Tytus/agent skill if available.
+2. Refresh capabilities in Atomek.
+3. Attach the relevant files or mission folder.
+4. Launch the app or local bridge through Tytus host integration.
+5. Keep artifacts in the mission folder.
+
+Examples: Blender MCP scene generation, Remotion render recipes, JULI3TA music workflows, browser checks, local terminal tasks.
+
+## 7. Research watch
+
+Goal: monitor a topic and produce a concise report.
+
+1. Start a mission with a topic and sources.
+2. Use a pod or AIL route for research.
+3. Use a local agent for synthesis and citation cleanup.
+4. Store raw findings in `runs/`.
+5. Store final report in `OUTBOX.md`.
+
+## Rules that apply to every use case
+
+- Use shared files for context handoff.
+- Use Atomek when you need visibility, editing, and approval.
+- Use Terminal when you need full manual control.
+- Use OpenClaw for fast pod perspective.
+- Use Hermes for deep reasoning when allocated.
+- Use local agents for work requiring the local filesystem or installed tools.
+- Use app skills for app-specific instructions.
+- Keep AIL model selection global.
+- Never apply destructive output without approval.
+
 
 
 <!-- ==== windows.md ==== -->
@@ -511,6 +896,8 @@ A missing pod inbox or downloads directory should render as a friendly empty sta
 
 Files owns broad navigation. Atomek owns editing and agent interaction. Do not duplicate full editor behavior in Files.
 
+For the complete multi-agent exchange model, read **Shared Folders** and **Tytus Resource Fabric** in Help.
+
 ## Safety
 
 File operations must be root-anchored to the selected source. Path traversal, symlink escape, null bytes, and double-encoded traversal must be rejected by daemon-side tests before write operations ship broadly.
@@ -669,6 +1056,20 @@ The default mission task graph is deliberately small:
 This keeps Atomek useful immediately while leaving room for richer multi-agent orchestration later.
 
 
+## Docs & Skills inside Atomek
+
+Atomek includes a small **Docs & Skills** area on the Agent Team home screen. Open a guide to load it as a markdown tab, then ask Atomek chat about the active guide or combine it with files from the current workspace.
+
+Built-in guides cover:
+
+- Tytus Resource Fabric
+- OpenClaw and Hermes agent teams
+- shared folders and mission folders
+- practical use cases
+- agentic app skills
+
+These docs are bundled with the Atomek app so the user can ask about Tytus workflows directly inside TytusOS, even before opening external documentation.
+
 ## Ask pod
 
 **Ask pod** sends the selected mission task to a ready pod agent through `host.daemon.callPodEndpoint()`. Atomek first asks the pod for `/v1/models`, selects the first live model returned by the pod metadata, then sends a non-streaming `/v1/chat/completions` request through the same-origin Tytus bridge. No model id is hardcoded in Atomek.
@@ -731,7 +1132,7 @@ Do not show fake support. If a skill or app driver is not installed, show it as 
 
 | Problem | Fix |
 |---|---|
-| Old UI or duplicate Agent Team icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.20` or newer. |
+| Old UI or duplicate Agent Team icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.21` or newer. |
 | Files are listed but editor is blank | Reopen the file, then hard-refresh. If still broken, report the file type and console error. |
 | Folder does not expand/collapse | You are likely on an older bundle. Refresh and check the Atomek version. |
 | Chat answer appears only after completion | Streaming path is degraded. Check browser console and host `/v1/chat/completions` proxy errors. |
@@ -932,7 +1333,7 @@ Fix:
 1. Hard-refresh TytusOS.
 2. Reopen Atomek.
 3. Reopen the file from Explorer.
-4. Confirm Atomek loads `tytus-app-atomek@v0.4.20` or newer.
+4. Confirm Atomek loads `tytus-app-atomek@v0.4.21` or newer.
 5. If still broken, include the file extension and browser console error in the bug report.
 
 ## Atomek folder rows do not expand or collapse
@@ -941,7 +1342,7 @@ Use the folder chevron or click the folder row. If nothing changes, you are like
 
 ## Atomek shows duplicate Agent Team and stale App Skills icons
 
-That was an old app bundle. The current surface has one **Agent Team** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.20` or newer.
+That was an old app bundle. The current surface has one **Agent Team** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.21` or newer.
 
 ## Atomek local tools are missing
 
@@ -992,6 +1393,14 @@ When reporting a bug, include:
 - Browser console error
 - Exact route/hash URL
 - Whether legacy Tower shows different state
+
+## Shared folder or mission handoff is confusing
+
+Use **Help -> Shared Folders** for the full exchange model. Short version: put raw incoming context in `INBOX.md`, keep transcripts in `runs/`, put generated artifacts in `outputs/`, put proposed edits in `proposals/`, and only move final approved material to `OUTBOX.md`.
+
+## OpenClaw or Hermes does not appear in Atomek
+
+Open **Pod Inspector** first and confirm the agent is allocated and ready. Then return to **Atomek -> Agent Team** and refresh capabilities. Atomek shows real resources only; missing agents are setup work, not UI failure.
 
 
 <!-- ==== about.md ==== -->

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.14-beta.45 - 2026-05-11
+
+- Bundles TytusOS `v1.0.32-apps-platform` with JULI3TA `0.3.18` music recovery and catalog `v53`.
+- Extends the tray pod proxy timeout for `/v1/music/generations` so remote AIL music calls are not cut off before the JULI3TA client timeout.
+- Keeps JULI3TA endpoint selection user-configurable; no local/remote AIL endpoint is hardcoded.
+- Republishes public beta download/install surfaces for the beta45 release.
+
 ## v0.6.14-beta.43 - 2026-05-11
 
 - Bundles TytusOS `v1.0.29-apps-platform`.

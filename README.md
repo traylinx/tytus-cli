@@ -2,7 +2,7 @@
 
 > Private AI pods, TytusOS desktop, and a stable OpenAI-compatible gateway from one local CLI.
 
-Current public beta: **v0.6.14-beta.43** (2026-05-11).
+Current public beta: **v0.6.14-beta.45** (2026-05-11).
 
 ## Install
 
@@ -24,12 +24,12 @@ Checksum-verified installer commands are also available:
 
 ```bash
 # macOS / Linux public beta
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.43 sh
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.45 sh
 ```
 
 ```powershell
 # Windows public beta preview
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.43"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.45"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 Homebrew remains available for the latest stable tap release:
@@ -44,7 +44,7 @@ brew install traylinx/tap/tytus
 - **TytusOS:** the local browser desktop served by the tray. It is the primary UI for pods, files, channels, settings, terminal, Atomek, and app workflows. Legacy Tower is hidden rollback only via `TYTUS_ENABLE_LEGACY_TOWER=1`.
 - **Private pods:** OpenClaw and Hermes agent runtimes inside isolated pod slots, reachable through the Tytus forwarder.
 - **Tytus Home:** `~/Tytus` with `Downloads`, `Inbox`, `Logs`, `Outbox`, `Pods`, `Projects`, and `Shared`, used by Files and Terminal.
-- **Atomek:** the TytusOS workbench for local files, chat, artifacts, AIL routing, and Control Tower local-tool control.
+- **Atomek:** the TytusOS workbench for local files, chat, artifacts, embedded docs/skills, AIL routing, and Resource Fabric control.
 - **MCP + skills:** `tytus-mcp`, `tytus llm-docs`, and `tytus os-docs` give AI agents the exact product contract.
 
 ```bash
@@ -61,7 +61,7 @@ echo $OPENAI_API_KEY     # sk-tytus-user-<32hex>
 | [docs/guides/public-beta-install.md](docs/guides/public-beta-install.md) | Public beta one-file installers and OS warning notes |
 | [docs/guides/getting-started.md](docs/guides/getting-started.md) | Fresh install and first pod |
 | [docs/guides/use-with-ai-tools.md](docs/guides/use-with-ai-tools.md) | Cursor, Claude, OpenCode, Codex, Aider, SDKs |
-| [docs/guides/atomek-workbench.md](docs/guides/atomek-workbench.md) | Atomek editor, chat, artifacts, Control Tower |
+| [docs/guides/atomek-workbench.md](docs/guides/atomek-workbench.md) | Atomek editor, chat, artifacts, embedded docs, Resource Fabric |
 | [docs/file-sharing.md](docs/file-sharing.md) | Files, pod inbox/outbox, shared folders |
 | `tytus llm-docs` | CLI contract for AI agents |
 | `tytus os-docs` | TytusOS contract for AI agents |

@@ -96,10 +96,26 @@ Core apps:
 | Files | Browse `~/Tytus`, shared folders, pod workspaces, inbox, downloads, and safe root-anchored sources. |
 | Channels | Configure Telegram/Discord/Slack/LINE-style pod channels without exposing tokens in URLs. |
 | Terminal | Real host-backed shell with Tytus Home as default cwd. Use for `tytus`, `claude`, `opencode`, project commands. |
-| Atomek | Local file workbench with Monaco editor, chat context, artifacts, global AIL routing, Resource Fabric cockpit, and app skills. |
+| Atomek | Local file workbench with Monaco editor, chat context, artifacts, global AIL routing, embedded docs/skills, Resource Fabric cockpit, and app skills. |
 | Settings | Account, plan, daemon, sharing, background, appearance, dock, languages, notifications, privacy, about. |
 | Music Creator / JULI3TA | Uses the included AIL gateway and host-backed library persistence. |
 
+
+## Agent team workflow
+
+Tytus is not just one chat app. It is a resource fabric that lets OpenClaw, Hermes, local agents, shared folders, channels, and local apps work from the same mission context.
+
+Recommended loop:
+
+1. Create a mission in Atomek.
+2. Put source files and instructions in the mission folder.
+3. Ask OpenClaw for fast critique or task splitting.
+4. Use a local agent such as Claude Code, OpenCode, Codex, pi, Kimi, Gemini, Qwen, or Aider for filesystem/tool work.
+5. Use Hermes for deeper reasoning or final synthesis when allocated.
+6. Keep transcripts in `runs/`, artifacts in `outputs/`, edits in `proposals/`, and final handoff in `OUTBOX.md`.
+7. Apply edits only after preview/approval.
+
+Use **OpenClaw** and **Hermes** in user-facing docs and UI. Old internal agent labels are not product names.
 
 ## Atomek workbench
 
@@ -108,6 +124,18 @@ Atomek is the TytusOS editor/chat/workbench. Use it for local folders, Monaco ed
 Resource Fabric cockpit discovers allowlisted local tools through the tray/host bridge. It must not direct-fetch pod/model URLs from the browser and must not execute arbitrary shell from model output.
 
 AIL model selection stays global. If the active model alias changes, update AIL configuration rather than changing app source.
+
+## Shared folders as agent exchange
+
+Shared folders are how local and pod agents exchange real work products. The local drop-zone is `~/Tytus/Shared`. Per-job mission folders live under `~/Tytus/Missions/<mission>`. Pods use `/app/workspace`, `/app/workspace/inbox`, and `/app/workspace/out`. Garage/garagetytus bindings can sync a chosen local folder across machines or pod workflows when configured.
+
+Rules:
+
+- keep one writer per file where possible
+- use append-only logs for events
+- keep proposals separate from approved outputs
+- do not store raw credentials in shared folders
+- do not grant broad blind write access to the full home directory
 
 ## Tytus Home
 
