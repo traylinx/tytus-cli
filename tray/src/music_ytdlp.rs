@@ -620,6 +620,15 @@ fn run_ffmpeg_reference(
     duration_sec: f64,
     _timeout: Duration,
 ) -> Result<Vec<u8>, String> {
+    let out_path = std::env::temp_dir().join(format!(
+        "tytus-juli3ta-reference-{}-{}.wav",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+
     let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
@@ -640,24 +649,30 @@ fn run_ffmpeg_reference(
             "24000",
             "-f",
             "wav",
-            "pipe:1",
+            "-y",
+            out_path.to_string_lossy().as_ref(),
         ])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .map_err(|e| format!("failed to execute ffmpeg: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_file(&out_path);
         return Err(format!(
             "ffmpeg reference sample failed: {}",
             compact_error(&stderr)
         ));
     }
-    if output.stdout.len() < 44 {
+    let wav = std::fs::read(&out_path)
+        .map_err(|e| format!("failed to read ffmpeg reference sample: {e}"));
+    let _ = std::fs::remove_file(&out_path);
+    let wav = wav?;
+    if wav.len() < 44 {
         return Err("ffmpeg produced an empty reference sample".to_string());
     }
-    Ok(output.stdout)
+    Ok(wav)
 }
 
 pub fn reference_sample(
@@ -669,8 +684,8 @@ pub fn reference_sample(
     let info = stream_with_metadata(&video_id).or_else(|_| stream(&video_id))?;
     let source_duration_sec = duration_hint_from_stream(&info);
     let duration_sec = duration_sec
-        .filter(|d| d.is_finite() && *d >= 6.0 && *d <= 20.0)
-        .unwrap_or(14.0);
+        .filter(|d| d.is_finite() && *d >= 6.0 && *d <= 90.0)
+        .unwrap_or(60.0);
     let start_sec = start_sec
         .filter(|s| s.is_finite() && *s >= 0.0)
         .unwrap_or_else(|| {

@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.6.14-beta.36 - 2026-05-11
+## v0.6.14-beta.37 - 2026-05-11
 
 - Bundles TytusOS `v1.0.28-apps-platform`.
 - Fixes OpenClaw/Hermes pod defaults: live AIL alias docs, default skills, agent accounting guards, and channel handling for agentless default pods.
