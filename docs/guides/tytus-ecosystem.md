@@ -1,6 +1,6 @@
 # Tytus ecosystem guide
 
-Last updated: 2026-05-10. Applies to public beta `tytus` v0.6.14-beta.42.
+Last updated: 2026-05-11. Applies to public beta `tytus` v0.6.14-beta.43.
 
 Tytus is three pieces that should feel like one product:
 
@@ -10,7 +10,7 @@ Tytus is three pieces that should feel like one product:
 
 ## Current release status
 
-| Surface | Status in v0.6.14-beta.42 |
+| Surface | Status in v0.6.14-beta.43 |
 |---|---|
 | macOS | Unsigned public beta `.pkg` for Apple Silicon and Intel. Full CLI + tray + TytusOS path. Gatekeeper warning expected; Control-click → Open. |
 | Linux | Unsigned public beta `.deb` for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, desktop entry, and systemd user service. |
@@ -61,7 +61,7 @@ http://localhost:4242/
 Download `tytus-windows-x86_64.zip` from the public beta page or use:
 
 ```powershell
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.42"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.43"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 Windows is a CLI/MCP technical preview until MSI signing, SmartScreen behavior, Wintun/driver packaging, and fresh-VM tunnel smoke pass.

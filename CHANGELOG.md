@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.14-beta.43 - 2026-05-11
+
+- Bundles TytusOS `v1.0.29-apps-platform`.
+- Blocks stale short JULI3TA Restyle references before MiniMax cover calls and logs the exact cover-reference duration, byte size, model, prompt, and lyrics mode.
+- Strengthens Restyle prompts so MiniMax cover mode preserves the reference melody, phrasing, rhythm, chord movement, and song structure while only changing production style.
+- Republishes public beta download/install surfaces for the beta43 release.
+
 ## v0.6.14-beta.42 - 2026-05-11
 
 - Keeps the `v1.0.28-apps-platform` TytusOS bundle and beta41 CI-stability fix.
