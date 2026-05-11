@@ -57,7 +57,7 @@ const TYTUS_OS_CONTENT_SECURITY_POLICY: &str = concat!(
     "worker-src 'self' blob: https://cdn.jsdelivr.net; ",
     "connect-src 'self' https://cdn.jsdelivr.net https://*.tytus.traylinx.com http://10.42.42.1:18080 http://localhost:18080 http://127.0.0.1:18080; ",
     "img-src 'self' data: blob: https:; ",
-    "media-src 'self' blob: https:; ",
+    "media-src 'self' data: blob: https:; ",
     "font-src 'self' https://fonts.gstatic.com data:;"
 );
 
@@ -9743,6 +9743,7 @@ mod tests {
         let style_attr = csp_directive("style-src-attr");
         let worker_src = csp_directive("worker-src");
         let connect_src = csp_directive("connect-src");
+        let media_src = csp_directive("media-src");
         let font_src = csp_directive("font-src");
 
         assert!(script_src.contains("https://cdn.jsdelivr.net"));
@@ -9754,6 +9755,8 @@ mod tests {
         assert!(connect_src.contains("http://127.0.0.1:18080"));
         assert!(worker_src.contains("blob:"));
         assert!(worker_src.contains("https://cdn.jsdelivr.net"));
+        assert!(media_src.contains("data:"));
+        assert!(media_src.contains("blob:"));
         assert!(style_src.contains("'unsafe-inline'"));
         assert!(style_attr.contains("'unsafe-inline'"));
         assert!(style_src.contains("https://fonts.googleapis.com"));
