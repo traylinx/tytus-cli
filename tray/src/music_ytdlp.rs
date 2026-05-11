@@ -86,6 +86,15 @@ pub struct MusicStreamInfo {
     pub codec: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct MusicReferenceSample {
+    pub video_id: String,
+    pub wav: Vec<u8>,
+    pub duration_sec: f64,
+    pub start_sec: f64,
+    pub source_duration_sec: Option<f64>,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MusicPlaylistInfo {
@@ -559,6 +568,180 @@ fn stream_url_fast(video_id: &str) -> Result<String, String> {
         .find(|line| !line.is_empty())
         .ok_or_else(|| "yt-dlp returned no stream URL".to_string())
         .map(str::to_string)
+}
+
+fn duration_hint_from_stream(info: &MusicStreamInfo) -> Option<f64> {
+    if let Some(ms) = info.duration_ms {
+        return Some(ms as f64 / 1000.0);
+    }
+    reqwest::Url::parse(&info.stream_url)
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(k, _)| k == "dur" || k == "duration")
+                .and_then(|(_, v)| v.parse::<f64>().ok())
+        })
+        .filter(|d| d.is_finite() && *d > 0.0)
+}
+
+fn ffmpeg_path() -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Ok(env_path) = std::env::var("FFMPEG_PATH") {
+        if !env_path.trim().is_empty() {
+            candidates.push(PathBuf::from(env_path));
+        }
+    }
+    candidates.extend([
+        PathBuf::from("ffmpeg"),
+        PathBuf::from("/opt/homebrew/bin/ffmpeg"),
+        PathBuf::from("/usr/local/bin/ffmpeg"),
+        PathBuf::from("/usr/bin/ffmpeg"),
+    ]);
+
+    for candidate in candidates {
+        if Command::new(&candidate)
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Ok(candidate);
+        }
+    }
+    Err("ffmpeg is required for fast reference samples but was not found".to_string())
+}
+
+fn run_ffmpeg_reference(
+    ffmpeg: &PathBuf,
+    input: &str,
+    start_sec: f64,
+    duration_sec: f64,
+    _timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let output = Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-rw_timeout",
+            "15000000",
+            "-ss",
+            &format!("{start_sec:.3}"),
+            "-i",
+            input,
+            "-t",
+            &format!("{duration_sec:.3}"),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "24000",
+            "-f",
+            "wav",
+            "pipe:1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to execute ffmpeg: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "ffmpeg reference sample failed: {}",
+            compact_error(&stderr)
+        ));
+    }
+    if output.stdout.len() < 44 {
+        return Err("ffmpeg produced an empty reference sample".to_string());
+    }
+    Ok(output.stdout)
+}
+
+pub fn reference_sample(
+    video_id: &str,
+    start_sec: Option<f64>,
+    duration_sec: Option<f64>,
+) -> Result<MusicReferenceSample, String> {
+    let video_id = validate_video_id(video_id)?;
+    let info = stream_with_metadata(&video_id).or_else(|_| stream(&video_id))?;
+    let source_duration_sec = duration_hint_from_stream(&info);
+    let duration_sec = duration_sec
+        .filter(|d| d.is_finite() && *d >= 6.0 && *d <= 20.0)
+        .unwrap_or(14.0);
+    let start_sec = start_sec
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .unwrap_or_else(|| {
+            source_duration_sec
+                .map(|d| {
+                    (d * 0.55 - duration_sec / 2.0)
+                        .max(0.0)
+                        .min((d - duration_sec).max(0.0))
+                })
+                .unwrap_or(0.0)
+        });
+    let ffmpeg = ffmpeg_path()?;
+    let wav = match run_ffmpeg_reference(
+        &ffmpeg,
+        &info.stream_url,
+        start_sec,
+        duration_sec,
+        Duration::from_secs(12),
+    ) {
+        Ok(wav) => wav,
+        Err(first_err) => {
+            let tmp_base = std::env::temp_dir().join(format!(
+                "tytus-juli3ta-reference-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            let pattern = format!("{}.%(ext)s", tmp_base.to_string_lossy());
+            let page_url = format!("https://www.youtube.com/watch?v={video_id}");
+            run_ytdlp(&[
+                "-f",
+                "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+                "--no-playlist",
+                "--no-warnings",
+                "-o",
+                &pattern,
+                &page_url,
+            ])
+            .map_err(|e| {
+                format!("yt-dlp reference fallback failed after ffmpeg error ({first_err}): {e}")
+            })?;
+            let tmp = ["m4a", "webm", "mp4", "opus"]
+                .iter()
+                .map(|ext| tmp_base.with_extension(ext))
+                .find(|p| p.exists())
+                .ok_or_else(|| {
+                    format!(
+                        "yt-dlp reference fallback wrote no audio after ffmpeg error ({first_err})"
+                    )
+                })?;
+            let second = run_ffmpeg_reference(
+                &ffmpeg,
+                tmp.to_string_lossy().as_ref(),
+                start_sec,
+                duration_sec,
+                Duration::from_secs(15),
+            );
+            let _ = std::fs::remove_file(&tmp);
+            second.map_err(|e| format!("{e}; direct ffmpeg error was: {first_err}"))?
+        }
+    };
+
+    Ok(MusicReferenceSample {
+        video_id,
+        wav,
+        duration_sec,
+        start_sec,
+        source_duration_sec,
+    })
 }
 
 fn stream_with_metadata(video_id: &str) -> Result<MusicStreamInfo, String> {

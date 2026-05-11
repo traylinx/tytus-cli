@@ -1316,6 +1316,26 @@ fn resource_cost(unit: &str, tier: &str) -> serde_json::Value {
     serde_json::json!({ "unit": unit, "tier": tier })
 }
 
+fn resource_agent_display_name(agent_type: &str) -> String {
+    match agent_type {
+        // Legacy internal id. Never leak it to product surfaces.
+        "nemoclaw" | "openclaw" => "OpenClaw".to_string(),
+        "hermes" => "Hermes".to_string(),
+        "none" => "AIL Gateway".to_string(),
+        other if !other.trim().is_empty() => other.to_string(),
+        _ => "Tytus Agent".to_string(),
+    }
+}
+
+fn resource_agent_family(agent_type: &str) -> &'static str {
+    match agent_type {
+        "nemoclaw" | "openclaw" => "openclaw",
+        "hermes" => "hermes",
+        "none" => "ail",
+        _ => "agent",
+    }
+}
+
 fn handle_shared_folders_normalized(request: Request) {
     respond_json(
         request,
@@ -1424,10 +1444,13 @@ fn handle_resources(request: Request) {
     let snap = compute_state_snapshot();
     for agent in snap.agents {
         let ready = matches!(agent.status, AgentStatus::Ready);
+        let agent_internal_type = agent.agent_type.clone();
+        let agent_display_name = resource_agent_display_name(&agent_internal_type);
+        let agent_family = resource_agent_family(&agent_internal_type);
         resources.push(serde_json::json!({
             "id": format!("pod-agent.{}", agent.pod_id),
             "kind": "pod-agent",
-            "label": format!("{} pod {}", agent.agent_type, agent.pod_id),
+            "label": format!("{} agent pod {}", agent_display_name, agent.pod_id),
             "status": if ready { "ready" } else { "degraded" },
             "reason": if ready { serde_json::Value::Null } else { serde_json::Value::String(agent_status_label(agent.status).to_string()) },
             "capabilities": ["text-gen", "code-review", "web-fetch"],
@@ -1437,7 +1460,10 @@ fn handle_resources(request: Request) {
             "cost": resource_cost("tytus-units", if agent.units > 1 { "mid" } else { "low" }),
             "metadata": {
                 "podId": agent.pod_id,
-                "agentType": agent.agent_type,
+                "agentType": agent_family,
+                "displayName": agent_display_name.clone(),
+                "brand": agent_display_name,
+                "agentFamily": agent_family,
                 "units": agent.units,
                 "publicUrl": agent.public_url,
                 "apiUrl": agent.api_url,
@@ -3279,6 +3305,52 @@ fn handle_music_stream(request: Request, query: &str) {
     }
 }
 
+fn handle_music_reference_sample(request: Request, query: &str) {
+    if !music_ytdlp_setup::status().ready {
+        music_ytdlp_setup::start_background_install();
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "error": "music_unavailable",
+                "status": music_ytdlp_setup::status(),
+            }),
+        );
+        return;
+    }
+    let video_id = match query_value_decoded(query, "videoId") {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":"videoId is required"}),
+            );
+            return;
+        }
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    let start_sec = query_value(query, "startSec").and_then(|v| v.parse::<f64>().ok());
+    let duration_sec = query_value(query, "durationSec").and_then(|v| v.parse::<f64>().ok());
+    match music_ytdlp::reference_sample(&video_id, start_sec, duration_sec) {
+        Ok(sample) => respond_json(
+            request,
+            200,
+            &serde_json::json!({
+                "videoId": sample.video_id,
+                "base64": general_purpose::STANDARD.encode(sample.wav),
+                "durationSec": sample.duration_sec,
+                "startSec": sample.start_sec,
+                "sourceDurationSec": sample.source_duration_sec,
+            }),
+        ),
+        Err(e) => respond_json(request, 500, &serde_json::json!({"error": e})),
+    }
+}
+
 fn handle_music_playlist(request: Request, query: &str) {
     if !music_ytdlp_setup::status().ready {
         music_ytdlp_setup::start_background_install();
@@ -3777,6 +3849,9 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Get, "/api/music/stream") => {
             handle_music_stream(request, &query);
+        }
+        (Method::Get, "/api/music/reference-sample") => {
+            handle_music_reference_sample(request, &query);
         }
         (Method::Get, "/api/music/playlist") => {
             handle_music_playlist(request, &query);
