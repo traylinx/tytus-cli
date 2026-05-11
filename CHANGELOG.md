@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.14-beta.47 — 2026-05-11
+
+- Moves public beta page/install examples to beta47.
+- Points PR truth embedding checks at Tytus OS v1.0.33 so CI validates the shipped dist instead of stale v1.0.31.
+- Public stack includes Atomek 0.4.22 workspace restore, JULI3TA 0.3.18 music recovery, and switchAILocal 0.5.14 remote AIL deployment readiness.
+
 ## v0.6.14-beta.46 — 2026-05-11
 
 - Embedded TytusOS v1.0.33 with Atomek v0.4.22 pin.
