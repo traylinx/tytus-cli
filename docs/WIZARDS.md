@@ -86,7 +86,7 @@ Goal: anyone can install, set up, and use Tytus without reading docs or touching
 3. [onboarding wizard runs]
    - Welcome screen with logo
    - "Do you have an account?" → opens browser for login
-   - "Which agent do you want?" → nemoclaw (simple) or hermes (advanced)
+   - "Which agent do you want?" → OpenClaw (simple) or Hermes (advanced)
    - "Connecting to your pod..." → animated progress
    - "Configuring OpenClaw..." → runs exec commands
    - "Let's test it!" → runs a sample chat completion
@@ -97,7 +97,7 @@ Goal: anyone can install, set up, and use Tytus without reading docs or touching
 ### Journey 2: Returning user
 ```
 1. tytus                       ← shows dashboard
-   [Status] Pod 01 nemoclaw — Connected
+   [Status] Pod 01 OpenClaw — Connected
    AI Gateway: http://10.42.42.1:18080  (stable, never changes)
    [? for help, q to quit]
 2. tytus chat                  ← immediate chat

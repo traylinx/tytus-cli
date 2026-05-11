@@ -91,7 +91,7 @@ const LEGACY_TOWER_ENV: &str = "TYTUS_ENABLE_LEGACY_TOWER";
 // ── Icons (lobehub @1.87.0) ───────────────────────────────────
 // Baked into the binary so the CSP can stay 'self'-only and the
 // wizard renders even when the laptop is offline. Mapping:
-//   openclaw.svg → agent id "nemoclaw" (display name is OpenClaw)
+//   openclaw.svg → OpenClaw agent icon (backend id is normalized internally)
 //   hermes.svg   → agent id "hermes"
 //   nvidia.svg   → reserved for future sandbox badge
 const ICON_OPENCLAW: &[u8] = include_bytes!("../web/assets/icons/openclaw.svg");
@@ -446,7 +446,7 @@ fn probe_agent_status(
         return api_status;
     }
 
-    // OpenClaw/NemoClaw and Hermes expose browser UIs. The SDK gateway can
+    // OpenClaw and Hermes expose browser UIs. The SDK gateway can
     // answer before Caddy has the SPA/dashboard upstream fully wired, which made
     // TytusOS show "Running" while the user's browser still saw 502.
     // Treat browser agents as ready only when BOTH /v1/models and the
@@ -4879,7 +4879,7 @@ struct AgentSlot {
     /// OPENAI_BASE_URL. None when public_url is None.
     api_url: Option<String>,
     /// Browser-authenticated UI URL (`{public_url}/?token={gateway_token}`)
-    /// for browser agents (OpenClaw/NemoClaw SPA, Hermes dashboard). None
+    /// for browser agents (OpenClaw SPA, Hermes dashboard). None
     /// while the edge URL or per-pod secret is still missing.
     ui_url: Option<String>,
     /// Per-pod gateway secret used by readiness probes and local forwarder.
@@ -4909,7 +4909,7 @@ struct IncludedSlot {
 
 /// Per-plan unit budgets — must match Scalesys `AGENT_UNITS` + the Rails
 /// plan tiering. Keep aligned with `services/wannolot-provider/src/...`
-/// where `nemoclaw=1, hermes=2, none=0` and Explorer=1 / Creator=2 /
+/// where OpenClaw=1, Hermes=2, included AIL=0 and Explorer=1 / Creator=2 /
 /// Operator=4. Unknown agent types default to 1 unit (conservative so
 /// we never under-count the user's spend).
 /// Compute the per-pod gateway auth token. The edge plugin accepts
@@ -4941,7 +4941,7 @@ fn agent_units_for(agent_type: &str) -> u32 {
     match agent_type {
         "hermes" => 2,
         "none" => 0,
-        _ => 1, // nemoclaw + future openclaw-family
+        _ => 1, // OpenClaw-family agents
     }
 }
 
@@ -5385,7 +5385,7 @@ fn compute_state_snapshot() -> StateSnapshot {
             // Gateway token resolution: prefer the one in state (set
             // by the CLI after any `tytus env` call), else derive it
             // from sha256(pod_api_key || pod_id)[:48] — the exact
-            // formula the edge plugin + nemoclaw startup use. Without
+            // formula the edge plugin + OpenClaw startup use. Without
             // this, a fresh-install pod's ui_url has no `?token=` so
             // the browser hits the edge's 401 bouncer. Derivation
             // requires only pod_api_key which IS in state.json from
@@ -8040,7 +8040,7 @@ fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry
 /// Probe whether a just-installed pod is actually reachable. The CLI's
 /// `agent install` returns as soon as Scalesys allocates the pod row +
 /// fires the DAM deploy — the container is typically still starting at
-/// that moment (15-60 s for nemoclaw, 30-90 s for hermes). The wizard
+/// that moment (15-60 s for OpenClaw, 30-90 s for Hermes). The wizard
 /// polls this endpoint post-install so the user doesn't see a fake
 /// "done" screen with a broken "Chat now" button.
 ///
@@ -8366,7 +8366,7 @@ fn handle_pod_uninstall(request: Request, query: &str) {
             return;
         }
     };
-    // Only agent pods (nemoclaw, hermes) can be uninstalled. AIL-included
+    // Only agent pods (OpenClaw, Hermes) can be uninstalled. AIL-included
     // pods have no agent to remove — `tytus agent uninstall <pod>` on a
     // default pod is a no-op + confusing error.
     let snap = compute_state_snapshot();

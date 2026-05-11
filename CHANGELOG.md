@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.14-beta.39 - 2026-05-11
+
+- Keeps the `v1.0.28-apps-platform` TytusOS bundle from beta38.
+- Polishes OpenClaw public branding across tray fallback actions, CLI capabilities output, and user-facing docs while preserving backend compatibility aliases.
+- Revalidates Atomek Resource Fabric release surfaces and Windows mission-root guard CI after the beta38 release.
+
 ## v0.6.14-beta.38 - 2026-05-11
 
 - Bundles TytusOS `v1.0.28-apps-platform`.

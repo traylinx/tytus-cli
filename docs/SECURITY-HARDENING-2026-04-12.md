@@ -43,7 +43,7 @@ through the WireGuard tunnel, CLI information leakage, API endpoint exposure.
 ### Detailed Network Scan Results
 
 **Ports open on own pod (10.18.2.1):**
-- 3000 (agent — NemoClaw) — expected, needed for `tytus ui`
+- 3000 (agent — OpenClaw) — expected, needed for `tytus ui`
 - 18080 (SwitchAILocal gateway) — expected
 
 **Ports open on stable endpoint (10.42.42.1):**

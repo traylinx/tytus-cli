@@ -289,7 +289,7 @@ pub struct TrayState {
     /// Concrete per-pod info (id + which agent is running). Drives the
     /// "Pods & Agents" submenu. Empty when the user has no allocations.
     pub pods: Vec<PodInfo>,
-    /// Units currently consumed by allocated pods (NemoClaw=1, Hermes=2).
+    /// Units currently consumed by allocated pods (OpenClaw=1, Hermes=2).
     /// Derived from `pods` but cached so menu building doesn't recompute.
     pub units_used: u32,
     /// Hard cap from the user's plan. Explorer=1, Creator=2, Operator=4.
@@ -374,7 +374,7 @@ impl PodInfo {
         Some(format!("{}/?token={}", base, token))
     }
 
-    /// Unit cost — mirrors Scalesys: NemoClaw=1, Hermes=2, Default pod=0.
+    /// Unit cost — mirrors Scalesys: OpenClaw=1, Hermes=2, included AIL pod=0.
     pub fn units(&self) -> u32 {
         match self.agent_type.as_str() {
             "hermes" => 2,
@@ -385,7 +385,7 @@ impl PodInfo {
     /// Human label for menus. Falls back to the raw id if we don't know it.
     pub fn display_name(&self) -> String {
         // User-facing names. Internal agent_type identifiers (nemoclaw =
-        // the NemoClaw safety harness that runs OpenClaw inside) stay as
+        // the OpenClaw backend runtime) stay as
         // the Docker image + Scalesys enum, but the menu always renders
         // the public brand name ("OpenClaw"). Same for any future harness
         // rename — this is the one place to keep in sync.
@@ -2177,7 +2177,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // Install a specific agent via the terminal-picker fallback.
         "install_agent_nemoclaw" => {
             open_in_terminal_simple(
-                "tytus agent install nemoclaw; echo; echo 'Press Enter to close…'; read _",
+                "tytus agent install openclaw; echo; echo 'Press Enter to close…'; read _",
             );
         }
         "install_agent_hermes" => {

@@ -2978,8 +2978,8 @@ async fn cmd_agent_env(
 
 /// Normalize a user-provided agent name to the backend (Scalesys + DAM)
 /// identifier. The public brand name is "OpenClaw" but the Docker image +
-/// agent_type enum is `nemoclaw` (the NemoClaw safety harness that runs
-/// OpenClaw inside). Accepting the alias lets users type either name.
+/// agent_type enum is normalized to the backend identifier when talking
+/// to older provider endpoints. Users type the public brand name: OpenClaw.
 ///
 /// Keep this list short. If the catalog grows, make the Provider return
 /// an `aliases` array per agent and resolve client-side from there.
@@ -2987,6 +2987,15 @@ fn normalize_agent_name(input: &str) -> String {
     match input.to_ascii_lowercase().as_str() {
         "openclaw" => "nemoclaw".to_string(),
         other => other.to_string(),
+    }
+}
+
+fn display_agent_name(agent: &str) -> &str {
+    match agent {
+        "none" => "default",
+        "nemoclaw" | "openclaw" => "OpenClaw",
+        "hermes" => "Hermes",
+        other => other,
     }
 }
 
@@ -3000,8 +3009,8 @@ async fn cmd_agent_install(
     force: bool,
     json: bool,
 ) -> Option<String> {
-    // Accept `openclaw` as the public name; backend still speaks
-    // `nemoclaw` (the internal harness identifier).
+    // Accept `openclaw` as the public name; normalize only at the
+    // provider boundary where older endpoints still speak the backend id.
     let name = normalize_agent_name(name);
     let name = name.as_str();
     let mut state = CliState::load();
@@ -3218,7 +3227,7 @@ async fn configure_nemoclaw_for_zero_auth(
     // 1. Write a `config.user.json` overlay that adds the forwarder's
     //    per-pod localhost port to `gateway.controlUi.allowedOrigins`.
     //    Critical: the previous implementation patched `config.json`
-    //    directly, but nemoclaw-configure.sh REGENERATES that file
+    //    directly, but the OpenClaw configure script REGENERATES that file
     //    from scratch on every container restart — wiping our patch.
     //    The overlay pattern (`config.user.json`) is deep-merged on
     //    top on every restart, so the origins stick forever.
@@ -3414,12 +3423,7 @@ async fn cmd_agent_list(http: &atomek_core::HttpClient, json: bool) {
             .unwrap_or("http://10.42.42.1:18080");
         // Display the public brand name; keep the internal identifier
         // consistent in --json output (elsewhere) for scripting.
-        let label = match agent {
-            "none" => "default",
-            "nemoclaw" => "OpenClaw",
-            "hermes" => "Hermes",
-            other => other,
-        };
+        let label = display_agent_name(agent);
         println!("{:<6} {:<12} {:<10} {}", p.pod_id, label, tunnel, endpoint);
     }
 }
@@ -5009,7 +5013,12 @@ fn render_capabilities_tree(
     v: &serde_json::Value,
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!("Pod {} ({}, {} plan)\n", pod_id, agent, tier));
+    out.push_str(&format!(
+        "Pod {} ({}, {} plan)\n",
+        pod_id,
+        display_agent_name(agent),
+        tier
+    ));
 
     let empty = Vec::new();
     let data = v.get("data").and_then(|d| d.as_array()).unwrap_or(&empty);
@@ -5133,7 +5142,7 @@ mod capabilities_tests {
         });
         let out = render_capabilities_tree("02", "nemoclaw", "operator", &body);
         assert!(
-            out.contains("Pod 02 (nemoclaw, operator plan)"),
+            out.contains("Pod 02 (OpenClaw, operator plan)"),
             "header missing:\n{}",
             out
         );
@@ -5690,7 +5699,7 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
     let agent = if state.pods.is_empty() {
         match wizard::select("Which agent?", &["OpenClaw (recommended)", "Hermes"]) {
             Ok(s) if s.to_ascii_lowercase().starts_with("hermes") => "hermes",
-            _ => "nemoclaw", // backend identifier; public brand is OpenClaw
+            _ => "nemoclaw", // backend identifier for the public OpenClaw brand
         }
     } else {
         let first_agent = state.pods[0]
@@ -7265,7 +7274,7 @@ async fn cmd_ui(
             .unwrap_or(pod)
     };
 
-    // Resolve upstream: agent_endpoint is "10.X.Y.1:3000" (nemoclaw) or
+    // Resolve upstream: agent_endpoint is "10.X.Y.1:3000" (OpenClaw) or
     // "10.X.Y.1:8642" (hermes). If missing, derive from ai_endpoint.
     // Strip any http:// prefix — copy_bidirectional wants a raw host:port.
     let upstream = match pod.agent_endpoint.clone() {
@@ -7745,7 +7754,7 @@ async fn ensure_controlui_overlay(
 /// the macOS approval dialog). Returns None on any failure.
 ///
 /// Branches on agent_type:
-///   nemoclaw: reads gateway.auth.token from /app/workspace/.openclaw/
+///   OpenClaw: reads gateway.auth.token from /app/workspace/.openclaw/
 ///             config.json (JSON, key regenerated on each restart from
 ///             a deterministic formula so it's always present).
 ///   hermes:   reads /app/workspace/.hermes/api_server_key (plain file
@@ -7906,7 +7915,7 @@ async fn handle_forwarder_connection(
 
     // Per-agent request handling. Two distinct shapes:
     //
-    // OpenClaw (nemoclaw): single listener serves both the chat-UI
+    // OpenClaw: single listener serves both the chat-UI
     //   SPA and the WS RPC on the same port (3000). The UI reads
     //   `?token=<T>` from the URL on first load, stashes it in
     //   settings, then strips it via history.replaceState. Without
