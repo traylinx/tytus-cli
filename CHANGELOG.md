@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.14-beta.41 - 2026-05-11
+
+- Keeps the `v1.0.28-apps-platform` TytusOS bundle and beta40 JULI3TA playback fix.
+- Stabilizes the Windows PR-truth idempotency cache test by avoiding process-global cache length assertions.
+- Republishes public beta download/install surfaces for the beta41 release.
+
 ## v0.6.14-beta.40 - 2026-05-11
 
 - Fixes JULI3TA tray playback for generated data-audio responses so local audio previews play through the tray web server.

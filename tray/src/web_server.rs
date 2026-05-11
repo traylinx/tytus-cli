@@ -10422,16 +10422,21 @@ mod tests {
     #[test]
     fn idempotency_put_skips_eviction_when_updating_existing_key() {
         // Updating an existing entry (e.g. last-write-wins on a race)
-        // must not displace some unrelated entry just to "make room".
+        // must not displace some unrelated entry just to "make room". The
+        // cache is process-global and Rust may run tests in parallel, so do
+        // not assert total cache length here. Assert the unrelated sentinel
+        // survives the update instead.
         let key = "idem-test-update".to_string();
+        let sentinel = "idem-test-update-sentinel".to_string();
+        idempotency_put(sentinel.clone(), 200, "keep".into());
         idempotency_put(key.clone(), 200, "first".into());
-        let len_before = idempotency_cache().lock().unwrap().len();
         idempotency_put(key.clone(), 202, "second".into());
-        let len_after = idempotency_cache().lock().unwrap().len();
-        assert_eq!(len_before, len_after);
+
         let entry = idempotency_get(&key).unwrap();
         assert_eq!(entry.status, 202);
         assert_eq!(entry.body, "second");
+        let sentinel_entry = idempotency_get(&sentinel).unwrap();
+        assert_eq!(sentinel_entry.body, "keep");
     }
 
     #[test]
