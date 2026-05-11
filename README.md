@@ -2,7 +2,7 @@
 
 > Private AI pods, TytusOS desktop, and a stable OpenAI-compatible gateway from one local CLI.
 
-Current public beta: **v0.6.14-beta.45** (2026-05-11).
+Current public beta: **v0.6.14-beta.46** (2026-05-11).
 
 ## Install
 
@@ -24,12 +24,12 @@ Checksum-verified installer commands are also available:
 
 ```bash
 # macOS / Linux public beta
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.45 sh
+curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.46 sh
 ```
 
 ```powershell
 # Windows public beta preview
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.45"; irm https://get.traylinx.com/install.ps1 | iex
+$env:TYTUS_RELEASE_TAG="v0.6.14-beta.46"; irm https://get.traylinx.com/install.ps1 | iex
 ```
 
 Homebrew remains available for the latest stable tap release:

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.14-beta.46 — 2026-05-11
+
+- Embedded TytusOS v1.0.33 with Atomek v0.4.22 pin.
+- Fixed Atomek local-agent terminal launches so OpenCode/Claude/Codex/pi commands execute instead of opening an idle shell.
+- Updated Atomek docs for persistent workspace/recent state restore and sidebar toggle behavior.
+
 ## v0.6.14-beta.45 - 2026-05-11
 
 - Bundles TytusOS `v1.0.32-apps-platform` with JULI3TA `0.3.18` music recovery and catalog `v53`.

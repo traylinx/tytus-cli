@@ -929,6 +929,21 @@ Normal flow:
 
 Folder rows are clickable. Use the chevron to expand or collapse child folders. Text files open in the Monaco editor. Markdown files can be edited and previewed.
 
+## State restore and recent workspaces
+
+Atomek remembers the last working state in the browser:
+
+- recent files and folders
+- persisted browser file/folder handles when Chromium allows it
+- active folder and file tree
+- open editor tabs and active file
+- typed chat input
+- selected activity, visible sidebars, and layout
+
+After reload or reopen, Atomek restores the same state and asks the browser for file permission only when needed. If permission expired, use **Open File** or **Open Folder** once to refresh the handle.
+
+Click the active Activity Bar icon again, or use **Cmd/Ctrl+B**, to hide or show the primary side bar.
+
 ## Editing
 
 Atomek is a real editor surface, not a static preview.
@@ -1132,7 +1147,7 @@ Do not show fake support. If a skill or app driver is not installed, show it as 
 
 | Problem | Fix |
 |---|---|
-| Old UI or duplicate Agent Team icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.21` or newer. |
+| Old UI or duplicate Agent Team icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.22` or newer. |
 | Files are listed but editor is blank | Reopen the file, then hard-refresh. If still broken, report the file type and console error. |
 | Folder does not expand/collapse | You are likely on an older bundle. Refresh and check the Atomek version. |
 | Chat answer appears only after completion | Streaming path is degraded. Check browser console and host `/v1/chat/completions` proxy errors. |
@@ -1333,7 +1348,7 @@ Fix:
 1. Hard-refresh TytusOS.
 2. Reopen Atomek.
 3. Reopen the file from Explorer.
-4. Confirm Atomek loads `tytus-app-atomek@v0.4.21` or newer.
+4. Confirm Atomek loads `tytus-app-atomek@v0.4.22` or newer.
 5. If still broken, include the file extension and browser console error in the bug report.
 
 ## Atomek folder rows do not expand or collapse
@@ -1342,7 +1357,7 @@ Use the folder chevron or click the folder row. If nothing changes, you are like
 
 ## Atomek shows duplicate Agent Team and stale App Skills icons
 
-That was an old app bundle. The current surface has one **Agent Team** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.21` or newer.
+That was an old app bundle. The current surface has one **Agent Team** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.22` or newer.
 
 ## Atomek local tools are missing
 

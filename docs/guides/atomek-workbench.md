@@ -27,6 +27,10 @@ Then open **Atomek** from the TytusOS dock, launcher, or app list.
 
 Atomek is not a second local-agent runtime. It controls existing Tytus and local Resource Fabric resources through the Tytus host bridge.
 
+## State restore
+
+Atomek remembers recent file/folder handles, active folder, file tree, open tabs, active file, typed chat input, selected activity, and layout across reload/reopen. If Chromium expires a file handle permission, open that file or folder once through the picker and the recent entry will work again. Click the active Activity Bar icon again, or use Cmd/Ctrl+B, to toggle the primary sidebar.
+
 ## AI model selection
 
 Atomek uses the Tytus host AI bridge and global AIL configuration. It must not hardcode model IDs.
@@ -88,9 +92,9 @@ Use **Atomek** for editing and agent work against selected files or folders.
 
 | Problem | Fix |
 |---|---|
-| Old Atomek UI or duplicate Agent Team icons | Hard-refresh TytusOS. Current app should be `tytus-app-atomek@v0.4.21` or newer. |
+| Old Atomek UI or duplicate Agent Team icons | Hard-refresh TytusOS. Current app should be `tytus-app-atomek@v0.4.22` or newer. |
 | Files appear but editor is blank | Reopen the file, hard-refresh, then check the browser console. |
-| Folder does not expand/collapse | Hard-refresh. Agent Team and folder fixes ship in Atomek `v0.4.21`. |
+| Folder does not expand/collapse | Hard-refresh. Agent Team and folder fixes ship in Atomek `v0.4.22`. |
 | Local tool missing | Install the local CLI/tool, then click **Refresh capabilities**. |
 | Remote model/pod fetch gets CORS | Route through the Tytus host proxy. Browser apps should not direct-fetch pod public URLs. |
 | Model list shows an old model | Fix global AIL config. Do not hardcode models in Atomek. |
