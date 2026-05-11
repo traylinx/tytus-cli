@@ -1760,12 +1760,10 @@ fn path_is_under(child: &Path, parent: &Path) -> bool {
 }
 
 fn mission_root_allowed(root: &Path) -> bool {
-    if root.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::CurDir | Component::Prefix(_)
-        )
-    }) {
+    if root
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
         return false;
     }
     path_is_under(root, &missions_root())
