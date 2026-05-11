@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.14-beta.42 - 2026-05-11
+
+- Keeps the `v1.0.28-apps-platform` TytusOS bundle and beta41 CI-stability fix.
+- Makes the installer contract PR-truth check version-agnostic so future beta bumps do not fail on stale hardcoded tags.
+- Republishes public beta download/install surfaces for the beta42 release.
+
 ## v0.6.14-beta.41 - 2026-05-11
 
 - Keeps the `v1.0.28-apps-platform` TytusOS bundle and beta40 JULI3TA playback fix.

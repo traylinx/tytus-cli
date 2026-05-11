@@ -66,11 +66,13 @@ jobs:
           assert "releases/tags/$($env:TYTUS_RELEASE_TAG)" in powershell_installer
           assert "(\./)?" in powershell_installer
 
+          import re
+
           web_index = Path("web/index.html").read_text()
-          assert "v0.6.14-beta.40" in web_index
+          assert re.search(r"v0\.6\.14-beta\.\d+", web_index), "missing current public beta tag"
           assert "PUBLIC-BETA-UNSIGNED" in web_index
           assert "Not production GA" in web_index
-          assert "TYTUS_RELEASE_TAG=v0.6.14-beta.40" in web_index
+          assert re.search(r"TYTUS_RELEASE_TAG=v0\.6\.14-beta\.\d+", web_index), "missing beta installer command"
 
           sync_script = Path("scripts/sync-tytus-os-dist.sh").read_text()
           assert "command -v shasum" in sync_script
