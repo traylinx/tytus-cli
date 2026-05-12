@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Embeds TytusOS with Atomek 0.4.23: removes the dead Accounts icon, lets the Atomek logo toggle the sidebar, hardens recent/session restore, and opens local AI CLIs in fresh executing terminals.
+
 ## v0.6.14-beta.47 — 2026-05-11
 
 - Moves public beta page/install examples to beta47.
