@@ -11,14 +11,14 @@ on:
       tytus_os_ref:
         description: 'tytus-os ref to build for dist embedding checks'
         required: false
-        default: 'v1.0.37-apps-platform'
+        default: 'v1.0.38-apps-platform'
         type: string
 
 permissions:
   contents: read
 
 env:
-  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || 'v1.0.37-apps-platform' }}
+  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || 'v1.0.38-apps-platform' }}
 
 jobs:
   installer-contract:

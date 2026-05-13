@@ -51,12 +51,12 @@ const POD_PROXY_MUSIC_GENERATION_TIMEOUT: Duration = Duration::from_secs(420);
 const TYTUS_OS_IMPORTMAP_CSP_HASH: &str = "'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU='";
 const TYTUS_OS_CONTENT_SECURITY_POLICY: &str = concat!(
     "default-src 'self'; ",
-    "script-src 'self' 'wasm-unsafe-eval' 'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU=' https://cdn.jsdelivr.net; ",
-    "script-src-elem 'self' 'wasm-unsafe-eval' 'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU=' https://cdn.jsdelivr.net; ",
+    "script-src 'self' 'wasm-unsafe-eval' 'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU=' https://cdn.jsdelivr.net https://raw.githubusercontent.com; ",
+    "script-src-elem 'self' 'wasm-unsafe-eval' 'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU=' https://cdn.jsdelivr.net https://raw.githubusercontent.com; ",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; ",
     "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; ",
     "style-src-attr 'unsafe-inline'; ",
-    "worker-src 'self' blob: https://cdn.jsdelivr.net; ",
+    "worker-src 'self' blob: https://cdn.jsdelivr.net https://raw.githubusercontent.com; ",
     "connect-src 'self' https://cdn.jsdelivr.net https://raw.githubusercontent.com https://*.tytus.traylinx.com http://10.42.42.1:18080 http://localhost:18080 http://127.0.0.1:18080; ",
     "img-src 'self' data: blob: https:; ",
     "media-src 'self' data: blob: https:; ",
