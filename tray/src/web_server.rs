@@ -57,7 +57,7 @@ const TYTUS_OS_CONTENT_SECURITY_POLICY: &str = concat!(
     "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; ",
     "style-src-attr 'unsafe-inline'; ",
     "worker-src 'self' blob: https://cdn.jsdelivr.net; ",
-    "connect-src 'self' https://cdn.jsdelivr.net https://*.tytus.traylinx.com http://10.42.42.1:18080 http://localhost:18080 http://127.0.0.1:18080; ",
+    "connect-src 'self' https://cdn.jsdelivr.net https://raw.githubusercontent.com https://*.tytus.traylinx.com http://10.42.42.1:18080 http://localhost:18080 http://127.0.0.1:18080; ",
     "img-src 'self' data: blob: https:; ",
     "media-src 'self' data: blob: https:; ",
     "font-src 'self' https://fonts.gstatic.com data:;"
@@ -3464,21 +3464,96 @@ fn handle_juli3ta_library_delete(request: Request) {
 }
 
 fn handle_juli3ta_library_audio(request: Request, query: &str) {
+    let range = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Range"))
+        .map(|h| h.value.as_str().to_string());
     let Some(id) = query_value(query, "id") else {
         respond_json(request, 400, &serde_json::json!({ "error": "missing id" }));
         return;
     };
     match juli3ta_library::read_audio(&id) {
         Ok((bytes, mime)) => {
-            let resp = Response::from_data(bytes)
-                .with_status_code(StatusCode(200))
+            let total = bytes.len();
+            let mut status = StatusCode(200);
+            let mut out = bytes;
+            let mut extra_headers: Vec<Header> = Vec::new();
+            if let Some(raw_range) = range.as_deref() {
+                match parse_single_byte_range(raw_range, total) {
+                    Ok(Some(range)) => {
+                        status = StatusCode(206);
+                        extra_headers.push(header(
+                            "Content-Range",
+                            &format!("bytes {}-{}/{}", range.start, range.end, total),
+                        ));
+                        out = out[range.start..=range.end].to_vec();
+                    }
+                    Ok(None) => {}
+                    Err(()) => {
+                        let resp = Response::from_string(String::new())
+                            .with_status_code(StatusCode(416))
+                            .with_header(header("Content-Range", &format!("bytes */{}", total)))
+                            .with_header(header("Accept-Ranges", "bytes"))
+                            .with_header(header("X-Content-Type-Options", "nosniff"));
+                        let _ = request.respond(resp);
+                        return;
+                    }
+                }
+            }
+            let mut resp = Response::from_data(out)
+                .with_status_code(status)
                 .with_header(header("Content-Type", &mime))
                 .with_header(header("X-Content-Type-Options", "nosniff"))
                 .with_header(header("Accept-Ranges", "bytes"));
+            for h in extra_headers {
+                resp.add_header(h);
+            }
             let _ = request.respond(resp);
         }
         Err(e) => juli3ta_library_error_response(request, e),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ByteRange {
+    start: usize,
+    end: usize,
+}
+
+fn parse_single_byte_range(raw: &str, total: usize) -> Result<Option<ByteRange>, ()> {
+    let Some(spec) = raw.trim().strip_prefix("bytes=") else {
+        return Ok(None);
+    };
+    if total == 0 || spec.contains(',') {
+        return Err(());
+    }
+    let Some((start_raw, end_raw)) = spec.split_once('-') else {
+        return Err(());
+    };
+    let start_raw = start_raw.trim();
+    let end_raw = end_raw.trim();
+    if start_raw.is_empty() {
+        let suffix = end_raw.parse::<usize>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        let start = total.saturating_sub(suffix);
+        return Ok(Some(ByteRange { start, end: total - 1 }));
+    }
+    let start = start_raw.parse::<usize>().map_err(|_| ())?;
+    if start >= total {
+        return Err(());
+    }
+    let end = if end_raw.is_empty() {
+        total - 1
+    } else {
+        end_raw.parse::<usize>().map_err(|_| ())?.min(total - 1)
+    };
+    if end < start {
+        return Err(());
+    }
+    Ok(Some(ByteRange { start, end }))
 }
 
 fn handle_juli3ta_library_open_folder(request: Request) {
@@ -9579,6 +9654,34 @@ fn respond_json<T: Serialize>(request: Request, status: u16, body: &T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn juli3ta_audio_range_parser_accepts_common_browser_ranges() {
+        assert_eq!(
+            parse_single_byte_range("bytes=100-199", 1000).unwrap(),
+            Some(ByteRange { start: 100, end: 199 })
+        );
+        assert_eq!(
+            parse_single_byte_range("bytes=100-", 1000).unwrap(),
+            Some(ByteRange { start: 100, end: 999 })
+        );
+        assert_eq!(
+            parse_single_byte_range("bytes=-250", 1000).unwrap(),
+            Some(ByteRange { start: 750, end: 999 })
+        );
+        assert_eq!(
+            parse_single_byte_range("bytes=900-1500", 1000).unwrap(),
+            Some(ByteRange { start: 900, end: 999 })
+        );
+    }
+
+    #[test]
+    fn juli3ta_audio_range_parser_rejects_unsatisfiable_ranges() {
+        assert!(parse_single_byte_range("bytes=1000-", 1000).is_err());
+        assert!(parse_single_byte_range("bytes=200-100", 1000).is_err());
+        assert!(parse_single_byte_range("bytes=0-1,4-5", 1000).is_err());
+        assert!(parse_single_byte_range("bytes=-0", 1000).is_err());
+    }
 
     /// RAII guard that pins `TYTUS_STATE_PATH` for the duration of a
     /// test, releases the env var on drop, and serializes against
