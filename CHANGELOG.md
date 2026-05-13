@@ -1,8 +1,8 @@
 # Changelog
 
-## v0.6.14-beta.51 — 2026-05-13
+## v0.6.14-beta.52 — 2026-05-13
 
-- Embeds TytusOS `v1.0.36-apps-platform` with app self-update checks for Atomek and JULI3TA.
+- Embeds TytusOS `v1.0.37-apps-platform` with app self-update checks for Atomek and JULI3TA.
 - Serves JULI3TA generated-song library audio with HTTP byte ranges so My Work timeline scrubbing seeks instead of restarting.
 - Republishes public beta download/install surfaces for Atomek 0.4.24 and JULI3TA 0.3.20.
 
