@@ -47,10 +47,13 @@ jobs:
                   "TYTUS_INSTALL_MODE",
                   "TYTUS_DEV_SOURCE_INSTALL",
                   "TYTUS_RELEASE_TAG",
-                  "TYTUS_SKIP_GARAGETYTUS",
                   "dev-source",
               ]:
                   assert needle in text, (path, needle)
+
+          for path in ["install.sh", "web/install.sh"]:
+              text = Path(path).read_text()
+              assert "TYTUS_SKIP_GARAGETYTUS" in text, path
 
           postinstall = Path("pkg/scripts/postinstall").read_text()
           assert "/usr/local/bin/tytus tunnel-up /tmp/tytus/tunnel-*.json" in postinstall
