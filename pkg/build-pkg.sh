@@ -59,7 +59,18 @@ COMPONENT_PKG="$BUILD_DIR/Tytus-component.pkg"
 PRODUCT_PKG="$REPO_ROOT/target/Tytus-${VERSION}${OUTPUT_SUFFIX}-unsigned.pkg"
 
 # ── Sanity ───────────────────────────────────────────────────
-for b in tytus tytus-tray tytus-mcp; do
+required_bins=(tytus tytus-tray tytus-mcp)
+optional_bins=()
+if [ -x "$BIN_DIR/garagetytus" ]; then
+    optional_bins+=(garagetytus)
+fi
+if compgen -G "$BIN_DIR/garagetytus-*" >/dev/null; then
+    for helper in "$BIN_DIR"/garagetytus-*; do
+        [ -x "$helper" ] && optional_bins+=("$(basename "$helper")")
+    done
+fi
+
+for b in "${required_bins[@]}"; do
     if [ ! -x "$BIN_DIR/$b" ]; then
         echo "ERROR: $BIN_DIR/$b missing or not executable." >&2
         if [ -n "$TARGET_TRIPLE" ]; then
@@ -78,7 +89,7 @@ command -v productbuild >/dev/null || { echo "ERROR: productbuild not found (Xco
 rm -rf "$BUILD_DIR"
 mkdir -p "$PAYLOAD/usr/local/bin" "$SCRIPTS"
 
-for b in tytus tytus-tray tytus-mcp; do
+for b in "${required_bins[@]}" "${optional_bins[@]}"; do
     cp "$BIN_DIR/$b" "$PAYLOAD/usr/local/bin/$b"
     chmod 0755 "$PAYLOAD/usr/local/bin/$b"
     # Strip removable extended attributes (Finder tags, quarantine, etc.).

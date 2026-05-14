@@ -17,7 +17,18 @@ case "$TARGET_TRIPLE" in
         ;;
 esac
 
-for bin in tytus tytus-mcp tytus-tray; do
+required_bins=(tytus tytus-mcp tytus-tray)
+optional_bins=()
+if [ -x "$BIN_DIR/garagetytus" ]; then
+    optional_bins+=(garagetytus)
+fi
+if compgen -G "$BIN_DIR/garagetytus-*" >/dev/null; then
+    for helper in "$BIN_DIR"/garagetytus-*; do
+        [ -x "$helper" ] && optional_bins+=("$(basename "$helper")")
+    done
+fi
+
+for bin in "${required_bins[@]}"; do
     if [ ! -x "$BIN_DIR/$bin" ]; then
         echo "Missing executable: $BIN_DIR/$bin" >&2
         echo "Build first: cargo build --release --target $TARGET_TRIPLE -p atomek-cli -p tytus-mcp -p tytus-tray" >&2
@@ -45,6 +56,9 @@ mkdir -p \
 install -m 0755 "$BIN_DIR/tytus" "$PKGROOT/usr/bin/tytus"
 install -m 0755 "$BIN_DIR/tytus-mcp" "$PKGROOT/usr/bin/tytus-mcp"
 install -m 0755 "$BIN_DIR/tytus-tray" "$PKGROOT/usr/bin/tytus-tray"
+for bin in "${optional_bins[@]}"; do
+    install -m 0755 "$BIN_DIR/$bin" "$PKGROOT/usr/bin/$bin"
+done
 install -m 0644 "$ROOT/pkg/deb/systemd/tytus-daemon.service" "$PKGROOT/usr/lib/systemd/user/tytus-daemon.service"
 install -m 0644 "$ROOT/pkg/deb/applications/tytus.desktop" "$PKGROOT/usr/share/applications/tytus.desktop"
 install -m 0644 "$ROOT/pkg/deb/autostart/tytus-tray.desktop" "$PKGROOT/etc/xdg/autostart/tytus-tray.desktop"

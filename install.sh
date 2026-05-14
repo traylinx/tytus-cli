@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================
-# tytus-cli installer — installs both tytus and tytus-mcp
+# tytus-cli installer — installs Tytus + shared-folder tools
 # ============================================================
 #
 # Usage:
@@ -17,7 +17,8 @@
 # What it does:
 #   1. Detects your OS + arch
 #   2. Downloads a checksum-verified GitHub release artifact
-#   3. Installs `tytus`, `tytus-mcp`, and `tytus-tray` when bundled
+#   3. Installs `tytus`, `tytus-mcp`, `tytus-tray`, and bundled
+#      `garagetytus` shared-folder tools when present in the release
 #   4. Developer-only: builds from source when explicitly requested
 #   5. Sets up a tightly-scoped sudoers entry so `tytus connect` never
 #      prompts for a password when opening the WireGuard tunnel
@@ -36,6 +37,9 @@
 #                          using release artifacts (NOT RECOMMENDED)
 #     TYTUS_RELEASE_TAG    Install a specific GitHub release tag instead of
 #                          /releases/latest, e.g. v0.6.14-beta.1
+#     TYTUS_SKIP_GARAGETYTUS
+#                          Set to "1" to skip installing bundled shared-folder
+#                          tools. Normal users should not set this.
 # ============================================================
 
 set -eu
@@ -250,6 +254,20 @@ try_release_download() {
     install_one "${CLI_NAME}"
     install_one "${MCP_NAME}"
     install_one "tytus-tray"
+    if [ "${TYTUS_SKIP_GARAGETYTUS:-}" = "1" ]; then
+        ok "Skipping shared-folder tools (TYTUS_SKIP_GARAGETYTUS=1)"
+    else
+        install_one "garagetytus"
+        for _helper_path in "${TMP}"/garagetytus-*; do
+            [ -f "$_helper_path" ] || continue
+            install_one "$(basename "$_helper_path")"
+        done
+        if [ -f "${INSTALL_DIR}/garagetytus" ]; then
+            ok "Shared-folder tools installed (garagetytus + helpers)"
+        else
+            warn "This Tytus release does not bundle garagetytus yet — shared-folder sync tools were not installed."
+        fi
+    fi
 
     BIN_PATH="${INSTALL_DIR}/${CLI_NAME}"
     return 0
@@ -391,6 +409,15 @@ verify_install() {
     if command -v "${MCP_NAME}" >/dev/null 2>&1; then
         ok "${MCP_NAME} ready (MCP server for Claude Code / OpenCode)"
     fi
+    if [ "${TYTUS_SKIP_GARAGETYTUS:-}" != "1" ]; then
+        if command -v garagetytus >/dev/null 2>&1; then
+            ok "garagetytus ready (shared-folder CLI)"
+        elif command -v garagetytus-folder-list >/dev/null 2>&1; then
+            ok "garagetytus helpers ready (shared-folder scripts)"
+        else
+            warn "garagetytus shared-folder tools are not on PATH."
+        fi
+    fi
 }
 
 # ── macOS tray bundle install ──────────────────────────────
@@ -451,7 +478,11 @@ print_next_steps() {
         printf "       Linux CLI works now; Linux desktop-tray/browser packaging is tracked separately.\n"
     fi
     printf "\n"
-    printf "  ${GREEN}5.${RESET} Full LLM-facing reference (for AI agents):\n"
+    printf "  ${GREEN}5.${RESET} Shared folders:\n"
+    printf "       Open ${BOLD}TytusOS → Settings → Sharing${RESET} or use ${BOLD}garagetytus folder list${RESET}\n"
+    printf "       to connect files, photos, briefs, and outputs between your computer and pods.\n"
+    printf "\n"
+    printf "  ${GREEN}6.${RESET} Full LLM-facing reference (for AI agents):\n"
     printf "       ${BOLD}tytus llm-docs${RESET}\n"
     printf "\n"
     printf "${DIM}Docs: %s${RESET}\n" "${REPO_URL}"

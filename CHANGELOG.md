@@ -1,14 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- No pending changes.
+
+## v0.6.15 — 2026-05-14
+
+- Bundles `garagetytus` shared-folder CLI and helper scripts into macOS/Linux release tarballs so the one-command Tytus installer prepares shared-folder tooling alongside the core CLI, MCP server, and tray app.
+- Installs bundled shared-folder tools from `install.sh` by default, with `TYTUS_SKIP_GARAGETYTUS=1` as an explicit opt-out.
+
 ## v0.6.14-beta.53 — 2026-05-13
 
 - Embeds TytusOS `v1.0.38-apps-platform` with app self-update checks for Atomek and JULI3TA, plus raw GitHub app bundle loading.
 - Serves JULI3TA generated-song library audio with HTTP byte ranges so My Work timeline scrubbing seeks instead of restarting.
 - Republishes public beta download/install surfaces for Atomek 0.4.25 and JULI3TA 0.3.21.
-
-## Unreleased
-
-- No pending changes.
 
 ## v0.6.14-beta.47 — 2026-05-11
 

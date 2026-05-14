@@ -31,6 +31,9 @@ permissions:
 
 env:
   TYTUS_OS_REF: ${{ inputs.tytus_os_ref }}
+  # Pinned so public Tytus releases are deterministic. Update only after
+  # garagetytus CI is green and helper scripts have been reviewed.
+  GARAGETYTUS_REF: 428c076a699521bea5a3c1de307d683c23b3634e
 
 jobs:
   check-nonproduction-release-policy:
@@ -254,6 +257,14 @@ jobs:
           ref: ${{ inputs.tag }}
           path: tytus-cli
 
+      - name: Checkout garagetytus shared-folder tools
+        if: runner.os != 'Windows'
+        uses: actions/checkout@v5
+        with:
+          repository: traylinx/garagetytus
+          ref: ${{ env.GARAGETYTUS_REF }}
+          path: garagetytus
+
       - name: Install Linux native deps
         if: runner.os == 'Linux'
         working-directory: tytus-cli
@@ -308,6 +319,25 @@ jobs:
           cargo build --release -p tytus-tray --target ${{ matrix.target }}
         shell: bash
 
+      - name: Build garagetytus shared-folder CLI
+        if: runner.os != 'Windows'
+        working-directory: garagetytus
+        run: |
+          cargo build --release -p garagetytus --target ${{ matrix.target }}
+        shell: bash
+
+      - name: Stage garagetytus shared-folder tools
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rel="tytus-cli/target/${{ matrix.target }}/release"
+          install -m 0755 "garagetytus/target/${{ matrix.target }}/release/garagetytus" "$rel/garagetytus"
+          for helper in garagetytus/bin/garagetytus-*; do
+            install -m 0755 "$helper" "$rel/$(basename "$helper")"
+          done
+          ls -la "$rel"/garagetytus "$rel"/garagetytus-* | sed -n '1,80p'
+
       - name: Build unsigned macOS pkg dry-run
         if: runner.os == 'macOS'
         working-directory: tytus-cli
@@ -336,7 +366,11 @@ jobs:
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
             powershell -NoProfile -Command "Compress-Archive -Force -Path tytus.exe,tytus-mcp.exe,tytus-tray.exe -DestinationPath ../../../${{ matrix.name }}.zip"
           else
-            tar czf ../../../${{ matrix.name }}.tar.gz tytus tytus-mcp tytus-tray
+            files=(tytus tytus-mcp tytus-tray)
+            if [[ -f garagetytus ]]; then
+              files+=(garagetytus garagetytus-*)
+            fi
+            tar czf ../../../${{ matrix.name }}.tar.gz "${files[@]}"
           fi
           cd ../../..
         shell: bash
@@ -489,6 +523,8 @@ jobs:
             They are provided so early testers can try the one-action install flow before paid signing/cert infrastructure is wired.
 
             Expect OS trust warnings, especially on macOS Gatekeeper and Windows SmartScreen. If you need the safest path, use the tar/zip artifacts or wait for the signed GA release.
+
+            macOS and Linux tarball installs include the bundled `garagetytus` shared-folder CLI and helper scripts so the one-command install prepares TytusOS shared folders as well as the core Tytus binaries.
 
             Windows is included as a zip technical preview only. The signed MSI + Wintun/WireGuard service path is not GA yet.
 
