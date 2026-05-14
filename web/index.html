@@ -3,316 +3,254 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Tytus — public beta installer preview</title>
-  <meta name="description" content="Tytus public beta ships unsigned macOS pkg, Linux deb, Windows zip, and checksum-verified CLI artifacts for early testers.">
-  <meta property="og:title" content="Tytus — public beta installer preview">
-  <meta property="og:description" content="Download the Tytus public beta. macOS/Linux install with one shell command; Windows installs with one PowerShell command.">
+  <title>tytusOS — private AI pod installer</title>
+  <meta name="description" content="Install tytusOS: your private WireGuard-isolated AI pod, local desktop, and OpenAI-compatible gateway for OpenClaw, Hermes, Claude Code, OpenCode, Gemini, and Cursor.">
+  <meta property="og:title" content="tytusOS — private AI pod installer">
+  <meta property="og:description" content="One command installs the tytus CLI, local desktop, and private AI pod gateway. macOS, Linux, and Windows public beta.">
   <meta property="og:type" content="website">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23111'/%3E%3Ctext x='32' y='44' font-family='ui-monospace,Menlo,monospace' font-size='36' font-weight='900' text-anchor='middle' fill='%23f7b500'%3ET%3C/text%3E%3C/svg%3E">
+  <meta property="og:image" content="/assets/tytusos-mark-512.png">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Nunito:wght@800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #0a0a0a;
-      --fg: #f5f5f5;
-      --dim: #999;
-      --accent: #f7b500;
-      --card: #141414;
-      --border: #262626;
-      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --bg: #0d0d0d;
+      --panel: #161616;
+      --panel-2: #0b0f14;
+      --line: rgba(0, 212, 170, .22);
+      --line-soft: rgba(255,255,255,.09);
+      --text: #f7fafc;
+      --muted: #9ca3af;
+      --dim: #6f7a86;
+      --teal: #00d4aa;
+      --teal-2: #33ddbb;
+      --yellow: #ffd54f;
+      --fur: #1f2933;
+      --face: #f1f4f6;
+      --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      --display: Nunito, Inter, system-ui, sans-serif;
     }
     * { box-sizing: border-box; }
-    html, body {
-      margin: 0; padding: 0;
-      background: var(--bg);
-      color: var(--fg);
-      font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 18% 18%, rgba(0,212,170,.12), transparent 26rem),
+        radial-gradient(circle at 82% 8%, rgba(255,213,79,.08), transparent 22rem),
+        linear-gradient(180deg, #0b0f14 0%, #0d0d0d 42%, #080808 100%);
+      color: var(--text);
+      font-family: var(--sans);
       -webkit-font-smoothing: antialiased;
     }
-    .wrap {
-      max-width: 780px;
-      margin: 0 auto;
-      padding: 64px 24px 96px;
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .36;
+      background-image:
+        radial-gradient(circle, rgba(255,255,255,.38) 1px, transparent 1.4px),
+        radial-gradient(circle, rgba(0,212,170,.3) 1px, transparent 1.5px);
+      background-size: 92px 92px, 137px 137px;
+      background-position: 0 0, 29px 51px;
+      mask-image: linear-gradient(180deg, #000 0%, transparent 76%);
     }
-    .logo {
-      font-family: var(--mono);
-      font-weight: 900;
-      font-size: 28px;
-      letter-spacing: -0.02em;
-      color: var(--fg);
-    }
-    .logo .t { color: var(--accent); }
-    h1 {
-      margin: 56px 0 16px;
-      font-size: 44px;
-      line-height: 1.1;
-      letter-spacing: -0.02em;
-      font-weight: 800;
-    }
-    h1 .accent { color: var(--accent); }
-    .tagline {
-      font-size: 20px;
-      color: var(--dim);
-      margin: 0 0 48px;
-      max-width: 620px;
-    }
-    h2 {
-      margin: 64px 0 16px;
-      font-size: 14px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--dim);
-      font-weight: 600;
-    }
-    .cmd {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 16px 20px;
-      font-family: var(--mono);
-      font-size: 14px;
+    a { color: inherit; }
+    .shell { width: min(1180px, calc(100vw - 40px)); margin: 0 auto; }
+    .nav {
+      height: 72px;
       display: flex;
       align-items: center;
-      gap: 12px;
-      overflow-x: auto;
-      position: relative;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      gap: 20px;
     }
-    .cmd::before {
-      content: '$';
-      color: var(--accent);
-      font-weight: 700;
-      user-select: none;
-    }
-    .cmd code {
-      color: var(--fg);
-      white-space: nowrap;
-    }
-    .cmd button {
-      margin-left: auto;
-      padding: 6px 12px;
-      background: transparent;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      color: var(--dim);
-      cursor: pointer;
-      font-size: 12px;
-      font-family: var(--mono);
-      flex-shrink: 0;
-    }
-    .cmd button:hover { color: var(--accent); border-color: var(--accent); }
-    .cmd button.ok { color: var(--accent); border-color: var(--accent); }
-    .cmd + .cmd { margin-top: 12px; }
-    .downloads {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 16px;
-      margin-top: 20px;
-    }
-    .download-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 18px;
-    }
-    .download-card h3 {
-      margin: 0 0 8px;
-      color: var(--fg);
-      font-size: 16px;
-    }
-    .download-card p {
-      margin: 0 0 14px;
-      color: var(--dim);
-      font-size: 13px;
-    }
-    .btns {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .btn {
+    .brand { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; }
+    .brand img { width: 34px; height: 34px; }
+    .wordmark { font-family: var(--display); font-weight: 900; letter-spacing: -.03em; font-size: 24px; }
+    .tabs { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: rgba(22,22,22,.8); }
+    .tabs a { text-decoration: none; color: var(--muted); font-weight: 700; font-size: 13px; padding: 8px 16px; border-radius: 4px; }
+    .tabs a.active { background: var(--teal); color: #04120f; }
+    .nav-actions { display: flex; align-items: center; gap: 10px; }
+    .icon-btn, .ghost, .primary {
+      border-radius: 4px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 800;
+      padding: 10px 14px;
       display: inline-flex;
       align-items: center;
-      justify-content: center;
-      padding: 8px 12px;
-      border-radius: 7px;
-      background: var(--accent);
-      color: #0a0a0a;
-      text-decoration: none;
+      gap: 8px;
+    }
+    .primary { background: var(--teal); color: #04120f; border-color: var(--teal); }
+    .ghost:hover, .icon-btn:hover { border-color: var(--teal); color: var(--teal); }
+    .primary:hover { background: var(--teal-2); }
+    .hero { padding: 92px 0 54px; text-align: center; }
+    .lockup { display: inline-flex; align-items: center; justify-content: center; gap: 26px; margin-bottom: 28px; }
+    .lockup img { width: 74px; height: 74px; }
+    .lockup .wordmark { font-size: 46px; line-height: 1; }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--teal);
+      border: 1px solid var(--line);
+      background: rgba(0,212,170,.08);
+      padding: 10px 18px;
+      border-radius: 4px;
       font-weight: 800;
-      font-size: 13px;
-    }
-    .btn.secondary {
-      background: transparent;
-      color: var(--fg);
-      border: 1px solid var(--border);
-    }
-    .warning {
-      margin-top: 24px;
-      padding: 16px 20px;
-      background: rgba(247, 181, 0, 0.08);
-      border: 1px solid rgba(247, 181, 0, 0.35);
-      border-radius: 10px;
-      color: var(--dim);
-      font-size: 13px;
-    }
-    .warning strong { color: var(--accent); }
-    .small {
-      color: var(--dim);
-      font-size: 13px;
-      margin-top: 8px;
-    }
-    .features {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 16px;
-      margin-top: 24px;
-    }
-    .feat {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 20px;
-    }
-    .feat h3 {
-      margin: 0 0 6px;
-      font-size: 15px;
-      color: var(--accent);
-      font-weight: 700;
-    }
-    .feat p {
-      margin: 0;
-      color: var(--dim);
       font-size: 14px;
-      line-height: 1.5;
+      margin-bottom: 30px;
     }
-    footer {
-      margin-top: 96px;
-      padding-top: 24px;
-      border-top: 1px solid var(--border);
-      color: var(--dim);
-      font-size: 13px;
-      display: flex;
-      gap: 24px;
-      flex-wrap: wrap;
+    h1 { font-size: clamp(46px, 7vw, 84px); line-height: .98; letter-spacing: -.055em; margin: 0 auto 22px; max-width: 980px; font-weight: 900; }
+    h1 .accent { color: var(--teal); }
+    .sub { max-width: 760px; margin: 0 auto; color: #d7dce0; font-size: clamp(18px, 2vw, 22px); line-height: 1.55; }
+    .badges { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 34px auto 0; }
+    .badge { border: 1px solid var(--line); background: rgba(22,22,22,.84); border-radius: 4px; padding: 10px 16px; color: var(--face); font-weight: 700; font-size: 14px; }
+    .cta { display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 34px; flex-wrap: wrap; }
+    .section-title { margin: 70px 0 18px; color: var(--muted); letter-spacing: .18em; text-transform: uppercase; font: 700 13px var(--mono); }
+    .installer { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .terminal {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+      background: rgba(11,15,20,.86);
+      box-shadow: 0 18px 60px rgba(0,0,0,.26);
     }
-    footer a {
-      color: var(--dim);
-      text-decoration: none;
-      border-bottom: 1px dotted var(--border);
-    }
-    footer a:hover { color: var(--accent); border-color: var(--accent); }
-    @media (max-width: 640px) {
-      h1 { font-size: 32px; }
-      .tagline { font-size: 17px; }
-      .features, .downloads { grid-template-columns: 1fr; }
-      .cmd { font-size: 12px; }
-    }
+    .terminal-head { height: 42px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--line-soft); background: rgba(31,41,51,.54); }
+    .dots { display: flex; gap: 7px; }
+    .dots span { width: 11px; height: 11px; border-radius: 999px; display: block; }
+    .dots span:nth-child(1){background:#ff5f56}.dots span:nth-child(2){background:#ffbd2e}.dots span:nth-child(3){background:#27c93f}
+    .os-pill { color: var(--teal); font: 800 12px var(--mono); }
+    .cmd { position: relative; display: flex; align-items: center; gap: 12px; padding: 22px 54px 22px 22px; min-height: 88px; overflow-x: auto; }
+    .cmd::before { content: "$"; color: var(--yellow); font: 900 18px var(--mono); }
+    .cmd code { white-space: nowrap; font: 500 14px var(--mono); color: var(--text); }
+    .copy { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); border: 1px solid var(--line-soft); background: rgba(255,255,255,.03); color: var(--muted); border-radius: 4px; padding: 8px 10px; font: 700 12px var(--mono); cursor: pointer; }
+    .copy:hover, .copy.ok { color: var(--teal); border-color: var(--teal); }
+    .caption { color: var(--muted); font-size: 13px; margin-top: 10px; line-height: 1.5; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 16px; }
+    .card { background: rgba(22,22,22,.82); border: 1px solid var(--line-soft); border-radius: 6px; padding: 20px; }
+    .card.highlight { border-color: rgba(0,212,170,.38); background: rgba(0,212,170,.06); }
+    .card h3 { margin: 0 0 10px; font-size: 16px; letter-spacing: -.01em; }
+    .card p { margin: 0 0 18px; color: var(--muted); font-size: 14px; line-height: 1.55; }
+    .card .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+    .small-btn { text-decoration: none; border-radius: 4px; border: 1px solid var(--line); padding: 8px 12px; font-size: 13px; font-weight: 800; color: var(--teal); }
+    .small-btn.primaryish { background: var(--teal); color: #04120f; }
+    .flow { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
+    .flow .num { width: 30px; height: 30px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; background: var(--teal); color: #04120f; font-weight: 900; margin-bottom: 12px; }
+    .warning { border: 1px solid rgba(255,213,79,.26); background: rgba(255,213,79,.07); color: #d6d0bb; border-radius: 6px; padding: 18px 20px; line-height: 1.6; font-size: 14px; }
+    .warning strong { color: var(--yellow); }
+    footer { margin: 86px 0 34px; padding-top: 22px; border-top: 1px solid var(--line); display: flex; gap: 22px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+    footer a { color: var(--muted); text-decoration: none; }
+    footer a:hover { color: var(--teal); }
+    @media (max-width: 900px) { .installer, .grid, .flow { grid-template-columns: 1fr; } .nav { height: auto; padding: 16px 0; flex-wrap: wrap; } .tabs { order: 3; width: 100%; justify-content: center; } .nav-actions { margin-left: auto; } }
+    @media (max-width: 560px) { .shell { width: min(100% - 28px, 1180px); } .hero { padding-top: 58px; } .lockup .wordmark { font-size: 34px; } .lockup img { width: 56px; height: 56px; } .cmd code { font-size: 12px; } }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="logo"><span class="t">T</span>ytus</div>
+  <div class="shell">
+    <nav class="nav">
+      <a class="brand" href="/" aria-label="tytusOS installer">
+        <img src="/assets/tytusos-mark-128.png" alt="">
+        <span class="wordmark">tytusOS</span>
+      </a>
+      <div class="tabs" aria-label="Tytus products">
+        <a class="active" href="/">Installer</a>
+        <a href="https://openclaw.traylinx.com/">OpenClaw</a>
+        <a href="https://hermes.traylinx.com/">Hermes</a>
+        <a href="https://github.com/traylinx/tytus-cli#readme">Docs</a>
+      </div>
+      <div class="nav-actions">
+        <a class="ghost" href="https://github.com/traylinx/tytus-cli">GitHub</a>
+        <a class="primary" href="https://traylinx.com/admin/tytus">Start free →</a>
+      </div>
+    </nav>
 
-    <h1>Your <span class="accent">private AI pod</span>, one terminal command away.</h1>
-    <p class="tagline">
-      Isolated. WireGuard-tunneled. OpenAI-compatible. Drives every AI CLI you
-      already use — Claude Code, OpenCode, Gemini, Cursor. Yours alone.
-    </p>
-    <p class="tagline" style="font-size: 15px; color: var(--accent); margin-top: -32px;">
-      Public beta v0.6.14 — unsigned installer preview with Tytus OS v1.0.39, Atomek 0.4.25, JULI3TA 0.3.21, and switchAILocal 0.5.17 readiness.
-    </p>
-
-    <h2>Install public beta</h2>
-
-    <div class="cmd" id="cmd-unix">
-      <code>curl -fsSL https://get.traylinx.com/install.sh | bash</code>
-      <button onclick="copyCmd('cmd-unix', this)">copy</button>
-    </div>
-    <div class="small">macOS &middot; Linux &middot; downloads checksum-verified release artifacts; no Rust toolchain required.</div>
-
-    <div class="cmd" id="cmd-win" style="margin-top: 20px;">
-      <code>powershell -c "irm https://get.traylinx.com/install.ps1 | iex"</code>
-      <button onclick="copyCmd('cmd-win', this)">copy</button>
-    </div>
-    <div class="small">Windows &middot; one-line PowerShell installer. CLI works; tunnel/driver packaging is not GA yet.</div>
-
-    <h2 id="download">Native installer previews</h2>
-    <div class="warning" style="margin-top: 0; margin-bottom: 20px;">
-      <strong>Easy path:</strong> download one installer file, open it, then open Tytus and follow the setup wizard. The wizard signs you in, lets you pick OpenClaw/Hermes, starts the private tunnel, and runs the test.
-      <br><br>
-      <strong>macOS beta note:</strong> because this pkg is unsigned, macOS may show an unidentified-developer warning. Control-click the pkg and choose <strong>Open</strong> if normal double-click is blocked.
-    </div>
-    <div class="downloads">
-      <div class="download-card">
-        <h3>macOS .pkg</h3>
-        <p>Unsigned public-beta package. Expect Gatekeeper warning.</p>
-        <div class="btns">
-          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/Tytus-0.6.14-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg">Apple Silicon</a>
-          <a class="btn secondary" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/Tytus-0.6.14-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg">Intel</a>
+    <main>
+      <section class="hero">
+        <div class="lockup">
+          <img src="/assets/tytusos-mark-128.png" alt="tytusOS mark">
+          <span class="wordmark">tytusOS</span>
         </div>
-      </div>
-      <div class="download-card">
-        <h3>Linux .deb</h3>
-        <p>Unsigned public-beta Debian/Ubuntu package.</p>
-        <div class="btns">
-          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/Tytus-0.6.14-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb">Download .deb</a>
+        <div class="eyebrow">private AI pod · local desktop · AIL gateway</div>
+        <h1>Install your <span class="accent">private AI pod</span> in one command.</h1>
+        <p class="sub">WireGuard-isolated infrastructure, OpenAI-compatible gateway, local desktop, bundled agents, and docs for the tools you already use.</p>
+        <div class="badges">
+          <span class="badge">⚡ 60-second setup</span>
+          <span class="badge">📦 macOS · Linux · Windows</span>
+          <span class="badge">🔒 WireGuard-isolated</span>
+          <span class="badge">🤖 OpenClaw + Hermes ready</span>
         </div>
-      </div>
-      <div class="download-card">
-        <h3>Windows</h3>
-        <p>Zip technical preview. MSI comes after signing/driver packaging.</p>
-        <div class="btns">
-          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/tytus-windows-x86_64.zip">Download zip</a>
+        <div class="cta">
+          <a class="primary" href="#install">Install now</a>
+          <a class="ghost" href="https://traylinx.com/admin/tytus">Open Traylinx Tytus page</a>
         </div>
-      </div>
-      <div class="download-card">
-        <h3>Checksums + release notes</h3>
-        <p>Verify every asset before installing.</p>
-        <div class="btns">
-          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/SHA256SUMS">SHA256SUMS</a>
-          <a class="btn secondary" href="https://github.com/traylinx/tytus-cli/releases/tag/v0.6.14">Release</a>
+      </section>
+
+      <section id="install">
+        <h2 class="section-title">Install public beta v0.6.14</h2>
+        <div class="installer">
+          <div>
+            <div class="terminal">
+              <div class="terminal-head"><div class="dots"><span></span><span></span><span></span></div><span class="os-pill">macOS & Linux</span></div>
+              <div class="cmd" id="cmd-unix"><code>curl -fsSL https://get.traylinx.com/install.sh | bash</code><button class="copy" onclick="copyCmd('cmd-unix', this)">copy</button></div>
+            </div>
+            <p class="caption">Downloads checksum-verified release artifacts. No Rust toolchain. Installs CLI, MCP server, tray, and tytusOS where supported.</p>
+          </div>
+          <div>
+            <div class="terminal">
+              <div class="terminal-head"><div class="dots"><span></span><span></span><span></span></div><span class="os-pill">Windows</span></div>
+              <div class="cmd" id="cmd-win"><code>powershell -c "irm https://get.traylinx.com/install.ps1 | iex"</code><button class="copy" onclick="copyCmd('cmd-win', this)">copy</button></div>
+            </div>
+            <p class="caption">One-line PowerShell installer. CLI works today; MSI, SmartScreen signing, and driver packaging remain GA gates.</p>
+          </div>
         </div>
-      </div>
-    </div>
+      </section>
 
-    <div class="warning">
-      <strong>Not production GA.</strong> This public beta deliberately ships unsigned macOS and Linux native installer previews so testers can try the one-action install path now. Signing, notarization, Windows MSI, and Wintun/driver packaging remain the GA gate.
-    </div>
+      <section>
+        <h2 class="section-title">What happens next</h2>
+        <div class="flow">
+          <div class="card"><span class="num">1</span><h3>Install Tytus</h3><p>Pulls the latest stable release, verifies SHA256, and puts <code>tytus</code>, <code>tytus-mcp</code>, and tray binaries on PATH.</p></div>
+          <div class="card"><span class="num">2</span><h3>Run setup</h3><p><code>tytus setup</code> signs you in, connects your Traylinx account, provisions your pod, and checks health.</p></div>
+          <div class="card"><span class="num">3</span><h3>Use your pod</h3><p>Open tytusOS at <code>localhost:4242</code>, run <code>tytus chat</code>, or point OpenClaw, Hermes, Claude Code, OpenCode, Gemini, and Cursor at the AIL gateway.</p></div>
+        </div>
+      </section>
 
-    <h2>Then</h2>
-    <div class="cmd" id="cmd-setup">
-      <code>tytus setup</code>
-      <button onclick="copyCmd('cmd-setup', this)">copy</button>
-    </div>
-    <div class="small">Logs you in, picks a pod, opens the tunnel, verifies end-to-end.</div>
+      <section>
+        <h2 class="section-title">Native installer previews</h2>
+        <div class="warning"><strong>Public beta, not production GA.</strong> Native packages are unsigned while signing/notarization/MSI work is finalized. Prefer one-line installers above; direct packages stay available for locked-down machines.</div>
+        <div class="grid" style="margin-top:16px">
+          <div class="card"><h3>macOS .pkg</h3><p>Unsigned public-beta package. Gatekeeper warning expected.</p><div class="btns"><a class="small-btn primaryish" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/Tytus-0.6.14-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg">Apple Silicon</a><a class="small-btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/Tytus-0.6.14-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg">Intel</a></div></div>
+          <div class="card"><h3>Linux .deb</h3><p>Unsigned Debian/Ubuntu package for x86_64 machines.</p><div class="btns"><a class="small-btn primaryish" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/Tytus-0.6.14-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb">Download .deb</a></div></div>
+          <div class="card"><h3>Windows fallback</h3><p>Direct zip package if PowerShell execution is blocked by company policy.</p><div class="btns"><a class="small-btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/tytus-windows-x86_64.zip">Download zip</a></div></div>
+          <div class="card"><h3>Verify</h3><p>Check SHA256SUMS and release notes for every asset.</p><div class="btns"><a class="small-btn primaryish" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/SHA256SUMS">SHA256SUMS</a><a class="small-btn" href="https://github.com/traylinx/tytus-cli/releases/tag/v0.6.14">Release</a></div></div>
+        </div>
+      </section>
 
-    <h2>What you get</h2>
-    <div class="features">
-      <div class="feat">
-        <h3>One stable URL + key</h3>
-        <p>Set <code>OPENAI_BASE_URL</code> + <code>OPENAI_API_KEY</code> once. Works forever across pod reallocations.</p>
-      </div>
-      <div class="feat">
-        <h3>Every AI tool, instantly</h3>
-        <p><code>tytus link</code> drops CLAUDE.md, AGENTS.md, .mcp.json and slash commands so Claude Code, OpenCode, Gemini and Cursor drive Tytus natively.</p>
-      </div>
-      <div class="feat">
-        <h3>Private by construction</h3>
-        <p>Userspace WireGuard. No shared keys. Cross-pod traffic blocked at the firewall. Your conversations never leave your pod.</p>
-      </div>
-      <div class="feat">
-        <h3>MCP server built in</h3>
-        <p><code>tytus-mcp</code> ships alongside the CLI. Point Claude Code or any MCP client at it and your model can drive Tytus on your behalf.</p>
-      </div>
-    </div>
+      <section>
+        <h2 class="section-title">Built for your agents</h2>
+        <div class="grid">
+          <div class="card highlight"><h3>OpenClaw on your pod</h3><p>Run the open-source coding agent against your own private Tytus infrastructure.</p><a class="small-btn primaryish" href="https://openclaw.traylinx.com/">OpenClaw page</a></div>
+          <div class="card highlight"><h3>Hermes with memory</h3><p>Messenger-native agent with memory, skills, and scheduled work.</p><a class="small-btn primaryish" href="https://hermes.traylinx.com/">Hermes page</a></div>
+          <div class="card"><h3>Drop-in AIL gateway</h3><p>Use one OpenAI-compatible URL + key for text, vision, audio, images, and embeddings.</p><a class="small-btn" href="https://traylinx.com/admin/tytus">Get gateway data</a></div>
+          <div class="card"><h3>LLM docs built in</h3><p>Run <code>tytus llm-docs</code> to hand exact setup instructions to any coding assistant.</p><a class="small-btn" href="https://github.com/traylinx/tytus-cli#readme">Read docs</a></div>
+        </div>
+      </section>
+    </main>
 
     <footer>
       <a href="https://github.com/traylinx/tytus-cli">GitHub</a>
-      <a href="https://github.com/traylinx/tytus-cli#readme">Docs</a>
       <a href="https://github.com/traylinx/tytus-cli/releases">Releases</a>
-      <a href="https://traylinx.com">Traylinx</a>
-      <span style="margin-left: auto;">MIT licensed</span>
+      <a href="https://traylinx.com/admin/tytus">Traylinx Tytus page</a>
+      <a href="https://openclaw.traylinx.com/">OpenClaw</a>
+      <a href="https://hermes.traylinx.com/">Hermes</a>
+      <span style="margin-left:auto">MIT licensed · built on Traylinx</span>
     </footer>
   </div>
-
   <script>
     function copyCmd(id, btn) {
       const code = document.querySelector('#' + id + ' code').innerText;
@@ -320,10 +258,7 @@
         const prev = btn.innerText;
         btn.innerText = 'copied';
         btn.classList.add('ok');
-        setTimeout(() => {
-          btn.innerText = prev;
-          btn.classList.remove('ok');
-        }, 1500);
+        setTimeout(() => { btn.innerText = prev; btn.classList.remove('ok'); }, 1400);
       });
     }
   </script>
