@@ -4,6 +4,12 @@
 
 - No pending changes.
 
+## v0.6.16 — 2026-05-14
+
+- Adds live TytusOS documentation answers through the local tray bridge and shared Traylinx Cortex docs database.
+- Keeps bundled Help docs as offline fallback and suppresses bundled deep-links when the Cortex corpus hash drifts.
+- Embeds TytusOS `v1.0.40-apps-platform` with the new Help → Ask Tytus Docs surface.
+
 ## v0.6.15 — 2026-05-14
 
 - Bundles `garagetytus` shared-folder CLI and helper scripts into macOS/Linux release tarballs so the one-command Tytus installer prepares shared-folder tooling alongside the core CLI, MCP server, and tray app.
