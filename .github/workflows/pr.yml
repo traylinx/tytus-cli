@@ -76,7 +76,7 @@ jobs:
           assert "https://get.traylinx.com/install.sh" in web_index
 
           sync_script = Path("scripts/sync-tytus-os-dist.sh").read_text()
-          assert "python3 - "${dir}"" in sync_script
+          assert "python3 - \"${dir}\"" in sync_script
           assert "hashlib.sha256" in sync_script
           assert "as_posix" in sync_script
 
