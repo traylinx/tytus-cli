@@ -6,7 +6,7 @@
   <title>Tytus — public beta installer preview</title>
   <meta name="description" content="Tytus public beta ships unsigned macOS pkg, Linux deb, Windows zip, and checksum-verified CLI artifacts for early testers.">
   <meta property="og:title" content="Tytus — public beta installer preview">
-  <meta property="og:description" content="Download the Tytus public beta. Unsigned macOS pkg and Linux deb installer previews are available now, plus Windows zip technical preview.">
+  <meta property="og:description" content="Download the Tytus public beta. macOS/Linux install with one shell command; Windows installs with one PowerShell command.">
   <meta property="og:type" content="website">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23111'/%3E%3Ctext x='32' y='44' font-family='ui-monospace,Menlo,monospace' font-size='36' font-weight='900' text-anchor='middle' fill='%23f7b500'%3ET%3C/text%3E%3C/svg%3E">
   <style>
@@ -217,22 +217,22 @@
       already use — Claude Code, OpenCode, Gemini, Cursor. Yours alone.
     </p>
     <p class="tagline" style="font-size: 15px; color: var(--accent); margin-top: -32px;">
-      Public beta v0.6.14-beta.54 — unsigned installer preview with Tytus OS v1.0.39, Atomek 0.4.25, JULI3TA 0.3.21, and switchAILocal 0.5.17 readiness.
+      Public beta v0.6.14 — unsigned installer preview with Tytus OS v1.0.39, Atomek 0.4.25, JULI3TA 0.3.21, and switchAILocal 0.5.17 readiness.
     </p>
 
     <h2>Install public beta</h2>
 
     <div class="cmd" id="cmd-unix">
-      <code>curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.54 sh</code>
+      <code>curl -fsSL https://get.traylinx.com/install.sh | bash</code>
       <button onclick="copyCmd('cmd-unix', this)">copy</button>
     </div>
     <div class="small">macOS &middot; Linux &middot; downloads checksum-verified release artifacts; no Rust toolchain required.</div>
 
     <div class="cmd" id="cmd-win" style="margin-top: 20px;">
-      <code>$env:TYTUS_RELEASE_TAG="v0.6.14-beta.54"; irm https://get.traylinx.com/install.ps1 | iex</code>
+      <code>powershell -c "irm https://get.traylinx.com/install.ps1 | iex"</code>
       <button onclick="copyCmd('cmd-win', this)">copy</button>
     </div>
-    <div class="small">Windows &middot; zip technical preview. CLI works; tunnel/driver packaging is not GA yet.</div>
+    <div class="small">Windows &middot; one-line PowerShell installer. CLI works; tunnel/driver packaging is not GA yet.</div>
 
     <h2 id="download">Native installer previews</h2>
     <div class="warning" style="margin-top: 0; margin-bottom: 20px;">
@@ -245,30 +245,30 @@
         <h3>macOS .pkg</h3>
         <p>Unsigned public-beta package. Expect Gatekeeper warning.</p>
         <div class="btns">
-          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14-beta.54/Tytus-0.6.14-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg">Apple Silicon</a>
-          <a class="btn secondary" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14-beta.54/Tytus-0.6.14-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg">Intel</a>
+          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/Tytus-0.6.14-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg">Apple Silicon</a>
+          <a class="btn secondary" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/Tytus-0.6.14-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg">Intel</a>
         </div>
       </div>
       <div class="download-card">
         <h3>Linux .deb</h3>
         <p>Unsigned public-beta Debian/Ubuntu package.</p>
         <div class="btns">
-          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14-beta.54/Tytus-0.6.14-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb">Download .deb</a>
+          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/Tytus-0.6.14-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb">Download .deb</a>
         </div>
       </div>
       <div class="download-card">
         <h3>Windows</h3>
         <p>Zip technical preview. MSI comes after signing/driver packaging.</p>
         <div class="btns">
-          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14-beta.54/tytus-windows-x86_64.zip">Download zip</a>
+          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/tytus-windows-x86_64.zip">Download zip</a>
         </div>
       </div>
       <div class="download-card">
         <h3>Checksums + release notes</h3>
         <p>Verify every asset before installing.</p>
         <div class="btns">
-          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14-beta.54/SHA256SUMS">SHA256SUMS</a>
-          <a class="btn secondary" href="https://github.com/traylinx/tytus-cli/releases/tag/v0.6.14-beta.54">Release</a>
+          <a class="btn" href="https://github.com/traylinx/tytus-cli/releases/download/v0.6.14/SHA256SUMS">SHA256SUMS</a>
+          <a class="btn secondary" href="https://github.com/traylinx/tytus-cli/releases/tag/v0.6.14">Release</a>
         </div>
       </div>
     </div>

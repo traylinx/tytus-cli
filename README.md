@@ -2,7 +2,7 @@
 
 > Private AI pods, TytusOS desktop, and a stable OpenAI-compatible gateway from one local CLI.
 
-Current public beta: **v0.6.14-beta.54** (2026-05-13).
+Current public beta: **v0.6.14** (2026-05-13).
 
 ## Install
 
@@ -18,18 +18,18 @@ For the easiest beta path, download one installer file, open it, then open Tytus
 |---|---|---|
 | macOS Apple Silicon / Intel | Download the unsigned `.pkg` from `https://get.traylinx.com/`, Control-click → Open if Gatekeeper blocks double-click, then follow the Tytus setup wizard. | Public beta / technical preview. Not production GA. |
 | Ubuntu/Debian x86_64 | Download the unsigned `.deb` from `https://get.traylinx.com/`, install it, then open Tytus or run `tytus-tray` and follow the setup wizard. | Public beta / technical preview. Not production GA. |
-| Windows x86_64 | Download the `.zip` or use the PowerShell installer from `https://get.traylinx.com/`. | CLI/MCP technical preview; MSI, SmartScreen signing, and tunnel/driver packaging are still GA gates. |
+| Windows x86_64 | Use the PowerShell installer from `https://get.traylinx.com/`; direct zip remains a fallback. | CLI/MCP technical preview; MSI, SmartScreen signing, and tunnel/driver packaging are still GA gates. |
 
 Checksum-verified installer commands are also available:
 
 ```bash
 # macOS / Linux public beta
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.54 sh
+curl -fsSL https://get.traylinx.com/install.sh | bash
 ```
 
 ```powershell
 # Windows public beta preview
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.54"; irm https://get.traylinx.com/install.ps1 | iex
+powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
 ```
 
 Homebrew remains available for the latest stable tap release:

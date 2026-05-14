@@ -1,6 +1,6 @@
 # Public Beta Install Guide
 
-> For `v0.6.14-beta.54`. This is a technical preview, not production GA.
+> For `v0.6.14`. This is a technical preview, not production GA.
 
 ## Start here
 
@@ -57,32 +57,28 @@ Expected warning: the package is unsigned. That is expected for this public beta
 
 ## Windows x86_64
 
-Download:
-
-```text
-tytus-windows-x86_64.zip
-```
-
-Unzip it and run from PowerShell. Windows is still CLI/MCP technical preview: MSI, SmartScreen signing, Wintun/driver packaging, and full daemon/tray/tunnel parity are GA gates.
-
-Optional PowerShell installer:
+Primary PowerShell installer:
 
 ```powershell
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.54"; irm https://get.traylinx.com/install.ps1 | iex
+powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
 ```
+
+Direct zip fallback remains available from the GitHub release if PowerShell execution is locked down by policy. Windows is still CLI/MCP technical preview: MSI, SmartScreen signing, Wintun/driver packaging, and full daemon/tray/tunnel parity are GA gates.
+
+Fallback direct package: `tytus-windows-x86_64.zip`.
 
 ## Command-line installers
 
 macOS/Linux:
 
 ```bash
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.54 sh
+curl -fsSL https://get.traylinx.com/install.sh | bash
 ```
 
 Windows:
 
 ```powershell
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.54"; irm https://get.traylinx.com/install.ps1 | iex
+powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
 ```
 
 ## First-run wizard

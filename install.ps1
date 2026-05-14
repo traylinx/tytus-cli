@@ -99,12 +99,25 @@ function Get-InstallDir {
 
 function Add-ToUserPath($dir) {
     $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($currentPath -notlike "*$dir*") {
+    $parts = @()
+    if ($currentPath) {
+        $parts = $currentPath -split ';' | Where-Object { $_ -ne '' }
+    }
+    $alreadyPersisted = $parts | Where-Object { $_.TrimEnd('\') -ieq $dir.TrimEnd('\') } | Select-Object -First 1
+
+    if (-not $alreadyPersisted) {
         $newPath = if ($currentPath) { "$currentPath;$dir" } else { $dir }
         [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
         Write-Ok "Added $dir to user PATH (restart shell to pick up)"
     } else {
-        Write-Ok "$dir already on PATH"
+        Write-Ok "$dir already on user PATH"
+    }
+
+    $processParts = $env:Path -split ';' | Where-Object { $_ -ne '' }
+    $alreadyLive = $processParts | Where-Object { $_.TrimEnd('\') -ieq $dir.TrimEnd('\') } | Select-Object -First 1
+    if (-not $alreadyLive) {
+        $env:Path = "$env:Path;$dir"
+        Write-Ok "Added $dir to this PowerShell session PATH"
     }
 }
 

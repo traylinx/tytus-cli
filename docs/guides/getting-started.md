@@ -32,7 +32,7 @@ Pick one file for your computer:
 | macOS Apple Silicon | `Tytus-0.6.14-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` | Open the pkg. If macOS blocks it, Control-click the file and choose **Open**. |
 | macOS Intel | `Tytus-0.6.14-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` | Open the pkg. If macOS blocks it, Control-click the file and choose **Open**. |
 | Ubuntu/Debian x86_64 | `Tytus-0.6.14-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb` | Open with your software installer or run `sudo apt install ./Tytus-0.6.14-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb`. |
-| Windows x86_64 | `tytus-windows-x86_64.zip` | Unzip it and run from PowerShell. MSI and driver packaging are not GA yet. |
+| Windows x86_64 | `powershell -c "irm https://get.traylinx.com/install.ps1 | iex"` | One-line PowerShell installer. Direct zip remains a fallback; MSI and driver packaging are not GA yet. |
 
 This is a **public beta / technical preview**, not production GA. The macOS pkg and Linux deb are unsigned, so OS trust warnings are expected.
 
@@ -40,12 +40,12 @@ Checksum-verified command-line install is also available:
 
 ```bash
 # macOS / Linux public beta
-curl -fsSL https://get.traylinx.com/install.sh | TYTUS_RELEASE_TAG=v0.6.14-beta.44 sh
+curl -fsSL https://get.traylinx.com/install.sh | bash
 ```
 
 ```powershell
 # Windows public beta preview
-$env:TYTUS_RELEASE_TAG="v0.6.14-beta.44"; irm https://get.traylinx.com/install.ps1 | iex
+powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
 ```
 
 **What the installer does:**
@@ -64,7 +64,7 @@ cargo install --path cli --bin tytus --bin tytus-mcp
 
 ## Platform notes
 
-| Platform | v0.6.14-beta.44 status |
+| Platform | v0.6.14 status |
 |---|---|
 | macOS | Public beta unsigned pkg for Apple Silicon and Intel. Full CLI + tray + TytusOS path. |
 | Linux | Public beta unsigned deb for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, and desktop entries. |
