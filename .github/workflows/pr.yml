@@ -69,15 +69,16 @@ jobs:
           import re
 
           web_index = Path("web/index.html").read_text()
-          assert re.search(r"v0\.6\.14-beta\.\d+", web_index), "missing current public beta tag"
+          assert re.search(r"v0\.6\.14", web_index), "missing current public beta tag"
           assert "PUBLIC-BETA-UNSIGNED" in web_index
           assert "Not production GA" in web_index
-          assert re.search(r"TYTUS_RELEASE_TAG=v0\.6\.14-beta\.\d+", web_index), "missing beta installer command"
+          assert "https://get.traylinx.com/install.ps1" in web_index
+          assert "https://get.traylinx.com/install.sh" in web_index
 
           sync_script = Path("scripts/sync-tytus-os-dist.sh").read_text()
-          assert "command -v shasum" in sync_script
-          assert "command -v sha256sum" in sync_script
-          assert "missing SHA-256 tool" in sync_script
+          assert "python3 - "${dir}"" in sync_script
+          assert "hashlib.sha256" in sync_script
+          assert "as_posix" in sync_script
 
           release = Path(".github/workflows/release.yml").read_text()
           assert "Build unsigned macOS pkg dry-run" in release

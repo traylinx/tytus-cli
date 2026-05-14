@@ -67,14 +67,21 @@ fi
 
 hash_dir() {
   local dir="$1"
-  if command -v shasum >/dev/null 2>&1; then
-    (cd "${dir}" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')
-  elif command -v sha256sum >/dev/null 2>&1; then
-    (cd "${dir}" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
-  else
-    echo "missing SHA-256 tool: install shasum or sha256sum" >&2
-    exit 1
-  fi
+  python3 - "${dir}" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+h = hashlib.sha256()
+for path in sorted(p for p in root.rglob('*') if p.is_file()):
+    rel = path.relative_to(root).as_posix()
+    h.update(rel.encode('utf-8'))
+    h.update(b'\0')
+    h.update(path.read_bytes())
+    h.update(b'\0')
+print(h.hexdigest())
+PY
 }
 
 src_sha="$(hash_dir "${OS_DIST}")"
