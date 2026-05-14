@@ -25,6 +25,7 @@ dirs.workspace = true
 tiny_http = "0.12"
 reqwest = { workspace = true, features = ["blocking"] }
 keyring.workspace = true
+urlencoding.workspace = true
 thiserror.workspace = true
 atomek-pods = { path = "../pods" }
 atomek-core = { path = "../core" }

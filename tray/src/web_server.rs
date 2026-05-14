@@ -3539,7 +3539,10 @@ fn parse_single_byte_range(raw: &str, total: usize) -> Result<Option<ByteRange>,
             return Err(());
         }
         let start = total.saturating_sub(suffix);
-        return Ok(Some(ByteRange { start, end: total - 1 }));
+        return Ok(Some(ByteRange {
+            start,
+            end: total - 1,
+        }));
     }
     let start = start_raw.parse::<usize>().map_err(|_| ())?;
     if start >= total {
@@ -3869,6 +3872,15 @@ fn handle(request: Request, registry: Registry) {
                 .trim_end_matches("/cancel")
                 .to_string();
             handle_job_cancel(request, &registry, &job_id);
+        }
+        (Method::Get, "/api/help/sources") => {
+            handle_help_sources(request);
+        }
+        (Method::Post, "/api/help/search") => {
+            handle_help_search(request);
+        }
+        (Method::Post, "/api/help/answer") => {
+            handle_help_answer(request);
         }
         (Method::Get, "/api/state") => {
             handle_state(request, &registry);
@@ -4252,6 +4264,377 @@ fn serve_bytes(request: Request, body: &[u8], content_type: &str) {
 fn header(name: &'static str, value: &str) -> Header {
     Header::from_bytes(name.as_bytes(), value.as_bytes())
         .expect("header construction cannot fail for ascii inputs")
+}
+
+// ── /api/help/* — shared Cortex docs bridge ───────────────────
+
+#[derive(Debug, serde::Deserialize)]
+struct HelpQueryBody {
+    query: String,
+    #[serde(default)]
+    k: Option<u8>,
+    #[serde(default)]
+    min_score: Option<f64>,
+    #[serde(default)]
+    app: Option<String>,
+    #[serde(default)]
+    source: Option<Vec<String>>,
+}
+
+#[derive(Debug)]
+enum HelpBridgeError {
+    MissingToken,
+    BadGateway(String),
+    Remote(u16, String),
+}
+
+fn handle_help_sources(request: Request) {
+    match cortex_docs_sources() {
+        Ok(body) => respond_json(request, 200, &body),
+        Err(e) => respond_help_bridge_error(request, e),
+    }
+}
+
+fn handle_help_search(request: Request) {
+    let (request, body) = match parse_json_body::<HelpQueryBody>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    if body.query.trim().is_empty() || body.query.len() > 2000 {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"query must be 1..2000 characters"}),
+        );
+        return;
+    }
+    match cortex_docs_search(&body) {
+        Ok(body) => respond_json(request, 200, &body),
+        Err(e) => respond_help_bridge_error(request, e),
+    }
+}
+
+fn handle_help_answer(request: Request) {
+    let (request, body) = match parse_json_body::<HelpQueryBody>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(request, 400, &serde_json::json!({"error": e}));
+            return;
+        }
+    };
+    if body.query.trim().is_empty() || body.query.len() > 2000 {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"query must be 1..2000 characters"}),
+        );
+        return;
+    }
+    match cortex_docs_answer(&body) {
+        Ok(body) => respond_json(request, 200, &body),
+        Err(e) => respond_help_bridge_error(request, e),
+    }
+}
+
+fn respond_help_bridge_error(request: Request, err: HelpBridgeError) {
+    match err {
+        HelpBridgeError::MissingToken => respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "status":"degraded",
+                "reason":"docs_token_missing",
+                "fallback":"bundled",
+            }),
+        ),
+        HelpBridgeError::BadGateway(reason) => respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "status":"degraded",
+                "reason": reason,
+                "fallback":"bundled",
+            }),
+        ),
+        HelpBridgeError::Remote(status, reason) => respond_json(
+            request,
+            if status == 429 { 429 } else { 503 },
+            &serde_json::json!({
+                "status":"degraded",
+                "reason": reason,
+                "fallback":"bundled",
+                "remote_status": status,
+            }),
+        ),
+    }
+}
+
+fn cortex_docs_sources() -> Result<serde_json::Value, HelpBridgeError> {
+    let token = cortex_docs_token()?;
+    let client = cortex_docs_client()?;
+    let url = format!("{}/docs/sources", cortex_api_base());
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| HelpBridgeError::BadGateway(format!("cortex_unreachable: {e}")))?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .json::<serde_json::Value>()
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if (200..300).contains(&status) {
+        Ok(body)
+    } else if status == 404 {
+        Ok(serde_json::json!({
+            "status":"ok",
+            "api_version":"local-proxy-v1",
+            "corpus_hash": std::env::var("TYTUS_CORTEX_DOCS_CORPUS_HASH").unwrap_or_else(|_| "remote-memory-search".into()),
+            "sources":["docs-hub","traylinx-public-references","traylinx-user-manuals"],
+            "last_refreshed": null,
+        }))
+    } else {
+        Err(HelpBridgeError::Remote(
+            status,
+            "cortex_sources_failed".into(),
+        ))
+    }
+}
+
+fn cortex_docs_answer(body: &HelpQueryBody) -> Result<serde_json::Value, HelpBridgeError> {
+    let token = cortex_docs_token()?;
+    let client = cortex_docs_client()?;
+    let url = format!("{}/docs/answer", cortex_api_base());
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "query": body.query,
+            "k": clamp_help_k(body.k),
+            "min_score": body.min_score.unwrap_or(0.45),
+            "app": body.app,
+            "source": body.source,
+        }))
+        .send()
+        .map_err(|e| HelpBridgeError::BadGateway(format!("cortex_unreachable: {e}")))?;
+    let status = resp.status().as_u16();
+    let remote_body = resp
+        .json::<serde_json::Value>()
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if (200..300).contains(&status) {
+        return Ok(remote_body);
+    }
+    if status != 404 {
+        return Err(HelpBridgeError::Remote(
+            status,
+            "cortex_answer_failed".into(),
+        ));
+    }
+
+    let search = cortex_memory_search(body, &token)?;
+    let results = search
+        .get("results")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let answer = if results.is_empty() {
+        "No live Cortex documentation matches yet. Showing bundled docs fallback.".to_string()
+    } else {
+        let mut lines = vec!["Relevant Tytus documentation from Cortex:".to_string()];
+        for (idx, item) in results.iter().take(5).enumerate() {
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Tytus doc");
+            let snippet = item
+                .get("snippet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .chars()
+                .take(260)
+                .collect::<String>();
+            lines.push(format!("{}. {} — {}", idx + 1, title, snippet));
+        }
+        lines.join("\n")
+    };
+    Ok(serde_json::json!({
+        "status":"ok",
+        "answer": answer,
+        "citations": results,
+        "results": results,
+        "model":"cortex-memory-search",
+        "api_version":"local-proxy-v1",
+        "corpus_hash": search.get("corpus_hash").cloned().unwrap_or(serde_json::Value::Null),
+    }))
+}
+
+fn cortex_docs_search(body: &HelpQueryBody) -> Result<serde_json::Value, HelpBridgeError> {
+    let token = cortex_docs_token()?;
+    let client = cortex_docs_client()?;
+    let url = format!("{}/docs/search", cortex_api_base());
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "query": body.query,
+            "k": clamp_help_k(body.k),
+            "min_score": body.min_score.unwrap_or(0.45),
+            "app": body.app,
+            "source": body.source,
+        }))
+        .send()
+        .map_err(|e| HelpBridgeError::BadGateway(format!("cortex_unreachable: {e}")))?;
+    let status = resp.status().as_u16();
+    let remote_body = resp
+        .json::<serde_json::Value>()
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if (200..300).contains(&status) {
+        return Ok(remote_body);
+    }
+    if status == 404 {
+        return cortex_memory_search(body, &token);
+    }
+    Err(HelpBridgeError::Remote(
+        status,
+        "cortex_search_failed".into(),
+    ))
+}
+
+fn cortex_memory_search(
+    body: &HelpQueryBody,
+    token: &str,
+) -> Result<serde_json::Value, HelpBridgeError> {
+    let client = cortex_docs_client()?;
+    let url = format!(
+        "{}/memory/search?query={}&limit={}&min_similarity={}&app_id=traylinx",
+        cortex_api_base(),
+        urlencoding::encode(&body.query),
+        clamp_help_k(body.k),
+        body.min_score.unwrap_or(0.45),
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| HelpBridgeError::BadGateway(format!("cortex_unreachable: {e}")))?;
+    let status = resp.status().as_u16();
+    let raw = resp
+        .json::<serde_json::Value>()
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if !(200..300).contains(&status) {
+        return Err(HelpBridgeError::Remote(
+            status,
+            "cortex_memory_search_failed".into(),
+        ));
+    }
+    let results = raw
+        .get("results")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(normalize_cortex_result)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(serde_json::json!({
+        "status":"ok",
+        "query": body.query,
+        "results": results,
+        "total": results.len(),
+        "api_version":"local-proxy-v1",
+        "corpus_hash": std::env::var("TYTUS_CORTEX_DOCS_CORPUS_HASH").unwrap_or_else(|_| "remote-memory-search".into()),
+    }))
+}
+
+fn normalize_cortex_result(item: &serde_json::Value) -> serde_json::Value {
+    let meta = item.get("metadata").and_then(|v| v.as_object());
+    let meta_str =
+        |k: &str| -> Option<&str> { meta.and_then(|m| m.get(k)).and_then(|v| v.as_str()) };
+    let title = item
+        .get("title")
+        .and_then(|v| v.as_str())
+        .or_else(|| meta_str("title"))
+        .or_else(|| meta_str("doc_title"))
+        .unwrap_or("Tytus documentation");
+    let snippet = item
+        .get("snippet")
+        .and_then(|v| v.as_str())
+        .or_else(|| item.get("content").and_then(|v| v.as_str()))
+        .or_else(|| item.get("text").and_then(|v| v.as_str()))
+        .or_else(|| item.get("memory").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let doc_id = item
+        .get("doc_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| meta_str("doc_id"))
+        .or_else(|| meta_str("slug"))
+        .unwrap_or(title);
+    let score = item
+        .get("score")
+        .and_then(|v| v.as_f64())
+        .or_else(|| item.get("similarity").and_then(|v| v.as_f64()))
+        .or_else(|| {
+            item.get("distance")
+                .and_then(|v| v.as_f64())
+                .map(|d| 1.0 - d)
+        });
+    serde_json::json!({
+        "title": title,
+        "snippet": snippet,
+        "doc_id": doc_id,
+        "anchor": item.get("anchor").and_then(|v| v.as_str()).or_else(|| meta_str("anchor")),
+        "url": item.get("url").and_then(|v| v.as_str()).or_else(|| item.get("source_url").and_then(|v| v.as_str())).or_else(|| meta_str("url")).or_else(|| meta_str("source_url")),
+        "source": item.get("source").and_then(|v| v.as_str()).or_else(|| meta_str("source")),
+        "score": score,
+    })
+}
+
+fn clamp_help_k(k: Option<u8>) -> u8 {
+    k.unwrap_or(5).clamp(1, 20)
+}
+
+fn cortex_api_base() -> String {
+    std::env::var("TYTUS_CORTEX_API_URL")
+        .unwrap_or_else(|_| "https://api.makakoo.com/ma-cortex/v1/api/v1".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn cortex_docs_client() -> Result<reqwest::blocking::Client, HelpBridgeError> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .build()
+        .map_err(|e| HelpBridgeError::BadGateway(format!("client_build_failed: {e}")))
+}
+
+fn cortex_docs_token() -> Result<String, HelpBridgeError> {
+    if let Ok(v) = std::env::var("TYTUS_CORTEX_DOCS_TOKEN") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return Ok(v);
+        }
+    }
+    if let Ok(v) = std::env::var("TRAYLINX_CORTEX_TOKEN") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return Ok(v);
+        }
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = keyring::Entry::new("com.traylinx.atomek", "tytus-daemon-docs")
+            .map_err(|e| e.to_string())
+            .and_then(|entry| entry.get_password().map_err(|e| e.to_string()));
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(Ok(token)) if !token.trim().is_empty() => Ok(token),
+        _ => Err(HelpBridgeError::MissingToken),
+    }
 }
 
 // ── /api/catalog ──────────────────────────────────────────────
@@ -9659,19 +10042,31 @@ mod tests {
     fn juli3ta_audio_range_parser_accepts_common_browser_ranges() {
         assert_eq!(
             parse_single_byte_range("bytes=100-199", 1000).unwrap(),
-            Some(ByteRange { start: 100, end: 199 })
+            Some(ByteRange {
+                start: 100,
+                end: 199
+            })
         );
         assert_eq!(
             parse_single_byte_range("bytes=100-", 1000).unwrap(),
-            Some(ByteRange { start: 100, end: 999 })
+            Some(ByteRange {
+                start: 100,
+                end: 999
+            })
         );
         assert_eq!(
             parse_single_byte_range("bytes=-250", 1000).unwrap(),
-            Some(ByteRange { start: 750, end: 999 })
+            Some(ByteRange {
+                start: 750,
+                end: 999
+            })
         );
         assert_eq!(
             parse_single_byte_range("bytes=900-1500", 1000).unwrap(),
-            Some(ByteRange { start: 900, end: 999 })
+            Some(ByteRange {
+                start: 900,
+                end: 999
+            })
         );
     }
 
