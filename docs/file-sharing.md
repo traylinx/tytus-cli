@@ -26,6 +26,29 @@ no new ports, no new daemons. The same auth you use for `tytus chat`
 and `tytus exec` covers file transfer.
 
 
+## Web/mobile cloud shared folders
+
+Traylinx web can create **cloud shared folders** for users who have not installed local TytusOS yet. This is the production-safe web path:
+
+1. User creates a folder on `https://traylinx.com/admin/tytus`.
+2. Browser uploads files into the private cloud folder.
+3. Traylinx attaches that folder to one or more Tytus pods.
+4. OpenClaw/Hermes read inputs from `/app/workspace/shared/<folder>/inbox/`.
+5. Agents write outputs to `/app/workspace/shared/<folder>/out/`.
+6. User downloads outputs from Traylinx web/mobile.
+7. Later, local TytusOS can bind that same cloud folder to a computer path with garagetytus.
+
+The browser does **not** background-sync arbitrary local folders. Local folder binding is a TytusOS/garagetytus feature, not a web-only feature.
+
+Recommended pod paths for cloud shared folders:
+
+```text
+/app/workspace/shared/<folder>/
+/app/workspace/shared/<folder>/brief.md
+/app/workspace/shared/<folder>/inbox/
+/app/workspace/shared/<folder>/out/
+```
+
 ## TytusOS Files app
 
 The TytusOS Files app is the user-friendly surface on top of these commands. It opens at `~/Tytus` and can browse:
@@ -119,10 +142,8 @@ Full trigger table + decision tree live in the skill body:
   instead. That path embeds into Qdrant and exposes the file content to
   `harvey_superbrain_query`. `tytus push` just drops raw bytes in
   `/app/workspace/inbox/` with no indexing.
-- **You need a shared filesystem that multiple pods mount at once.**
-  Planned for v0.7 (Garage-backed S3 shared filesystem, design at
-  `development/audits/garage-s3-shared-filesystem-audit.md`). Today's
-  `tytus push/pull` is per-file between your Mac and one pod at a time.
+- **You need browser/mobile shared folders.** Use Traylinx web cloud shared folders once the account-side registry is enabled. `tytus push/pull` is still the local CLI transport for one-off Mac/Linux ↔ pod transfers.
+- **You need a shared filesystem mounted into multiple pods today.** Use the Garage/garagetytus shared-folder path where provisioned. If the account-side shared-folder registry is not enabled yet, `tytus push/pull` remains per-file between your computer and one pod at a time.
 - **Your transfer is larger than 100 MB.** The CLI refuses with a
   pointer to the Garage sprint. This is deliberate — docker-exec base64
   streaming is the wrong foundation for GB-scale transfers, and we
@@ -194,7 +215,4 @@ Every call has a ~100 ms baseline over the WireGuard tunnel, so a
 100 MB transfer is already ~40 seconds best case — past that, users
 hit "did it freeze?" territory faster than they get useful progress.
 
-For GB-scale transfers, the v0.7 Garage sprint adds an S3-backed
-shared filesystem mounted into every pod. At that point `tytus push`
-changes its transport under the hood (CLI surface stays identical),
-and the 100 MB cap goes away. Don't plan around the cap lifting today.
+For GB-scale transfers, use the Garage/garagetytus shared-folder path where provisioned. `tytus push` keeps the 100 MB safety cap because docker-exec base64 streaming is still the wrong transport for large files.
