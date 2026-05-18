@@ -1341,6 +1341,10 @@ fn resource_agent_family(agent_type: &str) -> &'static str {
     }
 }
 
+fn resource_agent_id(agent_family: &str, pod_id: &str) -> String {
+    format!("pod-agent.{}.{}", agent_family, pod_id)
+}
+
 fn handle_shared_folders_normalized(request: Request) {
     respond_json(
         request,
@@ -1453,7 +1457,7 @@ fn handle_resources(request: Request) {
         let agent_display_name = resource_agent_display_name(&agent_internal_type);
         let agent_family = resource_agent_family(&agent_internal_type);
         resources.push(serde_json::json!({
-            "id": format!("pod-agent.{}", agent.pod_id),
+            "id": resource_agent_id(agent_family, &agent.pod_id),
             "kind": "pod-agent",
             "label": format!("{} agent pod {}", agent_display_name, agent.pod_id),
             "status": if ready { "ready" } else { "degraded" },
@@ -11705,6 +11709,16 @@ mod tests {
         assert!(agent_has_browser_ui("hermes"));
         assert!(agent_has_browser_ui("nemoclaw"));
         assert!(!agent_has_browser_ui("none"));
+    }
+
+    #[test]
+    fn resource_agent_id_keeps_same_pod_families_distinct() {
+        assert_eq!(resource_agent_id("openclaw", "01"), "pod-agent.openclaw.01");
+        assert_eq!(resource_agent_id("hermes", "01"), "pod-agent.hermes.01");
+        assert_ne!(
+            resource_agent_id("openclaw", "01"),
+            resource_agent_id("hermes", "01")
+        );
     }
 
     // ── Shared-folders action allowlist (Phase 3 cont) ──────────

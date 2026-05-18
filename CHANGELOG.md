@@ -4,6 +4,12 @@
 
 - No pending changes.
 
+## v0.6.18 — 2026-05-18
+
+- Embeds TytusOS `v1.0.42-apps-platform` with reusable `host.daemon.chatAgent()` for app-safe OpenClaw/Hermes chat.
+- Publishes Atomek `v0.4.27` with chat target selector for Atomek, OpenClaw, and Hermes via the shared TytusOS agent bridge.
+- Keeps provider/model/droplet/IP/route identifiers out of visible agent labels, messages, and errors.
+
 ## v0.6.17 — 2026-05-18
 
 - Embeds TytusOS `v1.0.41-apps-platform` with local pod agent chat through Cortex and direct fallback for warming agents.
