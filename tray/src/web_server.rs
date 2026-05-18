@@ -47,6 +47,9 @@ const TYTUS_OS_HOST: &str = "127.0.0.1";
 const TYTUS_OS_PUBLIC_BASE_URL: &str = "http://localhost:4242";
 const POD_PROXY_DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 const POD_PROXY_MUSIC_GENERATION_TIMEOUT: Duration = Duration::from_secs(420);
+const TYTUS_PROVIDER_URL: &str = "https://tytus.traylinx.com";
+const AGENT_CHAT_STREAM_TIMEOUT: Duration = Duration::from_secs(600);
+const AGENT_CHAT_DIRECT_TIMEOUT: Duration = Duration::from_secs(150);
 #[cfg(test)]
 const TYTUS_OS_IMPORTMAP_CSP_HASH: &str = "'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU='";
 const TYTUS_OS_CONTENT_SECURITY_POLICY: &str = concat!(
@@ -3977,6 +3980,14 @@ fn handle(request: Request, registry: Registry) {
                 .trim_matches('/');
             handle_pod_readiness(request, pod);
         }
+        (Method::Post, p) if parse_pod_cortex_chat_path(p).is_some() => {
+            let pod_id = parse_pod_cortex_chat_path(p).expect("checked");
+            handle_pod_cortex_chat(request, pod_id);
+        }
+        (Method::Post, p) if parse_pod_agent_chat_path(p).is_some() => {
+            let pod_id = parse_pod_agent_chat_path(p).expect("checked");
+            handle_pod_agent_chat(request, pod_id);
+        }
         (Method::Get, p) if parse_pod_proxy_path(p).is_some() => {
             let (pod_id, proxy_path) = parse_pod_proxy_path(p).expect("checked");
             handle_pod_proxy(request, pod_id, proxy_path);
@@ -5596,14 +5607,38 @@ fn read_if_none_match(headers: &[Header]) -> Option<String> {
     None
 }
 
+fn valid_local_pod_id(pod_id: &str) -> bool {
+    !pod_id.is_empty()
+        && pod_id.len() <= 32
+        && pod_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn parse_pod_cortex_chat_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/pods/")?;
+    let pod_id = rest.strip_suffix("/cortex/chat")?;
+    if valid_local_pod_id(pod_id) {
+        Some(pod_id.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_pod_agent_chat_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/pods/")?;
+    let pod_id = rest.strip_suffix("/agent/chat")?;
+    if valid_local_pod_id(pod_id) {
+        Some(pod_id.to_string())
+    } else {
+        None
+    }
+}
+
 fn parse_pod_proxy_path(path: &str) -> Option<(String, String)> {
     let rest = path.strip_prefix("/api/pods/")?;
     let (pod_id, suffix) = rest.split_once("/proxy/")?;
-    if pod_id.is_empty()
-        || !pod_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if !valid_local_pod_id(pod_id) {
         return None;
     }
     let proxy_path = format!("/{}", suffix.trim_start_matches('/'));
@@ -5623,6 +5658,443 @@ fn pod_proxy_timeout(proxy_path: &str) -> Duration {
     } else {
         POD_PROXY_DEFAULT_TIMEOUT
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LocalAgentChatBody {
+    message: String,
+    session_id: Option<String>,
+    agent_mode: Option<String>,
+    model_preference: Option<String>,
+    stream: Option<bool>,
+}
+
+fn read_provider_auth() -> Result<(String, String), &'static str> {
+    let Some(path) = state_json_path() else {
+        return Err("state_missing");
+    };
+    let raw = std::fs::read_to_string(path).map_err(|_| "state_missing")?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|_| "state_invalid")?;
+    let secret = parsed
+        .get("secret_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("auth_required")?;
+    let agent_user_id = parsed
+        .get("agent_user_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("auth_required")?;
+    Ok((secret.to_string(), agent_user_id.to_string()))
+}
+
+fn normalize_chat_message(message: &str) -> Option<String> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() || trimmed.len() > 32 * 1024 {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn safe_session_id(raw: Option<String>) -> Option<String> {
+    raw.and_then(|v| {
+        let t = v.trim();
+        if !t.is_empty()
+            && t.len() <= 128
+            && t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+        {
+            Some(t.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn safe_agent_mode(raw: Option<String>) -> &'static str {
+    match raw.as_deref() {
+        Some("brain") => "brain",
+        _ => "operator",
+    }
+}
+
+fn safe_model_preference(raw: Option<String>) -> &'static str {
+    match raw.as_deref() {
+        Some("fast") => "fast",
+        Some("deep") => "deep",
+        _ => "balanced",
+    }
+}
+
+fn provider_chat_client(timeout: Duration) -> Result<reqwest::blocking::Client, reqwest::Error> {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+}
+
+fn forward_upstream_response(request: Request, upstream_res: reqwest::blocking::Response) {
+    let status = upstream_res.status().as_u16();
+    let content_type = upstream_res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let is_event_stream = content_type
+        .split(';')
+        .next()
+        .map(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+        .unwrap_or(false);
+    let len = if is_event_stream {
+        None
+    } else {
+        upstream_res
+            .content_length()
+            .and_then(|n| usize::try_from(n).ok())
+    };
+    let mut headers = vec![
+        header("Content-Type", &content_type),
+        header("X-Content-Type-Options", "nosniff"),
+    ];
+    if is_event_stream {
+        headers.push(header("Cache-Control", "no-cache"));
+        headers.push(header("X-Accel-Buffering", "no"));
+    }
+    let mut resp = Response::new(StatusCode(status), headers, upstream_res, len, None);
+    if is_event_stream {
+        resp = resp.with_chunked_threshold(0);
+    }
+    let _ = request.respond(resp);
+}
+
+fn handle_pod_cortex_chat(request: Request, pod_id: String) {
+    let snap = compute_state_snapshot();
+    let Some(slot) = snap.agents.iter().find(|p| p.pod_id == pod_id) else {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({ "error": "pod_not_found", "message": "Pod not found" }),
+        );
+        return;
+    };
+    if matches!(slot.status, AgentStatus::Stopped) {
+        respond_json(
+            request,
+            424,
+            &serde_json::json!({ "error": "agent_not_running", "message": "Agent is not running" }),
+        );
+        return;
+    }
+
+    let (request, body) = match parse_json_body::<LocalAgentChatBody>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({ "error": "invalid_input", "message": e }),
+            );
+            return;
+        }
+    };
+    let Some(message) = normalize_chat_message(&body.message) else {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({ "error": "invalid_input", "message": "message is required" }),
+        );
+        return;
+    };
+    let (secret, agent_user_id) = match read_provider_auth() {
+        Ok(v) => v,
+        Err(e) => {
+            respond_json(
+                request,
+                401,
+                &serde_json::json!({ "error": e, "message": "Sign in again to enable local agent chat." }),
+            );
+            return;
+        }
+    };
+    let client = match provider_chat_client(AGENT_CHAT_STREAM_TIMEOUT) {
+        Ok(c) => c,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": "chat_client_failed", "message": e.to_string() }),
+            );
+            return;
+        }
+    };
+    let payload = serde_json::json!({
+        "message": message,
+        "session_id": safe_session_id(body.session_id),
+        "chat_target": "agent",
+        "agent_mode": safe_agent_mode(body.agent_mode),
+        "app_id": "tytus-os",
+        "model_preference": safe_model_preference(body.model_preference),
+        "stream": body.stream.unwrap_or(true),
+    });
+    let upstream = client
+        .post(format!("{}/pod/{}/cortex/chat", TYTUS_PROVIDER_URL, pod_id))
+        .header("X-Agent-Secret-Token", secret)
+        .header("X-Agent-User-Id", agent_user_id)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream, application/json")
+        .json(&payload)
+        .send();
+    match upstream {
+        Ok(res) => forward_upstream_response(request, res),
+        Err(e) => respond_json(
+            request,
+            502,
+            &serde_json::json!({ "error": "cortex_unreachable", "message": e.to_string() }),
+        ),
+    }
+}
+
+fn sanitize_agent_chat_text(text: &str) -> String {
+    let mut out = text.to_string();
+    // Defensive final-pass redaction. Provider already sanitizes; local tray
+    // keeps obvious leak classes out of the desktop UI if upstream changes.
+    for word in [
+        "strato",
+        "scalesys",
+        "wannolot",
+        "minimax",
+        "moonshot",
+        "kimi",
+        "deepseek",
+        "openrouter",
+        "alibaba",
+        "xiaomi",
+        "mimo",
+        "qwen",
+        "nous research",
+        "nous",
+    ] {
+        out = replace_ascii_case_insensitive(&out, word, "private AI route");
+    }
+    redact_ipv4ish(&out)
+}
+
+fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) -> String {
+    let mut out = String::new();
+    let lower = input.to_ascii_lowercase();
+    let mut pos = 0usize;
+    while let Some(idx) = lower[pos..].find(needle) {
+        let start = pos + idx;
+        out.push_str(&input[pos..start]);
+        out.push_str(replacement);
+        pos = start + needle.len();
+    }
+    out.push_str(&input[pos..]);
+    out
+}
+
+fn redact_ipv4ish(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i].is_ascii_digit() {
+            let start = i;
+            let mut dots = 0usize;
+            let mut saw_colon = false;
+            while i < chars.len() {
+                if chars[i].is_ascii_digit() {
+                    i += 1;
+                    continue;
+                }
+                if chars[i] == ':' && !saw_colon {
+                    saw_colon = true;
+                    i += 1;
+                    continue;
+                }
+                if chars[i] == '.'
+                    && !saw_colon
+                    && i + 1 < chars.len()
+                    && chars[i + 1].is_ascii_digit()
+                {
+                    dots += 1;
+                    i += 1;
+                    continue;
+                }
+                break;
+            }
+            if dots == 3 {
+                let candidate: String = chars[start..i].iter().collect();
+                let host = candidate.split(':').next().unwrap_or("");
+                let octets_ok = host.split('.').count() == 4
+                    && host.split('.').all(|p| {
+                        !p.is_empty()
+                            && p.len() <= 3
+                            && p.chars().all(|c| c.is_ascii_digit())
+                            && p.parse::<u8>().is_ok()
+                    });
+                if octets_ok {
+                    out.push_str("[private host]");
+                    if saw_colon {
+                        // Port intentionally swallowed with the host.
+                    }
+                    continue;
+                }
+            }
+            out.extend(chars[start..i].iter());
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn extract_direct_agent_message(value: &serde_json::Value) -> String {
+    value
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| {
+            choice
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|v| v.as_str())
+                .or_else(|| choice.get("text").and_then(|v| v.as_str()))
+        })
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| value.get("content").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn handle_pod_agent_chat(request: Request, pod_id: String) {
+    let snap = compute_state_snapshot();
+    let Some(slot) = snap.agents.iter().find(|p| p.pod_id == pod_id) else {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({ "error": "pod_not_found", "message": "Pod not found" }),
+        );
+        return;
+    };
+    if matches!(slot.status, AgentStatus::Stopped) {
+        respond_json(
+            request,
+            424,
+            &serde_json::json!({ "error": "agent_not_running", "message": "Agent is not running" }),
+        );
+        return;
+    }
+    let agent_type = slot.agent_type.clone();
+
+    let (request, body) = match parse_json_body::<LocalAgentChatBody>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({ "error": "invalid_input", "message": e }),
+            );
+            return;
+        }
+    };
+    let Some(message) = normalize_chat_message(&body.message) else {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({ "error": "invalid_input", "message": "message is required" }),
+        );
+        return;
+    };
+    let (secret, agent_user_id) = match read_provider_auth() {
+        Ok(v) => v,
+        Err(e) => {
+            respond_json(
+                request,
+                401,
+                &serde_json::json!({ "error": e, "message": "Sign in again to enable local agent chat." }),
+            );
+            return;
+        }
+    };
+    let client = match provider_chat_client(AGENT_CHAT_DIRECT_TIMEOUT) {
+        Ok(c) => c,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": "chat_client_failed", "message": e.to_string() }),
+            );
+            return;
+        }
+    };
+    let payload = serde_json::json!({
+        "model": "ail-compound",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are speaking through TytusOS to the user's private pod agent. Never reveal infrastructure provider names, model provider names, private IPs, gateway URLs, hostnames, route IDs, tokens, secrets, or internal topology. Describe such details only as private infrastructure."
+            },
+            { "role": "user", "content": message }
+        ],
+        "stream": false,
+        "target": "agent",
+        "chat_target": "agent",
+        "agent_direct": true,
+    });
+    let upstream = client
+        .post(format!(
+            "{}/pod/{}/v1/chat/completions",
+            TYTUS_PROVIDER_URL, pod_id
+        ))
+        .header("X-Agent-Secret-Token", secret)
+        .header("X-Agent-User-Id", agent_user_id)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(&payload)
+        .send();
+    let Ok(res) = upstream else {
+        respond_json(
+            request,
+            502,
+            &serde_json::json!({ "error": "agent_proxy_failed", "message": "Agent chat is not reachable yet." }),
+        );
+        return;
+    };
+    let status = res.status().as_u16();
+    let parsed: serde_json::Value = match res.json() {
+        Ok(v) => v,
+        Err(e) => {
+            respond_json(
+                request,
+                502,
+                &serde_json::json!({ "error": "agent_proxy_failed", "message": e.to_string() }),
+            );
+            return;
+        }
+    };
+    if status >= 400 {
+        respond_json(request, status, &parsed);
+        return;
+    }
+    let message = sanitize_agent_chat_text(&extract_direct_agent_message(&parsed));
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({
+            "message": message,
+            "source": "agent_direct",
+            "agent_type": agent_type,
+            "session_id": null,
+        }),
+    );
 }
 
 fn handle_pod_proxy(mut request: Request, pod_id: String, proxy_path: String) {
@@ -5740,7 +6212,10 @@ fn handle_pod_proxy(mut request: Request, pod_id: String, proxy_path: String) {
         headers.push(header("Cache-Control", "no-cache"));
         headers.push(header("X-Accel-Buffering", "no"));
     }
-    let resp = Response::new(StatusCode(status), headers, upstream_res, len, None);
+    let mut resp = Response::new(StatusCode(status), headers, upstream_res, len, None);
+    if is_event_stream {
+        resp = resp.with_chunked_threshold(0);
+    }
     let _ = request.respond(resp);
 }
 
@@ -10186,6 +10661,34 @@ mod tests {
         assert!(os_asset("/").is_some());
         assert!(os_asset("/assets/does-not-exist.js").is_none());
     }
+    #[test]
+    fn pod_agent_chat_path_parsers_are_exact() {
+        assert_eq!(
+            parse_pod_cortex_chat_path("/api/pods/02/cortex/chat"),
+            Some("02".to_string())
+        );
+        assert_eq!(
+            parse_pod_agent_chat_path("/api/pods/p04/agent/chat"),
+            Some("p04".to_string())
+        );
+        assert!(parse_pod_cortex_chat_path("/api/pods/02/cortex/chat/extra").is_none());
+        assert!(parse_pod_agent_chat_path("/api/pods/../../agent/chat").is_none());
+        assert!(parse_pod_agent_chat_path("/api/pods/02/agent/http://internal").is_none());
+    }
+
+    #[test]
+    fn agent_chat_sanitizer_redacts_infra_markers() {
+        let text = "Gateway http://10.42.42.1:18080/v1 uses MiniMax, DeepSeek, STRATO and 31.70.91.72:8080.";
+        let sanitized = sanitize_agent_chat_text(text);
+        assert!(!sanitized.contains("10.42.42.1"));
+        assert!(!sanitized.contains("31.70.91.72"));
+        assert!(!sanitized.to_ascii_lowercase().contains("minimax"));
+        assert!(!sanitized.to_ascii_lowercase().contains("deepseek"));
+        assert!(!sanitized.to_ascii_lowercase().contains("strato"));
+        assert!(sanitized.contains("[private host]"));
+        assert!(sanitized.contains("private AI route"));
+    }
+
     #[test]
     fn pod_proxy_path_parser_accepts_only_v1_routes() {
         assert_eq!(
