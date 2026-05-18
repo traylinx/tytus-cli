@@ -4,6 +4,12 @@
 
 - No pending changes.
 
+## v0.6.17 — 2026-05-18
+
+- Embeds TytusOS `v1.0.41-apps-platform` with local pod agent chat through Cortex and direct fallback for warming agents.
+- Adds tray-side same-origin agent chat bridges so TytusOS can talk to OpenClaw/Hermes without exposing provider credentials to the browser.
+- Adds defensive infrastructure redaction and sanitizer tests for local agent chat responses.
+
 ## v0.6.16 — 2026-05-14
 
 - Adds live TytusOS documentation answers through the local tray bridge and shared Traylinx Cortex docs database.
