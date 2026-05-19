@@ -4,6 +4,12 @@
 
 - No pending changes.
 
+## v0.6.20 — 2026-05-19
+
+- Embeds TytusOS `v1.0.44-apps-platform` with production hardening for pod agent chat: daemon-version gating, Cortex 500 fallback, and host-projected daemon version metadata.
+- Publishes Atomek `v0.4.28` with app-scoped pod-agent session/transcript persistence and legacy transcript migration.
+- Hardens tray-side pod-agent chat identity forwarding, local-origin guardrails, and sanitized upstream error handling.
+
 ## v0.6.19 — 2026-05-18
 
 - Embeds TytusOS `v1.0.43-apps-platform` with reusable `host.daemon.chatAgent()` for app-safe OpenClaw/Hermes chat.

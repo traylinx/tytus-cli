@@ -5668,6 +5668,8 @@ fn pod_proxy_timeout(proxy_path: &str) -> Duration {
 struct LocalAgentChatBody {
     message: String,
     session_id: Option<String>,
+    route_id: Option<String>,
+    app_id: Option<String>,
     agent_mode: Option<String>,
     model_preference: Option<String>,
     stream: Option<bool>,
@@ -5714,6 +5716,55 @@ fn safe_session_id(raw: Option<String>) -> Option<String> {
             None
         }
     })
+}
+
+fn safe_route_id(raw: Option<String>) -> Option<String> {
+    raw.and_then(|v| {
+        let t = v.trim();
+        if !t.is_empty()
+            && t.len() <= 128
+            && t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+        {
+            Some(t.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn safe_app_id(raw: Option<String>) -> String {
+    raw.and_then(|v| {
+        let t = v.trim();
+        if !t.is_empty()
+            && t.len() <= 64
+            && t.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.')
+            })
+        {
+            Some(t.to_string())
+        } else {
+            None
+        }
+    })
+    .unwrap_or_else(|| "tytus-os".to_string())
+}
+
+fn request_origin_allowed(headers: &[Header]) -> bool {
+    let origin = headers.iter().find_map(|h| {
+        if h.field.as_str().as_str().eq_ignore_ascii_case("Origin") {
+            Some(h.value.as_str())
+        } else {
+            None
+        }
+    });
+    let Some(origin) = origin else {
+        return true;
+    };
+    origin.starts_with("tytus-os://")
+        || origin.starts_with("http://localhost:")
+        || origin.starts_with("http://127.0.0.1:")
+        || origin.starts_with("http://[::1]:")
 }
 
 fn safe_agent_mode(raw: Option<String>) -> &'static str {
@@ -5773,6 +5824,14 @@ fn forward_upstream_response(request: Request, upstream_res: reqwest::blocking::
 }
 
 fn handle_pod_cortex_chat(request: Request, pod_id: String) {
+    if !request_origin_allowed(request.headers()) {
+        respond_json(
+            request,
+            403,
+            &serde_json::json!({ "error": "forbidden_origin", "message": "Agent chat is only available to the local Tytus shell." }),
+        );
+        return;
+    }
     let snap = compute_state_snapshot();
     let Some(slot) = snap.agents.iter().find(|p| p.pod_id == pod_id) else {
         respond_json(
@@ -5835,9 +5894,10 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
     let payload = serde_json::json!({
         "message": message,
         "session_id": safe_session_id(body.session_id),
+        "route_id": safe_route_id(body.route_id),
         "chat_target": "agent",
         "agent_mode": safe_agent_mode(body.agent_mode),
-        "app_id": "tytus-os",
+        "app_id": safe_app_id(body.app_id),
         "model_preference": safe_model_preference(body.model_preference),
         "stream": body.stream.unwrap_or(true),
     });
@@ -5974,11 +6034,27 @@ fn extract_direct_agent_message(value: &serde_json::Value) -> String {
                 .and_then(|v| v.as_str())
         })
         .or_else(|| value.get("content").and_then(|v| v.as_str()))
+        .or_else(|| value.get("message").and_then(|v| v.as_str()))
+        .or_else(|| value.get("error").and_then(|v| v.as_str()))
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or("")
         .to_string()
 }
 
 fn handle_pod_agent_chat(request: Request, pod_id: String) {
+    if !request_origin_allowed(request.headers()) {
+        respond_json(
+            request,
+            403,
+            &serde_json::json!({ "error": "forbidden_origin", "message": "Agent chat is only available to the local Tytus shell." }),
+        );
+        return;
+    }
     let snap = compute_state_snapshot();
     let Some(slot) = snap.agents.iter().find(|p| p.pod_id == pod_id) else {
         respond_json(
@@ -6041,6 +6117,8 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
     };
     let payload = serde_json::json!({
         "model": "ail-compound",
+        "app_id": safe_app_id(body.app_id),
+        "route_id": safe_route_id(body.route_id),
         "messages": [
             {
                 "role": "system",
@@ -6085,7 +6163,24 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
         }
     };
     if status >= 400 {
-        respond_json(request, status, &parsed);
+        let safe_error = sanitize_agent_chat_text(&extract_direct_agent_message(&parsed))
+            .trim()
+            .chars()
+            .take(512)
+            .collect::<String>();
+        let safe_error = if safe_error.is_empty() {
+            "Agent chat failed. Try again in a moment.".to_string()
+        } else {
+            safe_error
+        };
+        respond_json(
+            request,
+            status,
+            &serde_json::json!({
+                "error": "agent_proxy_failed",
+                "message": safe_error,
+            }),
+        );
         return;
     }
     let message = sanitize_agent_chat_text(&extract_direct_agent_message(&parsed));
@@ -10691,6 +10786,46 @@ mod tests {
         assert!(!sanitized.to_ascii_lowercase().contains("strato"));
         assert!(sanitized.contains("[private host]"));
         assert!(sanitized.contains("private AI route"));
+    }
+
+    #[test]
+    fn direct_agent_error_extractor_handles_nested_error_messages() {
+        let parsed = serde_json::json!({
+            "error": {
+                "message": "GPU OOM on 10.42.42.1 via minimax"
+            }
+        });
+        let sanitized = sanitize_agent_chat_text(&extract_direct_agent_message(&parsed));
+        assert!(!sanitized.contains("10.42.42.1"));
+        assert!(!sanitized.to_ascii_lowercase().contains("minimax"));
+    }
+
+    #[test]
+    fn agent_chat_identity_fields_are_safely_forwardable() {
+        assert_eq!(safe_app_id(Some("atomek".to_string())), "atomek");
+        assert_eq!(safe_app_id(Some("juli3ta".to_string())), "juli3ta");
+        assert_eq!(safe_app_id(Some("../evil".to_string())), "tytus-os");
+        assert_eq!(safe_app_id(None), "tytus-os");
+
+        assert_eq!(
+            safe_route_id(Some("route-01:agent.main".to_string())),
+            Some("route-01:agent.main".to_string())
+        );
+        assert_eq!(safe_route_id(Some("route with spaces".to_string())), None);
+        assert_eq!(safe_route_id(Some("https://internal".to_string())), None);
+    }
+
+    #[test]
+    fn agent_chat_origin_guard_allows_only_local_shell_origins() {
+        let local = vec![header("Origin", "http://localhost:4242")];
+        let loopback = vec![header("Origin", "http://127.0.0.1:4242")];
+        let shell = vec![header("Origin", "tytus-os://app")];
+        let evil = vec![header("Origin", "https://evil.example")];
+        assert!(request_origin_allowed(&[]));
+        assert!(request_origin_allowed(&local));
+        assert!(request_origin_allowed(&loopback));
+        assert!(request_origin_allowed(&shell));
+        assert!(!request_origin_allowed(&evil));
     }
 
     #[test]
