@@ -72,8 +72,10 @@ jobs:
 
           import re
 
+          cargo_toml = Path("Cargo.toml").read_text()
+          current_version = re.search(r'^version = "([^"]+)"$', cargo_toml, re.M).group(1)
           web_index = Path("web/index.html").read_text()
-          assert re.search(r"v0\.6\.19", web_index), "missing current public beta tag"
+          assert f"v{current_version}" in web_index, "missing current public beta tag"
           assert "PUBLIC-BETA-UNSIGNED" in web_index
           assert "Not production GA" in web_index
           assert "https://get.traylinx.com/install.ps1" in web_index
