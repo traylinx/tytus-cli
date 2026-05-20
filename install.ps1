@@ -28,7 +28,9 @@
 #     $env:TYTUS_SKIP_CHECKSUM  Skip SHA256 verification when using
 #                                release artifacts (NOT RECOMMENDED)
 #     $env:TYTUS_RELEASE_TAG    Install a specific GitHub release tag instead
-#                                of /releases/latest, e.g. v0.6.14-beta.1
+#                                of the public catalog tag, e.g. v0.6.20
+#     $env:TYTUS_CATALOG_URL    Override public catalog URL used to resolve
+#                                the default release tag
 #
 # NOTE: Windows tunnel support is experimental. The `tytus connect` command
 # needs wintun.dll to function — we're bundling it in a future release.
@@ -43,6 +45,7 @@ Set-StrictMode -Version Latest
 
 $Repo = 'traylinx/tytus-cli'
 $RepoUrl = "https://github.com/$Repo"
+$CatalogUrl = if ($env:TYTUS_CATALOG_URL) { $env:TYTUS_CATALOG_URL } else { 'https://get.traylinx.com/catalog.json' }
 
 function Write-Step($msg)    { Write-Host "==> $msg" -ForegroundColor Blue }
 function Write-Ok($msg)      { Write-Host " OK  $msg" -ForegroundColor Green }
@@ -126,11 +129,24 @@ function Install-FromRelease {
     $asset = "tytus-windows-$arch.zip"
 
     if ($env:TYTUS_RELEASE_TAG) {
-        $releaseApiUrl = "https://api.github.com/repos/$Repo/releases/tags/$($env:TYTUS_RELEASE_TAG)"
-        Write-Step "Looking for prebuilt release ($asset) on $($env:TYTUS_RELEASE_TAG)..."
+        $effectiveReleaseTag = $env:TYTUS_RELEASE_TAG
+        $releaseApiUrl = "https://api.github.com/repos/$Repo/releases/tags/$effectiveReleaseTag"
+        Write-Step "Looking for prebuilt release ($asset) on $effectiveReleaseTag..."
     } else {
-        $releaseApiUrl = "https://api.github.com/repos/$Repo/releases/latest"
-        Write-Step "Looking for prebuilt release ($asset)..."
+        $effectiveReleaseTag = $null
+        try {
+            $catalog = Invoke-RestMethod $CatalogUrl
+            $effectiveReleaseTag = $catalog.release_tag
+        } catch {
+            Write-Warn2 "Could not read public catalog release_tag; falling back to GitHub latest."
+        }
+        if ($effectiveReleaseTag) {
+            $releaseApiUrl = "https://api.github.com/repos/$Repo/releases/tags/$effectiveReleaseTag"
+            Write-Step "Looking for prebuilt release ($asset) from public catalog ($effectiveReleaseTag)..."
+        } else {
+            $releaseApiUrl = "https://api.github.com/repos/$Repo/releases/latest"
+            Write-Step "Looking for prebuilt release ($asset)..."
+        }
     }
     try {
         $release = Invoke-RestMethod $releaseApiUrl

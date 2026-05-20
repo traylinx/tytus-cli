@@ -63,11 +63,17 @@ jobs:
               assert forbidden not in postinstall, forbidden
 
           installer = Path("install.sh").read_text()
-          assert "releases/tags/${TYTUS_RELEASE_TAG}" in installer
+          assert "releases/tags/${EFFECTIVE_RELEASE_TAG}" in installer
+          assert "PUBLIC_CATALOG_URL" in installer
+          assert "release_tag" in installer
+          assert "releases/latest" in installer
           assert "(\./)?${RELEASE_ASSET}" in installer
 
           powershell_installer = Path("install.ps1").read_text()
-          assert "releases/tags/$($env:TYTUS_RELEASE_TAG)" in powershell_installer
+          assert "releases/tags/$effectiveReleaseTag" in powershell_installer
+          assert "TYTUS_CATALOG_URL" in powershell_installer
+          assert "release_tag" in powershell_installer
+          assert "releases/latest" in powershell_installer
           assert "(\./)?" in powershell_installer
 
           import re

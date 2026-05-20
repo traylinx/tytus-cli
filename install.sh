@@ -36,7 +36,9 @@
 #     TYTUS_SKIP_CHECKSUM  Set to "1" to skip SHA256 verification when
 #                          using release artifacts (NOT RECOMMENDED)
 #     TYTUS_RELEASE_TAG    Install a specific GitHub release tag instead of
-#                          /releases/latest, e.g. v0.6.14-beta.1
+#                          the public catalog tag, e.g. v0.6.20
+#     TYTUS_CATALOG_URL    Override public catalog URL used to resolve the
+#                          default release tag
 #     TYTUS_SKIP_GARAGETYTUS
 #                          Set to "1" to skip installing bundled shared-folder
 #                          tools. Normal users should not set this.
@@ -46,6 +48,7 @@ set -eu
 
 REPO="traylinx/tytus-cli"
 REPO_URL="https://github.com/${REPO}"
+PUBLIC_CATALOG_URL="${TYTUS_CATALOG_URL:-https://get.traylinx.com/catalog.json}"
 BRAND="Tytus"
 CLI_NAME="tytus"
 MCP_NAME="tytus-mcp"
@@ -161,11 +164,21 @@ try_release_download() {
     esac
 
     if [ -n "${TYTUS_RELEASE_TAG:-}" ]; then
-        RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/tags/${TYTUS_RELEASE_TAG}"
-        msg "Looking for prebuilt release (${RELEASE_ASSET}) on ${TYTUS_RELEASE_TAG}..."
+        EFFECTIVE_RELEASE_TAG="$TYTUS_RELEASE_TAG"
+        RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/tags/${EFFECTIVE_RELEASE_TAG}"
+        msg "Looking for prebuilt release (${RELEASE_ASSET}) on ${EFFECTIVE_RELEASE_TAG}..."
     else
-        RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/latest"
-        msg "Looking for prebuilt release (${RELEASE_ASSET})..."
+        EFFECTIVE_RELEASE_TAG=$(curl -fsSL "$PUBLIC_CATALOG_URL" 2>/dev/null \
+            | sed -n 's/.*"release_tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -1)
+        if [ -n "$EFFECTIVE_RELEASE_TAG" ]; then
+            RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/tags/${EFFECTIVE_RELEASE_TAG}"
+            msg "Looking for prebuilt release (${RELEASE_ASSET}) from public catalog (${EFFECTIVE_RELEASE_TAG})..."
+        else
+            RELEASE_API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+            warn "Could not read public catalog release_tag; falling back to GitHub latest."
+            msg "Looking for prebuilt release (${RELEASE_ASSET})..."
+        fi
     fi
     RELEASES_JSON=$(curl -fsSL "$RELEASE_API_URL" 2>/dev/null)
     RELEASE_URL=$(printf "%s" "$RELEASES_JSON" \
