@@ -7485,8 +7485,8 @@ fn handle_shared_folders_run_streamed(request: Request, registry: &Registry, que
 }
 
 /// POST /api/shared-folders/open — body `{"local_path":"..."}`. Opens
-/// the path with the platform default file manager. Returns 400 if
-/// the path doesn't exist (orphan sidecar) so the UI can flag the binding.
+/// a registered garagetytus binding only. Arbitrary local paths are rejected:
+/// the browser UI may only open folders that came from the sidecar registry.
 fn handle_shared_folders_open(mut request: Request) {
     #[derive(serde::Deserialize)]
     struct Body {
@@ -7504,18 +7504,14 @@ fn handle_shared_folders_open(mut request: Request) {
             return;
         }
     };
-    if !std::path::Path::new(&body.local_path).is_dir() {
-        respond_json(
-            request,
-            404,
-            &serde_json::json!({
-                "error": "local path does not exist (orphan sidecar?)",
-                "local_path": body.local_path,
-            }),
-        );
-        return;
-    }
-    open_path(std::path::Path::new(&body.local_path));
+    let target = match registered_shared_folder_open_target(&body.local_path) {
+        Ok(path) => path,
+        Err((status, payload)) => {
+            respond_json(request, status, &payload);
+            return;
+        }
+    };
+    open_path(&target);
     respond_json(request, 200, &serde_json::json!({"ok": true}));
 }
 
@@ -7684,6 +7680,61 @@ fn list_local_dir(root: &Path, rel: &Path) -> Result<Vec<FileListEntry>, String>
         _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
     Ok(rows)
+}
+
+
+fn registered_shared_folder_open_target(local_path: &str) -> Result<PathBuf, (u16, serde_json::Value)> {
+    let requested = PathBuf::from(local_path);
+    if !requested.is_absolute() {
+        return Err((
+            400,
+            serde_json::json!({
+                "error": "local_path must be an absolute registered shared-folder binding",
+                "code": "shared_folders.open.path.invalid",
+            }),
+        ));
+    }
+    if !requested.is_dir() {
+        return Err((
+            404,
+            serde_json::json!({
+                "error": "local path does not exist (orphan sidecar?)",
+                "code": "shared_folders.open.path.missing",
+                "local_path": local_path,
+            }),
+        ));
+    }
+    let requested = requested.canonicalize().map_err(|_| {
+        (
+            404,
+            serde_json::json!({
+                "error": "local path does not exist (orphan sidecar?)",
+                "code": "shared_folders.open.path.missing",
+                "local_path": local_path,
+            }),
+        )
+    })?;
+    for binding in shared_bindings_from_cache() {
+        let Some(registered) = binding.get("local_path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let registered_path = PathBuf::from(registered);
+        if !registered_path.is_absolute() || !registered_path.is_dir() {
+            continue;
+        }
+        if let Ok(canon) = registered_path.canonicalize() {
+            if canon == requested {
+                return Ok(canon);
+            }
+        }
+    }
+    Err((
+        403,
+        serde_json::json!({
+            "error": "local_path is not a registered shared-folder binding",
+            "code": "shared_folders.open.path.unregistered",
+        }),
+    ))
 }
 
 fn shared_bindings_from_cache() -> Vec<serde_json::Value> {
@@ -10689,6 +10740,58 @@ mod tests {
         }
     }
 
+    struct HomeOverrideGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<std::ffi::OsString>,
+        root: std::path::PathBuf,
+    }
+
+    impl HomeOverrideGuard {
+        fn new() -> Self {
+            static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+            let lock = LOCK
+                .get_or_init(|| std::sync::Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root =
+                std::env::temp_dir().join(format!("tytus-tray-home-{}-{nonce}", std::process::id()));
+            std::fs::create_dir_all(&root).unwrap();
+            let prev = std::env::var_os("HOME");
+            std::env::set_var("HOME", &root);
+            Self { _lock: lock, prev, root }
+        }
+
+        fn bind_shared_folder(&self, local_path: &std::path::Path) {
+            let cache_dir = self.root.join(".cache/garagetytus/bisync");
+            std::fs::create_dir_all(&cache_dir).unwrap();
+            let binding = serde_json::json!({
+                "bucket": "shared",
+                "label": "Shared",
+                "local_path": local_path.to_string_lossy(),
+                "auto_sync": true,
+            });
+            std::fs::write(
+                cache_dir.join("shared.bindings.json"),
+                serde_json::to_string(&binding).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    impl Drop for HomeOverrideGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
     #[test]
     fn tytus_os_origin_is_fixed_to_public_contract() {
         assert_eq!(TYTUS_OS_PORT, 4242);
@@ -11940,6 +12043,37 @@ mod tests {
         assert!(shared_folder_action_argv("../../../etc/passwd").is_none());
         assert!(shared_folder_action_argv("list\0").is_none());
         assert!(shared_folder_action_argv("list ").is_none());
+    }
+
+    #[test]
+    fn shared_folder_open_target_rejects_relative_path() {
+        let (_status, body) = registered_shared_folder_open_target("relative/path").unwrap_err();
+
+        assert_eq!(body["code"], "shared_folders.open.path.invalid");
+    }
+
+    #[test]
+    fn shared_folder_open_target_rejects_unregistered_absolute_dir() {
+        let home = HomeOverrideGuard::new();
+        let target = home.root.join("not-registered");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let (_status, body) =
+            registered_shared_folder_open_target(target.to_str().unwrap()).unwrap_err();
+
+        assert_eq!(body["code"], "shared_folders.open.path.unregistered");
+    }
+
+    #[test]
+    fn shared_folder_open_target_accepts_registered_canonical_dir() {
+        let home = HomeOverrideGuard::new();
+        let target = home.root.join("Shared");
+        std::fs::create_dir_all(&target).unwrap();
+        home.bind_shared_folder(&target);
+
+        let opened = registered_shared_folder_open_target(target.to_str().unwrap()).unwrap();
+
+        assert_eq!(opened, target.canonicalize().unwrap());
     }
 
     #[test]
