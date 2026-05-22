@@ -9523,6 +9523,14 @@ fn update_tokens(
     } else if let Some(ref email) = fallback_email {
         state.email = Some(email.clone());
     }
+    // Persist device_session_id only when the server returned one — pre-
+    // Phase-2 deployments and the refresh-token endpoint may omit it, in
+    // which case we keep whatever value was last persisted (e.g. set on
+    // initial login). DECISIONS.md D12 requires Phase 2 server to echo
+    // the FK across rotation; this code is the client side of that.
+    if result.device_session_id.is_some() {
+        state.device_session_id = result.device_session_id;
+    }
     // Persist rotated RT to keychain. Sentinel invalidates the old RT on every
     // refresh; without this write the next process start loads the stale RT
     // from keychain and is forced into re-login. RT lives *only* in keychain

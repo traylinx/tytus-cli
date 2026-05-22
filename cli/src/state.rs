@@ -23,6 +23,14 @@ pub struct AccountProfile {
     pub tier: Option<String>,
     #[serde(default)]
     pub pods: Vec<PodEntry>,
+    /// Backend identifier for this account's `device_sessions` row.
+    /// Populated from the device-code grant response on `tytus login`
+    /// (see sprint tytus-account-aware-detection-2026-05-22 Phase 1).
+    /// Surfaced by the tray daemon's `/api/whoami` so the web app can
+    /// reconcile "the local install at :4242 is paired to *this*
+    /// device session" vs the user's other devices.
+    #[serde(default)]
+    pub device_session_id: Option<i64>,
     #[serde(default)]
     pub last_active_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -61,6 +69,14 @@ pub struct CliState {
     pub tier: Option<String>,
     #[serde(default)]
     pub pods: Vec<PodEntry>,
+    /// Backend identifier for this install's `device_sessions` row.
+    /// Persisted from the device-code grant response on `tytus login`
+    /// (see sprint tytus-account-aware-detection-2026-05-22 Phase 1).
+    /// Exposed via the tray daemon's `/api/whoami` so the web admin
+    /// can reconcile the local install with the user's device list.
+    /// Pre-Phase-2 backends return null here; the field stays None.
+    #[serde(default)]
+    pub device_session_id: Option<i64>,
 
     // ------------------------------------------------------------------
     // Local Cortex (sprint: 2026-05-21-chat-with-pods-local-cortex-parity).
@@ -172,6 +188,7 @@ impl AccountProfile {
             organization_id: state.organization_id.clone(),
             tier: state.tier.clone(),
             pods: state.pods.clone(),
+            device_session_id: state.device_session_id,
             last_active_at: None,
         })
     }
@@ -185,6 +202,7 @@ impl AccountProfile {
         state.organization_id = self.organization_id.clone();
         state.tier = self.tier.clone();
         state.pods = self.pods.clone();
+        state.device_session_id = self.device_session_id;
     }
 }
 
@@ -472,6 +490,7 @@ impl CliState {
             self.organization_id = None;
             self.tier = None;
             self.pods.clear();
+            self.device_session_id = None;
         }
     }
 

@@ -37,6 +37,13 @@ pub struct DeviceAuthResult {
     pub refresh_token: String,
     pub expires_in: u64,
     pub user: DeviceAuthUser,
+    /// Backend `device_sessions.id` for this paired install. Populated
+    /// by the Phase 2 token↔device-link work in authentication_ms; older
+    /// servers omit the field and the value stays `None`. Persisted into
+    /// `CliState.device_session_id` so the tray daemon's `/api/whoami`
+    /// can surface it to the web admin (sprint
+    /// tytus-account-aware-detection-2026-05-22 Phase 1).
+    pub device_session_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +78,11 @@ struct DeviceStatusResponse {
     refresh_token: Option<String>,
     expires_in: Option<u64>,
     user: Option<DeviceAuthUser>,
+    /// Backend identifier for the `device_sessions` row this token is
+    /// linked to. Optional — Phase 2 sprint work adds it server-side;
+    /// pre-Phase-2 deployments will omit it and we'll see `None`.
+    #[serde(default)]
+    device_session_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +90,12 @@ struct RefreshResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<u64>,
+    /// Mirrors `DeviceStatusResponse::device_session_id` — Phase 2 server
+    /// MUST echo the FK across refresh-token rotation (DECISIONS.md D12),
+    /// but until Phase 2 lands this stays `None` and the CLI keeps the
+    /// previously-persisted value untouched.
+    #[serde(default)]
+    device_session_id: Option<i64>,
 }
 
 // ── Public API ──
@@ -164,6 +182,7 @@ pub async fn poll_for_authorization(
                     refresh_token,
                     expires_in: body.expires_in.unwrap_or(900),
                     user,
+                    device_session_id: body.device_session_id,
                 });
             }
             "denied" => {
@@ -212,6 +231,7 @@ pub async fn refresh_access_token(
                         first_name: None,
                         last_name: None,
                     },
+                    device_session_id: body.device_session_id,
                 });
             }
         }
@@ -251,6 +271,7 @@ pub async fn refresh_access_token(
             first_name: None,
             last_name: None,
         },
+        device_session_id: body.device_session_id,
     })
 }
 

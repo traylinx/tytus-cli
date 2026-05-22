@@ -43,6 +43,21 @@ static DAEMON_STARTED_AT: OnceLock<u64> = OnceLock::new();
 /// OAuth/browser callbacks, and support instructions depend on this staying
 /// fixed instead of using a kernel-assigned random port.
 pub const TYTUS_OS_PORT: u16 = 4242;
+/// Loopback-only bind for the tray daemon HTTP server. MUST stay
+/// `127.0.0.1` (or `::1` for IPv6) — NEVER `0.0.0.0`.
+///
+/// Rationale (DECISIONS.md D11 in sprint
+/// tytus-account-aware-detection-2026-05-22): the Host-header check
+/// + CORS allowlist on `/api/whoami` (and every other sensitive
+/// endpoint) only defend against *browser-initiated* requests. A
+/// malicious LAN process making a raw HTTP request would bypass both
+/// if the bind interface were ever misconfigured to a non-loopback
+/// address — it could read whoami, list pods, kick jobs, etc.
+///
+/// `whoami_bind_is_loopback` unit-tests this invariant so a future
+/// refactor that swaps the constant for `0.0.0.0` (e.g. to "fix" a
+/// connection issue) fails CI instead of silently exposing the daemon
+/// to the LAN.
 const TYTUS_OS_HOST: &str = "127.0.0.1";
 const TYTUS_OS_PUBLIC_BASE_URL: &str = "http://localhost:4242";
 const POD_PROXY_DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -3895,6 +3910,17 @@ fn handle(request: Request, registry: Registry) {
         (Method::Get, "/api/version") => {
             handle_version(request);
         }
+        // /api/whoami — paired identity envelope for the web admin.
+        // Sprint tytus-account-aware-detection-2026-05-22 Phase 1.
+        // Host header validation + traylinx.com CORS allowlist live
+        // inside `handle_whoami` (D8). Pre-flight (OPTIONS) handled
+        // separately so browsers can verify the allowed methods.
+        (Method::Get, "/api/whoami") => {
+            handle_whoami(request);
+        }
+        (Method::Options, "/api/whoami") => {
+            handle_whoami_preflight(request);
+        }
         // ── JULI3TA music search/playback (Nuclear yt-dlp pipeline) ──
 
         // ── JULI3TA generated-song file library (real host folder) ──
@@ -5368,6 +5394,8 @@ struct StateSnapshot {
 #[derive(Serialize, Clone)]
 struct AgentSlot {
     pod_id: String,
+    route_id: Option<String>,
+    display_name: Option<String>,
     agent_type: String,
     units: u32,
     /// Public HTTPS URL of the pod — e.g. `https://<slug>.tytus.traylinx.com/p/02`.
@@ -5397,6 +5425,7 @@ struct AgentSlot {
 #[derive(Serialize, Clone)]
 struct IncludedSlot {
     pod_id: String,
+    route_id: Option<String>,
     kind: &'static str, // "ail" for now; future types can reuse
     endpoint: String,   // stable_ai_endpoint (e.g. http://10.42.42.1:18080)
     user_key: String,   // stable_user_key (sk-tytus-user-…)
@@ -5541,6 +5570,230 @@ fn handle_version(request: Request) {
             "daemon_started_at": daemon_started_at(),
         }),
     );
+}
+
+// ── /api/whoami ────────────────────────────────────────────────
+//
+// Sprint tytus-account-aware-detection-2026-05-22 Phase 1.
+// Returns the identity of the user the local Tytus install is paired
+// to, so the web app at https://traylinx.com can tell:
+//   - "Tytus OS is paired to *this* logged-in account" (mine = true)
+//   - "Tytus OS is paired to a *different* account" (mine = false)
+//   - "Tytus OS is installed but unpaired" (user_id = null)
+//
+// Security envelope:
+//  * Daemon binds loopback only (D11 — see `TYTUS_OS_HOST` rationale).
+//  * Host header validated against {localhost,127.0.0.1,[::1]}:4242
+//    to defeat DNS-rebinding attacks (D8). Failures return 403.
+//  * CORS allowlist set to https://traylinx.com — not `*`. The browser
+//    of a malicious origin still gets the response on the wire (no
+//    fix for that without authentication) but cannot read it from JS.
+//  * Identity store: handler reads the SAME state.json the CLI writes.
+//    No parallel store — CLI login/logout immediately reflects here.
+//  * Forbidden fields per spec: email, access_token, pod_count, secret_key.
+
+/// Allowed Host header values for /api/whoami. Anything else is
+/// likely a DNS-rebinding attack (browser tricked into resolving
+/// `evil.com` → 127.0.0.1) and the daemon refuses to answer.
+const WHOAMI_ALLOWED_HOSTS: &[&str] = &[
+    "localhost:4242",
+    "127.0.0.1:4242",
+    "[::1]:4242",
+];
+
+/// Origin the web admin is served from. Locked to a single allowlist
+/// entry — `*` would let any site read the identity envelope.
+const WHOAMI_ALLOWED_ORIGIN: &str = "https://traylinx.com";
+
+fn whoami_host_allowed(headers: &[Header]) -> bool {
+    let Some(host) = headers
+        .iter()
+        .find(|h| h.field.equiv("Host"))
+        .map(|h| h.value.as_str().to_string())
+    else {
+        // tiny_http requires Host on HTTP/1.1 requests, but defend-
+        // in-depth: a missing Host is suspicious — refuse.
+        return false;
+    };
+    WHOAMI_ALLOWED_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+}
+
+/// Build the JSON body for `/api/whoami` from a parsed state.json
+/// value (or `None` if state.json is missing/unreadable). Split out
+/// from `handle_whoami` so unit tests can pin the response shape
+/// without spinning up a tiny_http server.
+fn build_whoami_body(parsed: Option<&serde_json::Value>) -> serde_json::Value {
+    let hostname_label = whoami_hostname_label();
+    let version = env!("CARGO_PKG_VERSION");
+
+    // Missing state.json → unpaired install.
+    let Some(parsed) = parsed else {
+        return serde_json::json!({
+            "user_id": serde_json::Value::Null,
+            "device_session_id": serde_json::Value::Null,
+            "organization_id": serde_json::Value::Null,
+            "status": "unpaired",
+            "version": version,
+            "hostname_label": hostname_label,
+        });
+    };
+
+    let user_id = parsed
+        .get("agent_user_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let organization_id = parsed
+        .get("organization_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let device_session_id = parsed
+        .get("device_session_id")
+        .and_then(|v| v.as_i64());
+
+    // status: "ready" if we have a non-expired access token + user_id,
+    // "degraded" if we have a user_id but the access token is expired,
+    // "unpaired" if we have no user_id at all.
+    let status = if user_id.is_none() {
+        "unpaired"
+    } else if whoami_token_valid(parsed) {
+        "ready"
+    } else {
+        "degraded"
+    };
+
+    serde_json::json!({
+        "user_id": user_id,
+        "device_session_id": device_session_id,
+        "organization_id": organization_id,
+        "status": status,
+        "version": version,
+        "hostname_label": hostname_label,
+    })
+}
+
+/// True when state.json has an access_token whose expires_at_ms is in
+/// the future (5-min skew buffer matches `CliState::has_valid_token`).
+fn whoami_token_valid(parsed: &serde_json::Value) -> bool {
+    let has_token = parsed
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !has_token {
+        return false;
+    }
+    let exp = match parsed.get("expires_at_ms").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => return false,
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    (now + 300_000) < exp
+}
+
+/// Returns the local machine hostname truncated to 32 chars. Falls
+/// back to "unknown" if `gethostname(2)` fails (rare but possible in
+/// some sandboxes). No PII beyond what the OS itself exposes.
+fn whoami_hostname_label() -> String {
+    fn hostname_raw() -> Option<String> {
+        #[cfg(unix)]
+        {
+            use std::ffi::CStr;
+            let mut buf = [0u8; 256];
+            let ret = unsafe {
+                libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len())
+            };
+            if ret != 0 {
+                return None;
+            }
+            let cstr = unsafe { CStr::from_ptr(buf.as_ptr() as *const libc::c_char) };
+            let s = cstr.to_string_lossy().into_owned();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            std::env::var("COMPUTERNAME").ok()
+        }
+    }
+
+    let raw = hostname_raw().unwrap_or_else(|| "unknown".to_string());
+    // Strip the trailing `.local` macOS appends — labels are nicer
+    // without it. Truncate to 32 chars on a char boundary so we never
+    // split a multi-byte UTF-8 sequence (`.truncate(32)` would panic
+    // mid-codepoint).
+    let cleaned = raw
+        .trim_end_matches(".local")
+        .trim_end_matches('.')
+        .to_string();
+    let mut out = String::with_capacity(32);
+    for c in cleaned.chars() {
+        if out.len() + c.len_utf8() > 32 {
+            break;
+        }
+        out.push(c);
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+/// Attach the CORS headers required for the web admin to read the
+/// whoami response. Allowlist is a single explicit origin — never `*`.
+fn with_whoami_cors_headers<R: std::io::Read>(resp: Response<R>) -> Response<R> {
+    resp.with_header(header("Access-Control-Allow-Origin", WHOAMI_ALLOWED_ORIGIN))
+        .with_header(header("Access-Control-Allow-Methods", "GET, OPTIONS"))
+        .with_header(header("Access-Control-Allow-Headers", "Content-Type"))
+        .with_header(header("Vary", "Origin"))
+        .with_header(header("Content-Type", "application/json"))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+}
+
+fn handle_whoami(request: Request) {
+    if !whoami_host_allowed(request.headers()) {
+        let body = serde_json::json!({ "error": "forbidden_host" }).to_string();
+        let resp = Response::from_string(body)
+            .with_status_code(StatusCode(403))
+            .with_header(header("Content-Type", "application/json"))
+            .with_header(header("X-Content-Type-Options", "nosniff"));
+        let _ = request.respond(resp);
+        return;
+    }
+
+    let parsed_owned: Option<serde_json::Value> = state_json_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+
+    let body = build_whoami_body(parsed_owned.as_ref());
+    let body_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+    let resp = with_whoami_cors_headers(
+        Response::from_string(body_str).with_status_code(StatusCode(200)),
+    );
+    let _ = request.respond(resp);
+}
+
+fn handle_whoami_preflight(request: Request) {
+    if !whoami_host_allowed(request.headers()) {
+        let resp = Response::from_string("")
+            .with_status_code(StatusCode(403))
+            .with_header(header("Content-Type", "application/json"));
+        let _ = request.respond(resp);
+        return;
+    }
+    let resp = with_whoami_cors_headers(
+        Response::from_string("").with_status_code(StatusCode(204)),
+    );
+    let _ = request.respond(resp);
 }
 
 fn handle_state(request: Request, registry: &Registry) {
@@ -6909,6 +7162,16 @@ fn compute_state_snapshot() -> StateSnapshot {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let route_id = p
+                .get("route_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let display_name = p
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
             let edge_public_url: Option<String> = p
                 .get("edge_public_url")
                 .and_then(|v| v.as_str())
@@ -6968,6 +7231,7 @@ fn compute_state_snapshot() -> StateSnapshot {
                     .to_string();
                 included.push(IncludedSlot {
                     pod_id,
+                    route_id,
                     kind: "ail",
                     endpoint,
                     user_key,
@@ -6976,7 +7240,11 @@ fn compute_state_snapshot() -> StateSnapshot {
                 continue;
             }
 
-            let units = agent_units_for(&agent_type);
+            let units = p
+                .get("agent_units")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .unwrap_or_else(|| agent_units_for(&agent_type));
             used += units;
             // Cache lookup is non-blocking; a stale entry kicks a
             // background refresh so the next poll sees the fresh
@@ -6992,6 +7260,8 @@ fn compute_state_snapshot() -> StateSnapshot {
             );
             agents.push(AgentSlot {
                 pod_id,
+                route_id,
+                display_name,
                 agent_type,
                 units,
                 public_url,
@@ -10324,6 +10594,13 @@ async fn persist_device_login(
     if let Some(obj) = root.as_object_mut() {
         obj.remove("refresh_token");
     }
+    // Sprint tytus-account-aware-detection-2026-05-22 Phase 1: persist
+    // the backend device_sessions FK on first login. Pre-Phase-2 servers
+    // return None and we don't touch the field — refresh rotation
+    // preserves it (DECISIONS.md D12).
+    if let Some(dsid) = result.device_session_id {
+        root["device_session_id"] = serde_json::json!(dsid);
+    }
 
     if !email.is_empty() {
         let _ = atomek_auth::KeychainStore::store_refresh_token(&email, &result.refresh_token);
@@ -10379,16 +10656,52 @@ fn merge_pod_status(root: &mut serde_json::Value, server_pods: Vec<atomek_pods::
     for sp in server_pods {
         let mut pod = existing
             .iter()
-            .find(|p| p.get("pod_id").and_then(|v| v.as_str()) == Some(sp.pod_id.as_str()))
+            .find(|p| json_pod_matches_status(p, &sp))
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         pod["pod_id"] = serde_json::json!(sp.pod_id);
-        pod["droplet_id"] = serde_json::json!(sp.droplet_id);
+        pod["route_id"] = serde_json::json!(sp.route_id);
+        if let Some(droplet_id) = sp.droplet_id {
+            pod["droplet_id"] = serde_json::json!(droplet_id);
+        } else if pod.get("droplet_id").is_none() {
+            pod["droplet_id"] = serde_json::Value::Null;
+        }
         pod["agent_type"] = serde_json::json!(sp.agent_type.unwrap_or_else(|| "none".to_string()));
+        pod["agent_units"] = serde_json::json!(sp.agent_units);
+        pod["display_name"] = serde_json::json!(sp.display_name);
+        if let Some(v) = sp.stable_ai_endpoint {
+            pod["stable_ai_endpoint"] = serde_json::json!(v);
+        }
+        if let Some(v) = sp.stable_user_key {
+            pod["stable_user_key"] = serde_json::json!(v);
+        }
+        if let Some(v) = sp.edge_public_url {
+            pod["edge_public_url"] = serde_json::json!(v);
+        }
+        if let Some(v) = sp.pod_public_url {
+            pod["pod_public_url"] = serde_json::json!(v);
+        }
         merged.push(pod);
     }
 
     root["pods"] = serde_json::Value::Array(merged);
+}
+
+fn json_pod_matches_status(p: &serde_json::Value, sp: &atomek_pods::PodEntry) -> bool {
+    match (
+        p.get("route_id").and_then(|v| v.as_str()),
+        sp.route_id.as_deref(),
+    ) {
+        (Some(a), Some(b)) => return a == b,
+        (Some(_), None) | (None, Some(_)) => return false,
+        (None, None) => {}
+    }
+    p.get("pod_id").and_then(|v| v.as_str()) == Some(sp.pod_id.as_str())
+        && p
+            .get("agent_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none")
+            == sp.agent_type.as_deref().unwrap_or("none")
 }
 
 async fn ensure_default_pod_json(client: &atomek_pods::TytusClient, root: &mut serde_json::Value) {
@@ -10407,11 +10720,14 @@ async fn ensure_default_pod_json(client: &atomek_pods::TytusClient, root: &mut s
     pods.retain(|p| p.get("pod_id").and_then(|v| v.as_str()) != Some(alloc.pod_id.as_str()));
     let mut pod = serde_json::json!({
         "pod_id": alloc.pod_id,
+        "route_id": null,
         "droplet_id": alloc.droplet_id,
         "droplet_ip": alloc.droplet_ip,
         "ai_endpoint": alloc.ai_endpoint,
         "pod_api_key": alloc.pod_api_key,
         "agent_type": "none",
+        "agent_units": 0,
+        "display_name": null,
         "agent_endpoint": null,
         "stable_ai_endpoint": alloc.stable_ai_endpoint,
         "stable_user_key": alloc.stable_user_key,
@@ -13022,5 +13338,294 @@ mod tests {
             "{\"exit_code\":0,\"stdout\":\"ok\"}",
             ""
         ));
+    }
+
+    // ── /api/whoami ─────────────────────────────────────────────
+    // Sprint tytus-account-aware-detection-2026-05-22 Phase 1.
+
+    fn host_hdr(value: &str) -> Header {
+        Header::from_bytes(b"Host", value.as_bytes()).unwrap()
+    }
+
+    /// (D11) The daemon bind address MUST resolve to a loopback IP.
+    /// Binding `0.0.0.0` would expose the daemon — and `/api/whoami` —
+    /// to the LAN. The Host-header check + CORS allowlist only protect
+    /// *browser-initiated* requests; a raw HTTP client on the LAN
+    /// would bypass both. A future refactor that changes
+    /// `TYTUS_OS_HOST` to anything other than 127.0.0.1 / ::1 will
+    /// fail this test before it reaches CI.
+    #[test]
+    fn whoami_bind_is_loopback() {
+        let ip: std::net::IpAddr = TYTUS_OS_HOST
+            .parse()
+            .expect("TYTUS_OS_HOST must be a parseable IP literal");
+        assert!(
+            ip.is_loopback(),
+            "TYTUS_OS_HOST ({}) must be a loopback address per DECISIONS.md D11; binding to a non-loopback interface exposes /api/whoami (and every other endpoint) to the LAN",
+            TYTUS_OS_HOST,
+        );
+        assert_eq!(TYTUS_OS_PORT, 4242, "whoami URL is hard-coded in user docs");
+    }
+
+    #[test]
+    fn whoami_host_header_accepts_canonical_loopback_origins() {
+        // Browsers will send Host: <whatever-the-user-typed>:4242.
+        // The three canonical loopback names are all legitimate.
+        assert!(whoami_host_allowed(&[host_hdr("localhost:4242")]));
+        assert!(whoami_host_allowed(&[host_hdr("127.0.0.1:4242")]));
+        assert!(whoami_host_allowed(&[host_hdr("[::1]:4242")]));
+        // Case-insensitive — RFC 9110 §5.1.
+        assert!(whoami_host_allowed(&[host_hdr("LocalHost:4242")]));
+    }
+
+    #[test]
+    fn whoami_host_header_rejects_dns_rebinding_attempts() {
+        // DNS rebinding: attacker tricks the browser into resolving
+        // evil.com → 127.0.0.1, then asks JS to fetch /api/whoami.
+        // The TCP socket is still 127.0.0.1, but the Host header
+        // carries the attacker-controlled hostname.
+        assert!(!whoami_host_allowed(&[host_hdr("evil.com:4242")]));
+        assert!(!whoami_host_allowed(&[host_hdr("traylinx.com:4242")]));
+        // Different port → different origin in the browser's eyes.
+        assert!(!whoami_host_allowed(&[host_hdr("127.0.0.1:31337")]));
+        // No Host header at all → suspicious, reject.
+        assert!(!whoami_host_allowed(&[]));
+    }
+
+    #[test]
+    fn whoami_response_is_unpaired_when_state_missing() {
+        // No state.json on disk (fresh install, never logged in) →
+        // status="unpaired", every identity field null.
+        let body = build_whoami_body(None);
+        assert!(body.is_object());
+        assert!(body["user_id"].is_null(), "user_id must be null: {body}");
+        assert!(body["device_session_id"].is_null());
+        assert!(body["organization_id"].is_null());
+        assert_eq!(body["status"], serde_json::json!("unpaired"));
+        assert_eq!(body["version"], serde_json::json!(env!("CARGO_PKG_VERSION")));
+        let label = body["hostname_label"].as_str().expect("hostname_label string");
+        assert!(!label.is_empty(), "hostname_label must always be set");
+        assert!(
+            label.len() <= 32,
+            "hostname_label must be ≤32 chars, got {} ({})",
+            label.len(),
+            label,
+        );
+    }
+
+    #[test]
+    fn whoami_response_is_paired_when_state_has_user_id() {
+        // Future expiry → status="ready".
+        let future_exp = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let parsed = serde_json::json!({
+            "email": "user@example.com",
+            "access_token": "at-deadbeef",
+            "expires_at_ms": future_exp,
+            "agent_user_id": "uuid-of-paired-user",
+            "organization_id": "uuid-of-org",
+            "device_session_id": 12345,
+        });
+        let body = build_whoami_body(Some(&parsed));
+
+        assert_eq!(body["user_id"], serde_json::json!("uuid-of-paired-user"));
+        assert_eq!(body["device_session_id"], serde_json::json!(12345));
+        assert_eq!(body["organization_id"], serde_json::json!("uuid-of-org"));
+        assert_eq!(body["status"], serde_json::json!("ready"));
+    }
+
+    #[test]
+    fn whoami_response_is_degraded_when_token_expired() {
+        // Paired but the access token is past expiry — UI should
+        // surface "running but needs refresh" rather than unpaired.
+        let past_exp = chrono::Utc::now().timestamp_millis() - 1_000;
+        let parsed = serde_json::json!({
+            "access_token": "at-deadbeef",
+            "expires_at_ms": past_exp,
+            "agent_user_id": "uuid-of-paired-user",
+        });
+        let body = build_whoami_body(Some(&parsed));
+        assert_eq!(body["user_id"], serde_json::json!("uuid-of-paired-user"));
+        assert_eq!(body["status"], serde_json::json!("degraded"));
+    }
+
+    #[test]
+    fn whoami_response_is_unpaired_when_no_user_id() {
+        // State file exists (e.g. cortex_profile is set) but no
+        // agent_user_id → still treated as unpaired.
+        let parsed = serde_json::json!({
+            "cortex_profile": "local",
+        });
+        let body = build_whoami_body(Some(&parsed));
+        assert!(body["user_id"].is_null());
+        assert!(body["device_session_id"].is_null());
+        assert_eq!(body["status"], serde_json::json!("unpaired"));
+    }
+
+    #[test]
+    fn whoami_response_excludes_forbidden_fields() {
+        // Spec line 88-93: never expose email, access_token,
+        // pod_count, secret_key. Verify the JSON object contains
+        // ONLY the allowlisted keys.
+        let parsed = serde_json::json!({
+            "email": "leak-me-not@example.com",
+            "access_token": "at-leak-me-not",
+            "refresh_token": "rt-leak-me-not",
+            "secret_key": "sk-leak-me-not",
+            "expires_at_ms": chrono::Utc::now().timestamp_millis() + 3_600_000,
+            "agent_user_id": "uuid-of-paired-user",
+            "organization_id": "uuid-of-org",
+            "device_session_id": 42,
+            "pods": [{"pod_id":"02","agent_type":"openclaw"}],
+        });
+        let body = build_whoami_body(Some(&parsed));
+        let obj = body.as_object().expect("whoami body is an object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "device_session_id",
+                "hostname_label",
+                "organization_id",
+                "status",
+                "user_id",
+                "version",
+            ],
+            "whoami response must contain ONLY the allowlisted keys",
+        );
+
+        // Belt-and-braces: serialize and grep for the forbidden tokens.
+        // A future refactor that builds the JSON differently might add a
+        // key but still leak through to_string.
+        let serialized = serde_json::to_string(&body).unwrap();
+        for forbidden in &[
+            "leak-me-not@example.com",
+            "at-leak-me-not",
+            "rt-leak-me-not",
+            "sk-leak-me-not",
+            "\"email\"",
+            "\"access_token\"",
+            "\"secret_key\"",
+            "\"pod_count\"",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "whoami response leaked forbidden value {:?}: {}",
+                forbidden,
+                serialized,
+            );
+        }
+    }
+
+    /// Wire-level round trip: GET /api/whoami with a good Host header
+    /// returns 200, the traylinx.com CORS header, and a body that
+    /// parses as the expected envelope.
+    #[test]
+    fn whoami_wire_get_returns_200_with_cors_and_envelope() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        // Pin to a non-existent state.json so the daemon answers
+        // "unpaired" deterministically regardless of the developer's
+        // live state.
+        let _guard = StateOverrideGuard::set("/nonexistent/tytus-whoami-test.json");
+
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let port = server.server_addr().to_ip().expect("ip").port();
+        let registry = Registry::new();
+
+        let server_arc = Arc::new(server);
+        let server_for_thread = server_arc.clone();
+        let handler = thread::spawn(move || {
+            if let Some(req) = server_for_thread.incoming_requests().next() {
+                handle(req, registry);
+            }
+        });
+
+        let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s.write_all(
+            b"GET /api/whoami HTTP/1.1\r\n\
+              Host: 127.0.0.1:4242\r\n\
+              Connection: close\r\n\r\n",
+        )
+        .expect("write");
+        let mut resp = String::new();
+        s.read_to_string(&mut resp).expect("read");
+        handler.join().expect("handler thread panicked");
+
+        let status = resp.lines().next().unwrap_or("");
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "expected 200, got: {}\n{}",
+            status,
+            resp,
+        );
+        let origin = extract_header(&resp, "Access-Control-Allow-Origin")
+            .expect("Access-Control-Allow-Origin missing");
+        assert_eq!(origin, "https://traylinx.com");
+        let allowed_methods = extract_header(&resp, "Access-Control-Allow-Methods")
+            .expect("Access-Control-Allow-Methods missing");
+        assert!(allowed_methods.contains("GET"));
+        let vary = extract_header(&resp, "Vary").expect("Vary header missing");
+        assert!(vary.contains("Origin"));
+
+        // Body comes after the blank line that terminates the headers.
+        let body = resp.split("\r\n\r\n").nth(1).expect("response has body");
+        let parsed: serde_json::Value = serde_json::from_str(body.trim()).expect("body is JSON");
+        assert_eq!(parsed["status"], serde_json::json!("unpaired"));
+        assert!(parsed["user_id"].is_null());
+    }
+
+    /// Wire-level: a bad Host header (DNS-rebinding shape) is rejected
+    /// with 403 BEFORE the handler reads state.json.
+    #[test]
+    fn whoami_wire_rejects_evil_host_with_403() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let _guard = StateOverrideGuard::set("/nonexistent/tytus-whoami-test.json");
+
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let port = server.server_addr().to_ip().expect("ip").port();
+        let registry = Registry::new();
+
+        let server_arc = Arc::new(server);
+        let server_for_thread = server_arc.clone();
+        let handler = thread::spawn(move || {
+            if let Some(req) = server_for_thread.incoming_requests().next() {
+                handle(req, registry);
+            }
+        });
+
+        let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s.write_all(
+            b"GET /api/whoami HTTP/1.1\r\n\
+              Host: evil.com:4242\r\n\
+              Connection: close\r\n\r\n",
+        )
+        .expect("write");
+        let mut resp = String::new();
+        s.read_to_string(&mut resp).expect("read");
+        handler.join().expect("handler thread panicked");
+
+        let status = resp.lines().next().unwrap_or("");
+        assert!(
+            status.starts_with("HTTP/1.1 403"),
+            "expected 403 on evil Host, got: {}\n{}",
+            status,
+            resp,
+        );
+        // 403 must NOT carry the CORS allowlist header — otherwise an
+        // attacker site could still read the rejection body and learn
+        // that the daemon is present.
+        assert!(
+            extract_header(&resp, "Access-Control-Allow-Origin").is_none(),
+            "403 response must not advertise CORS allowlist: {}",
+            resp,
+        );
     }
 }

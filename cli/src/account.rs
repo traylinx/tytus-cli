@@ -34,6 +34,7 @@ pub fn profile_from_state(state: &CliState) -> Option<AccountProfile> {
         organization_id: state.organization_id.clone(),
         tier: state.tier.clone(),
         pods: state.pods.clone(),
+        device_session_id: state.device_session_id,
         last_active_at: Some(chrono::Utc::now()),
     })
 }
