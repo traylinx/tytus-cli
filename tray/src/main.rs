@@ -36,6 +36,9 @@ mod workspace;
 /// Canonical documentation URL. `tytus.traylinx.com` is the Provider API
 /// (returns 404 on `/`), not a docs site — point at the public README.
 const DOCS_URL: &str = "https://github.com/traylinx/tytus-cli";
+const TYTUS_UPDATE_CATALOG_URL: &str = "https://get.traylinx.com/catalog.json";
+const TYTUS_UPDATE_INSTALL_SH_URL: &str = "https://get.traylinx.com/install.sh";
+const TYTUS_UPDATE_INSTALL_PS1_URL: &str = "https://get.traylinx.com/install.ps1";
 
 // ── Main-thread tray handle ─────────────────────────────────
 //
@@ -1627,6 +1630,19 @@ fn build_menu(state: &TrayState) -> Menu {
             None,
         ));
     }
+    let _ = settings_sub.append(&PredefinedMenuItem::separator());
+    let _ = settings_sub.append(&MenuItem::with_id(
+        "check_updates",
+        "Check for Updates…",
+        true,
+        None,
+    ));
+    let _ = settings_sub.append(&MenuItem::with_id(
+        "install_update",
+        "Update Tytus…",
+        true,
+        None,
+    ));
     if state.logged_in {
         let _ = settings_sub.append(&PredefinedMenuItem::separator());
         let _ = settings_sub.append(&MenuItem::with_id("logout", "Sign Out", true, None));
@@ -1905,6 +1921,39 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             open_in_terminal_simple(
                 "tytus tray install; echo; echo 'Press Enter to close…'; read _",
             );
+        }
+        "check_updates" => {
+            busy_set("Checking for updates…");
+            std::thread::spawn(|| {
+                match fetch_latest_tytus_version() {
+                    Ok((latest, release_tag)) => {
+                        let current = env!("CARGO_PKG_VERSION");
+                        if is_newer_tytus_version(&latest, current) {
+                            let release = release_tag.unwrap_or_else(|| format!("v{}", latest));
+                            notify(
+                                "Tytus update available",
+                                &format!("Version {} is available. Use Settings → Update Tytus…", latest),
+                            );
+                            let msg = format!(
+                                "Tytus {} is available (installed: {}).\n\nUse Settings → Update Tytus… or run:\n{}",
+                                release,
+                                current,
+                                tytus_install_command()
+                            );
+                            let _ = atomek_core::platform::dialog::show_info("Tytus update available", &msg);
+                        } else {
+                            notify("Tytus", &format!("Tytus {} is up to date.", current));
+                        }
+                    }
+                    Err(e) => {
+                        notify("Tytus", &format!("Update check failed: {}", e));
+                    }
+                }
+                busy_clear();
+            });
+        }
+        "install_update" => {
+            open_in_terminal_simple(&tytus_update_terminal_command());
         }
         "copy_env" => {
             copy_connection_info(state);
@@ -2883,6 +2932,84 @@ fn log_file_with_legacy(
     } else {
         legacy
     }
+}
+
+
+fn tytus_install_command() -> String {
+    if cfg!(windows) {
+        format!("powershell -c \"irm {} | iex\"", TYTUS_UPDATE_INSTALL_PS1_URL)
+    } else {
+        format!("curl -fsSL {} | bash", TYTUS_UPDATE_INSTALL_SH_URL)
+    }
+}
+
+fn tytus_update_terminal_command() -> String {
+    if cfg!(windows) {
+        format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm {} | iex; Read-Host 'Press Enter to close'\"",
+            TYTUS_UPDATE_INSTALL_PS1_URL
+        )
+    } else {
+        format!(
+            "curl -fsSL {} | bash; echo; echo 'Tytus update finished. Quit and relaunch Tytus if the tray did not restart automatically.'; echo 'Press Enter to close…'; read _",
+            TYTUS_UPDATE_INSTALL_SH_URL
+        )
+    }
+}
+
+fn parse_tytus_version_parts(v: &str) -> Vec<u64> {
+    v.trim()
+        .trim_start_matches('v')
+        .split(|c: char| c == '.' || c == '-' || c == '+')
+        .take_while(|part| part.chars().all(|c| c.is_ascii_digit()))
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+fn is_newer_tytus_version(latest: &str, current: &str) -> bool {
+    let latest_parts = parse_tytus_version_parts(latest);
+    let current_parts = parse_tytus_version_parts(current);
+    if latest_parts.is_empty() || current_parts.is_empty() {
+        return latest.trim().trim_start_matches('v') > current.trim().trim_start_matches('v');
+    }
+    let max_len = latest_parts.len().max(current_parts.len());
+    for idx in 0..max_len {
+        let l = *latest_parts.get(idx).unwrap_or(&0);
+        let c = *current_parts.get(idx).unwrap_or(&0);
+        if l != c {
+            return l > c;
+        }
+    }
+    false
+}
+
+fn fetch_latest_tytus_version() -> Result<(String, Option<String>), String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("failed to build update client: {}", e))?;
+    let body: serde_json::Value = client
+        .get(TYTUS_UPDATE_CATALOG_URL)
+        .send()
+        .map_err(|e| format!("failed to fetch catalog: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("catalog returned error: {}", e))?
+        .json()
+        .map_err(|e| format!("failed to parse catalog: {}", e))?;
+    let version = body
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "catalog missing version".to_string())?
+        .to_string();
+    let release_tag = body
+        .get("release_tag")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    Ok((version, release_tag))
 }
 
 /// Open a shell command in a new terminal window.

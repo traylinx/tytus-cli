@@ -63,6 +63,11 @@ const TYTUS_OS_PUBLIC_BASE_URL: &str = "http://localhost:4242";
 const POD_PROXY_DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 const POD_PROXY_MUSIC_GENERATION_TIMEOUT: Duration = Duration::from_secs(420);
 const TYTUS_PROVIDER_URL: &str = "https://tytus.traylinx.com";
+const TYTUS_UPDATE_CATALOG_URL: &str = "https://get.traylinx.com/catalog.json";
+const TYTUS_UPDATE_INSTALL_SH_URL: &str = "https://get.traylinx.com/install.sh";
+const TYTUS_UPDATE_INSTALL_PS1_URL: &str = "https://get.traylinx.com/install.ps1";
+const TYTUS_UPDATE_RELEASES_BASE_URL: &str = "https://github.com/traylinx/tytus-cli/releases/tag";
+const TYTUS_UPDATE_AUTO_CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
 const AGENT_CHAT_STREAM_TIMEOUT: Duration = Duration::from_secs(600);
 const AGENT_CHAT_DIRECT_TIMEOUT: Duration = Duration::from_secs(150);
 #[cfg(test)]
@@ -4102,6 +4107,9 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Post, "/api/update/automatic") => {
             handle_update_automatic(request);
+        }
+        (Method::Post, "/api/update/install") => {
+            handle_update_install(request);
         }
         (Method::Post, "/api/login") => {
             handle_login(request);
@@ -10334,6 +10342,12 @@ struct UpdatePrefs {
     automatic_checks: bool,
     #[serde(default)]
     last_checked_at: Option<u64>,
+    #[serde(default)]
+    latest_version: Option<String>,
+    #[serde(default)]
+    latest_release_tag: Option<String>,
+    #[serde(default)]
+    last_check_error: Option<String>,
 }
 
 impl Default for UpdatePrefs {
@@ -10341,8 +10355,17 @@ impl Default for UpdatePrefs {
         Self {
             automatic_checks: true,
             last_checked_at: None,
+            latest_version: None,
+            latest_release_tag: None,
+            last_check_error: None,
         }
     }
+}
+
+#[derive(Debug)]
+struct UpdateFeed {
+    version: String,
+    release_tag: Option<String>,
 }
 
 fn default_update_automatic_checks() -> bool {
@@ -10389,33 +10412,174 @@ fn current_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn update_catalog_url() -> String {
+    std::env::var("TYTUS_UPDATE_CATALOG_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| TYTUS_UPDATE_CATALOG_URL.to_string())
+}
+
+fn update_install_command() -> String {
+    if cfg!(windows) {
+        format!("powershell -c \"irm {} | iex\"", TYTUS_UPDATE_INSTALL_PS1_URL)
+    } else {
+        format!("curl -fsSL {} | bash", TYTUS_UPDATE_INSTALL_SH_URL)
+    }
+}
+
+fn update_terminal_command() -> String {
+    if cfg!(windows) {
+        format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm {} | iex; Read-Host 'Press Enter to close'\"",
+            TYTUS_UPDATE_INSTALL_PS1_URL
+        )
+    } else {
+        format!(
+            "curl -fsSL {} | bash; echo; echo 'Tytus update finished. Quit and relaunch Tytus if the tray did not restart automatically.'; echo 'Press Enter to close…'; read _",
+            TYTUS_UPDATE_INSTALL_SH_URL
+        )
+    }
+}
+
+fn release_url_for(tag: Option<&str>) -> Option<String> {
+    tag.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|tag| format!("{}/{}", TYTUS_UPDATE_RELEASES_BASE_URL, tag))
+}
+
+fn parse_version_parts(v: &str) -> Vec<u64> {
+    let cleaned = v.trim().trim_start_matches('v');
+    cleaned
+        .split(|c: char| c == '.' || c == '-' || c == '+')
+        .take_while(|part| part.chars().all(|c| c.is_ascii_digit()))
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+fn is_newer_version(latest: &str, current: &str) -> bool {
+    let latest_parts = parse_version_parts(latest);
+    let current_parts = parse_version_parts(current);
+    if latest_parts.is_empty() || current_parts.is_empty() {
+        return latest.trim().trim_start_matches('v') > current.trim().trim_start_matches('v');
+    }
+    let max_len = latest_parts.len().max(current_parts.len());
+    for idx in 0..max_len {
+        let l = *latest_parts.get(idx).unwrap_or(&0);
+        let c = *current_parts.get(idx).unwrap_or(&0);
+        if l != c {
+            return l > c;
+        }
+    }
+    false
+}
+
+fn fetch_update_feed(timeout: Duration) -> Result<UpdateFeed, String> {
+    let url = update_catalog_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("failed to build update client: {}", e))?;
+    let body: serde_json::Value = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("failed to fetch update catalog: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("update catalog returned error: {}", e))?
+        .json()
+        .map_err(|e| format!("failed to parse update catalog: {}", e))?;
+    let version = body
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "update catalog missing version".to_string())?
+        .to_string();
+    let release_tag = body
+        .get("release_tag")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| Some(format!("v{}", version)));
+    Ok(UpdateFeed {
+        version,
+        release_tag,
+    })
+}
+
+fn apply_update_feed(prefs: &mut UpdatePrefs, feed: UpdateFeed, checked_at: u64) {
+    prefs.last_checked_at = Some(checked_at);
+    prefs.latest_version = Some(feed.version);
+    prefs.latest_release_tag = feed.release_tag;
+    prefs.last_check_error = None;
+}
+
+fn should_auto_check_updates(prefs: &UpdatePrefs, now: u64) -> bool {
+    if !prefs.automatic_checks {
+        return false;
+    }
+    match prefs.last_checked_at {
+        Some(last) => now.saturating_sub(last) >= TYTUS_UPDATE_AUTO_CHECK_INTERVAL_SECS,
+        None => true,
+    }
+}
+
+fn maybe_refresh_update_prefs(prefs: &mut UpdatePrefs, force: bool) -> Option<u64> {
+    let now = current_unix_secs();
+    if !force && !should_auto_check_updates(prefs, now) {
+        return None;
+    }
+    match fetch_update_feed(Duration::from_secs(if force { 10 } else { 5 })) {
+        Ok(feed) => apply_update_feed(prefs, feed, now),
+        Err(e) => {
+            prefs.last_checked_at = Some(now);
+            prefs.last_check_error = Some(e);
+        }
+    }
+    Some(now)
+}
+
 fn update_status_body(prefs: &UpdatePrefs, checked_at: Option<u64>) -> serde_json::Value {
     let current = env!("CARGO_PKG_VERSION");
-    // Honest updater contract: this local build can persist automatic-check
-    // preference and run manual checks today. Installers can set the
-    // TYTUS_UPDATE_* build env vars later to turn the same route into a real
-    // stable-channel update surface without changing the TytusOS UI contract.
-    let latest = option_env!("TYTUS_UPDATE_LATEST_VERSION")
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let latest = prefs.latest_version.as_deref();
     let channel = option_env!("TYTUS_UPDATE_CHANNEL")
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("local");
+        .unwrap_or("stable");
     let status = match latest {
-        Some(v) if v != current => "update_available",
+        Some(v) if is_newer_version(v, current) => "update_available",
         Some(_) => "up_to_date",
         None => "unknown",
     };
+    let release_tag = prefs
+        .latest_release_tag
+        .as_deref()
+        .or_else(|| latest.map(|v| v.trim()).filter(|v| !v.is_empty()));
+    let release_url = release_url_for(release_tag);
+    let install_command = update_install_command();
     let detail = match status {
-        "update_available" => format!("TytusOS {} is available.", latest.unwrap_or(current)),
-        "up_to_date" => format!("TytusOS {} is installed and up to date.", current),
-        _ => "Local build installed. No update feed is configured for this build.".to_string(),
+        "update_available" => format!(
+            "Tytus {} is available. Current installed version is {}.",
+            latest.unwrap_or(current),
+            current
+        ),
+        "up_to_date" => format!("Tytus {} is installed and up to date.", current),
+        _ => prefs
+            .last_check_error
+            .as_ref()
+            .map(|e| format!("Could not check for updates: {}", e))
+            .unwrap_or_else(|| "No update check has run yet. Click Check for updates.".to_string()),
     };
     serde_json::json!({
         "current_version": current,
         "installed_version": current,
         "latest_version": latest,
+        "release_tag": release_tag,
+        "release_url": release_url,
+        "install_url": TYTUS_UPDATE_INSTALL_SH_URL,
+        "install_command": install_command,
+        "can_install": true,
         "channel": channel,
         "status": status,
         "automatic_checks": prefs.automatic_checks,
@@ -10426,14 +10590,17 @@ fn update_status_body(prefs: &UpdatePrefs, checked_at: Option<u64>) -> serde_jso
 }
 
 fn handle_update_status(request: Request) {
-    let prefs = load_update_prefs();
-    respond_json(request, 200, &update_status_body(&prefs, None));
+    let mut prefs = load_update_prefs();
+    let checked_at = maybe_refresh_update_prefs(&mut prefs, false);
+    if checked_at.is_some() {
+        let _ = save_update_prefs(&prefs);
+    }
+    respond_json(request, 200, &update_status_body(&prefs, checked_at));
 }
 
 fn handle_update_check(request: Request) {
     let mut prefs = load_update_prefs();
-    let now = current_unix_secs();
-    prefs.last_checked_at = Some(now);
+    let checked_at = maybe_refresh_update_prefs(&mut prefs, true);
     if let Err(e) = save_update_prefs(&prefs) {
         respond_json(
             request,
@@ -10444,7 +10611,7 @@ fn handle_update_check(request: Request) {
         );
         return;
     }
-    respond_json(request, 200, &update_status_body(&prefs, Some(now)));
+    respond_json(request, 200, &update_status_body(&prefs, checked_at));
 }
 
 #[derive(serde::Deserialize)]
@@ -10461,6 +10628,11 @@ fn handle_update_automatic(mut request: Request) {
     };
     let mut prefs = load_update_prefs();
     prefs.automatic_checks = enabled;
+    let checked_at = if enabled {
+        maybe_refresh_update_prefs(&mut prefs, false)
+    } else {
+        None
+    };
     if let Err(e) = save_update_prefs(&prefs) {
         respond_json(
             request,
@@ -10471,7 +10643,21 @@ fn handle_update_automatic(mut request: Request) {
         );
         return;
     }
-    respond_json(request, 200, &update_status_body(&prefs, None));
+    respond_json(request, 200, &update_status_body(&prefs, checked_at));
+}
+
+fn handle_update_install(request: Request) {
+    let command = update_terminal_command();
+    crate::open_in_terminal_simple(&command);
+    respond_json(
+        request,
+        202,
+        &serde_json::json!({
+            "ok": true,
+            "command": update_install_command(),
+            "message": "Tytus update started in Terminal. Follow the prompts, then relaunch Tytus if needed.",
+        }),
+    );
 }
 
 fn handle_autostart_tunnel(mut request: Request) {
