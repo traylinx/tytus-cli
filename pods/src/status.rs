@@ -16,11 +16,26 @@ pub struct PodStatus {
 #[derive(Debug, Deserialize)]
 pub struct PodEntry {
     pub pod_id: String,
-    pub droplet_id: String,
+    #[serde(default)]
+    pub route_id: Option<String>,
+    #[serde(default)]
+    pub droplet_id: Option<String>,
     pub agent_type: Option<String>,
     pub agent_units: Option<u32>,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub created_at: Option<f64>,
     pub status: Option<String>,
+    #[serde(default)]
+    pub stable_ai_endpoint: Option<String>,
+    #[serde(default)]
+    pub stable_user_key: Option<String>,
+    #[serde(default)]
+    pub edge_public_url: Option<String>,
+    #[serde(default)]
+    pub pod_public_url: Option<String>,
+    #[serde(default)]
+    pub cortex_ready: Option<bool>,
 }
 
 pub async fn get_pod_status(client: &TytusClient) -> atomek_core::Result<PodStatus> {

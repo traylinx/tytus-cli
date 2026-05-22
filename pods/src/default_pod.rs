@@ -15,6 +15,8 @@ use crate::client::TytusClient;
 #[derive(Debug, Deserialize)]
 pub struct DefaultPodAllocation {
     pub pod_id: String,
+    #[serde(default)]
+    pub route_id: Option<String>,
     pub droplet_id: String,
     pub droplet_ip: Option<String>,
     pub wireguard_port: Option<u16>,

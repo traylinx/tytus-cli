@@ -1709,19 +1709,29 @@ async fn ensure_default_pod(
             // and made the tray think the tunnel was down even when
             // boringtun was alive and routing traffic. Reported
             // 2026-04-19 ("tunnel_iface null in state but tunnel works").
+            let alloc_route = alloc.route_id.as_deref();
+            let matches_alloc = |p: &PodEntry| {
+                if let Some(route) = alloc_route {
+                    return p.route_id.as_deref() == Some(route);
+                }
+                p.pod_id == alloc.pod_id && p.agent_type.as_deref().unwrap_or("none") == "none"
+            };
             let preserved_iface = state
                 .pods
                 .iter()
-                .find(|p| p.pod_id == alloc.pod_id)
+                .find(|p| matches_alloc(p))
                 .and_then(|p| p.tunnel_iface.clone());
-            state.pods.retain(|p| p.pod_id != alloc.pod_id);
+            state.pods.retain(|p| !matches_alloc(p));
             state.pods.push(PodEntry {
                 pod_id: alloc.pod_id.clone(),
+                route_id: alloc.route_id.clone(),
                 droplet_id: alloc.droplet_id.clone(),
                 droplet_ip: alloc.droplet_ip.clone(),
                 ai_endpoint: alloc.ai_endpoint.clone(),
                 pod_api_key: alloc.pod_api_key.clone(),
                 agent_type: Some("none".to_string()),
+                agent_units: Some(0),
+                display_name: None,
                 agent_endpoint: None,
                 tunnel_iface: preserved_iface,
                 stable_ai_endpoint: alloc.stable_ai_endpoint.clone(),
@@ -1912,19 +1922,29 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
         match atomek_pods::request_default_pod(&client).await {
             Ok(a) => {
                 target_pod_id = a.pod_id.clone();
+                let alloc_route = a.route_id.as_deref();
+                let matches_alloc = |p: &PodEntry| {
+                    if let Some(route) = alloc_route {
+                        return p.route_id.as_deref() == Some(route);
+                    }
+                    p.pod_id == a.pod_id && p.agent_type.as_deref().unwrap_or("none") == "none"
+                };
                 let preserved_iface = state
                     .pods
                     .iter()
-                    .find(|p| p.pod_id == a.pod_id)
+                    .find(|p| matches_alloc(p))
                     .and_then(|p| p.tunnel_iface.clone());
-                state.pods.retain(|p| p.pod_id != a.pod_id);
+                state.pods.retain(|p| !matches_alloc(p));
                 state.pods.push(PodEntry {
                     pod_id: a.pod_id.clone(),
+                    route_id: a.route_id.clone(),
                     droplet_id: a.droplet_id.clone(),
                     droplet_ip: a.droplet_ip.clone(),
                     ai_endpoint: a.ai_endpoint.clone(),
                     pod_api_key: a.pod_api_key.clone(),
                     agent_type: Some("none".to_string()),
+                    agent_units: Some(0),
+                    display_name: None,
                     agent_endpoint: None,
                     tunnel_iface: preserved_iface,
                     stable_ai_endpoint: a.stable_ai_endpoint.clone(),
@@ -3054,19 +3074,30 @@ async fn cmd_agent_install(
                     // Scalesys stable-reuse returns a slot that had a
                     // live tunnel). See ensure_default_pod for the same
                     // pattern + rationale.
+                    let alloc_route = a.route_id.as_deref();
+                    let alloc_agent = a.agent_type.as_deref().unwrap_or(name);
+                    let matches_alloc = |p: &PodEntry| {
+                        if let Some(route) = alloc_route {
+                            return p.route_id.as_deref() == Some(route);
+                        }
+                        p.pod_id == a.pod_id && p.agent_type.as_deref().unwrap_or("") == alloc_agent
+                    };
                     let preserved_iface = state
                         .pods
                         .iter()
-                        .find(|p| p.pod_id == a.pod_id)
+                        .find(|p| matches_alloc(p))
                         .and_then(|p| p.tunnel_iface.clone());
-                    state.pods.retain(|p| p.pod_id != a.pod_id);
+                    state.pods.retain(|p| !matches_alloc(p));
                     state.pods.push(PodEntry {
                         pod_id: a.pod_id.clone(),
+                        route_id: a.route_id.clone(),
                         droplet_id: a.droplet_id.clone(),
                         droplet_ip: a.droplet_ip.clone(),
                         ai_endpoint: a.ai_endpoint.clone(),
                         pod_api_key: a.pod_api_key.clone(),
                         agent_type: a.agent_type.clone().or_else(|| Some(name.to_string())),
+                        agent_units: a.agent_units,
+                        display_name: None,
                         agent_endpoint: a.agent_endpoint.clone(),
                         tunnel_iface: preserved_iface,
                         stable_ai_endpoint: a.stable_ai_endpoint.clone(),
@@ -9824,40 +9855,77 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
     if let (Some(ref sk), Some(ref auid)) = (&state.secret_key, &state.agent_user_id) {
         let client = atomek_pods::TytusClient::new(http, sk, auid);
         if let Ok(status) = atomek_pods::get_pod_status(&client).await {
-            let server_ids: Vec<String> = status.pods.iter().map(|p| p.pod_id.clone()).collect();
-            // Remove pods no longer on server, but preserve local endpoint data
-            state.pods.retain(|p| server_ids.contains(&p.pod_id));
-            // Reconcile server-owned fields on existing pods. Local state
-            // carries richer client-side data (tunnel_iface, gateway_token),
-            // but agent_type/accounting truth comes from Provider/Scalesys.
+            state
+                .pods
+                .retain(|local| status.pods.iter().any(|remote| cli_pod_matches_status(local, remote)));
+
             for pod in &status.pods {
-                if let Some(existing) = state.pods.iter_mut().find(|p| p.pod_id == pod.pod_id) {
-                    existing.droplet_id = pod.droplet_id.clone();
-                    existing.agent_type = pod.agent_type.clone();
+                if let Some(existing) = state
+                    .pods
+                    .iter_mut()
+                    .find(|local| cli_pod_matches_status(local, pod))
+                {
+                    merge_status_pod(existing, pod);
+                    continue;
                 }
-            }
-            // Add new pods from server (don't overwrite existing entries with richer data)
-            for pod in &status.pods {
-                if !state.pods.iter().any(|p| p.pod_id == pod.pod_id) {
-                    state.pods.push(PodEntry {
-                        pod_id: pod.pod_id.clone(),
-                        droplet_id: pod.droplet_id.clone(),
-                        droplet_ip: None,
-                        ai_endpoint: None,
-                        pod_api_key: None,
-                        agent_type: pod.agent_type.clone(),
-                        agent_endpoint: None,
-                        tunnel_iface: None,
-                        stable_ai_endpoint: None,
-                        stable_user_key: None,
-                        gateway_token: None,
-                        edge_slug: None,
-                        edge_public_url: None,
-                        pod_public_url: None,
-                    });
-                }
+
+                let mut entry = PodEntry {
+                    pod_id: pod.pod_id.clone(),
+                    route_id: pod.route_id.clone(),
+                    droplet_id: pod.droplet_id.clone().unwrap_or_default(),
+                    droplet_ip: None,
+                    ai_endpoint: None,
+                    pod_api_key: None,
+                    agent_type: pod.agent_type.clone(),
+                    agent_units: pod.agent_units,
+                    display_name: pod.display_name.clone(),
+                    agent_endpoint: None,
+                    tunnel_iface: None,
+                    stable_ai_endpoint: None,
+                    stable_user_key: None,
+                    gateway_token: None,
+                    edge_slug: None,
+                    edge_public_url: None,
+                    pod_public_url: None,
+                };
+                merge_status_pod(&mut entry, pod);
+                state.pods.push(entry);
             }
         }
+    }
+}
+
+fn cli_pod_matches_status(local: &PodEntry, remote: &atomek_pods::PodEntry) -> bool {
+    match (local.route_id.as_deref(), remote.route_id.as_deref()) {
+        (Some(a), Some(b)) => return a == b,
+        (Some(_), None) | (None, Some(_)) => return false,
+        (None, None) => {}
+    }
+    local.pod_id == remote.pod_id
+        && local.agent_type.as_deref().unwrap_or("none")
+            == remote.agent_type.as_deref().unwrap_or("none")
+}
+
+fn merge_status_pod(local: &mut PodEntry, remote: &atomek_pods::PodEntry) {
+    local.pod_id = remote.pod_id.clone();
+    local.route_id = remote.route_id.clone();
+    if let Some(did) = remote.droplet_id.clone() {
+        local.droplet_id = did;
+    }
+    local.agent_type = remote.agent_type.clone();
+    local.agent_units = remote.agent_units;
+    local.display_name = remote.display_name.clone();
+    if let Some(v) = remote.stable_ai_endpoint.clone() {
+        local.stable_ai_endpoint = Some(v);
+    }
+    if let Some(v) = remote.stable_user_key.clone() {
+        local.stable_user_key = Some(v);
+    }
+    if let Some(v) = remote.edge_public_url.clone() {
+        local.edge_public_url = Some(v);
+    }
+    if let Some(v) = remote.pod_public_url.clone() {
+        local.pod_public_url = Some(v);
     }
 }
 
@@ -9871,7 +9939,10 @@ fn print_json_status(state: &CliState) {
         .map(|p| {
             serde_json::json!({
                 "pod_id": p.pod_id,
+                "route_id": p.route_id,
                 "agent_type": p.agent_type,
+                "agent_units": p.agent_units,
+                "display_name": p.display_name,
                 "tunnel_iface": p.tunnel_iface,
                 "stable_ai_endpoint": p.stable_ai_endpoint,
                 "stable_user_key": p.stable_user_key,

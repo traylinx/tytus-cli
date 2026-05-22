@@ -62,6 +62,11 @@ fn build_pod_info(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let route_id = p
+        .get("route_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     let stored_edge = p
         .get("edge_public_url")
         .and_then(|v| v.as_str())
@@ -95,11 +100,21 @@ fn build_pod_info(
 
     PodInfo {
         pod_id,
+        route_id,
+        custom_display_name: p
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
         agent_type: p
             .get("agent_type")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        agent_units: p
+            .get("agent_units")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32),
         tunnel_active: p.get("tunnel_iface").and_then(|v| v.as_str()).is_some(),
         stable_ai_endpoint: p
             .get("stable_ai_endpoint")

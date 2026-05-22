@@ -246,8 +246,13 @@ fn menu_signature(s: &TrayState) -> String {
         let fwd_live = existing_ui_forwarder(&p.pod_id).is_some();
         let tun_live = tunnel_reaches_pod(&p.pod_id);
         parts.push(format!(
-            "{}:{}:{}:{}",
-            p.pod_id, p.agent_type, fwd_live as u8, tun_live as u8
+            "{}:{}:{}:{}:{}:{}",
+            p.route_id.as_deref().unwrap_or(&p.pod_id),
+            p.agent_type,
+            p.custom_display_name.as_deref().unwrap_or(""),
+            p.units(),
+            fwd_live as u8,
+            tun_live as u8
         ));
     }
     parts.join("|")
@@ -324,7 +329,10 @@ pub struct TrayState {
 #[derive(Debug, Clone, Default)]
 pub struct PodInfo {
     pub pod_id: String,
+    pub route_id: Option<String>,
+    pub custom_display_name: Option<String>,
     pub agent_type: String,
+    pub agent_units: Option<u32>,
     pub tunnel_active: bool,
     /// Stable AI gateway URL — same across all pods (10.42.42.1:18080).
     /// Populated from the daemon's status response or state.json.
@@ -376,6 +384,9 @@ impl PodInfo {
 
     /// Unit cost — mirrors Scalesys: OpenClaw=1, Hermes=2, included AIL pod=0.
     pub fn units(&self) -> u32 {
+        if let Some(units) = self.agent_units {
+            return units;
+        }
         match self.agent_type.as_str() {
             "hermes" => 2,
             "none" => 0, // agent-less default pod (SPRINT §4.1)
@@ -384,6 +395,14 @@ impl PodInfo {
     }
     /// Human label for menus. Falls back to the raw id if we don't know it.
     pub fn display_name(&self) -> String {
+        if let Some(name) = self.custom_display_name.as_deref().filter(|s| !s.is_empty()) {
+            return match self.agent_type.as_str() {
+                "nemoclaw" => format!("{} · OpenClaw", name),
+                "hermes" => format!("{} · Hermes", name),
+                "none" => name.to_string(),
+                _ => name.to_string(),
+            };
+        }
         // User-facing names. Internal agent_type identifiers (nemoclaw =
         // the OpenClaw backend runtime) stay as
         // the Docker image + Scalesys enum, but the menu always renders

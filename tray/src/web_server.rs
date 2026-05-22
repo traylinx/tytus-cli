@@ -6283,8 +6283,26 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
         );
         return;
     }
+    let (request, body) = match parse_json_body::<LocalAgentChatBody>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({ "error": "invalid_input", "message": e }),
+            );
+            return;
+        }
+    };
+    let route_id = safe_route_id(body.route_id);
     let snap = compute_state_snapshot();
-    let Some(slot) = snap.agents.iter().find(|p| p.pod_id == pod_id) else {
+    let Some(slot) = snap.agents.iter().find(|p| {
+        if let Some(route_id) = route_id.as_deref() {
+            p.route_id.as_deref() == Some(route_id)
+        } else {
+            p.pod_id == pod_id
+        }
+    }) else {
         respond_json(
             request,
             404,
@@ -6300,18 +6318,6 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
         );
         return;
     }
-
-    let (request, body) = match parse_json_body::<LocalAgentChatBody>(request) {
-        Ok(v) => v,
-        Err((request, e)) => {
-            respond_json(
-                request,
-                400,
-                &serde_json::json!({ "error": "invalid_input", "message": e }),
-            );
-            return;
-        }
-    };
     let Some(message) = normalize_chat_message(&body.message) else {
         respond_json(
             request,
@@ -6338,7 +6344,6 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
 
     let stream_flag = body.stream.unwrap_or(true);
     let session_id = safe_session_id(body.session_id);
-    let route_id = safe_route_id(body.route_id);
     let agent_mode = safe_agent_mode(body.agent_mode);
     let app_id = safe_app_id(body.app_id);
     let model_preference = safe_model_preference(body.model_preference);
@@ -6405,8 +6410,8 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
             let payload = serde_json::json!({
                 "client_id": client_id,
                 "pod_id": pod_id,
-                "route_id": synthesized_route_id,
-                "agent_type": "nemoclaw",
+                "route_id": route_id.unwrap_or(synthesized_route_id),
+                "agent_type": slot.agent_type.clone(),
                 "session_id": session_id,
                 "message": message,
                 "stream": stream_flag,
@@ -6799,8 +6804,26 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
         );
         return;
     }
+    let (request, body) = match parse_json_body::<LocalAgentChatBody>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({ "error": "invalid_input", "message": e }),
+            );
+            return;
+        }
+    };
+    let route_id = safe_route_id(body.route_id);
     let snap = compute_state_snapshot();
-    let Some(slot) = snap.agents.iter().find(|p| p.pod_id == pod_id) else {
+    let Some(slot) = snap.agents.iter().find(|p| {
+        if let Some(route_id) = route_id.as_deref() {
+            p.route_id.as_deref() == Some(route_id)
+        } else {
+            p.pod_id == pod_id
+        }
+    }) else {
         respond_json(
             request,
             404,
@@ -6817,18 +6840,6 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
         return;
     }
     let agent_type = slot.agent_type.clone();
-
-    let (request, body) = match parse_json_body::<LocalAgentChatBody>(request) {
-        Ok(v) => v,
-        Err((request, e)) => {
-            respond_json(
-                request,
-                400,
-                &serde_json::json!({ "error": "invalid_input", "message": e }),
-            );
-            return;
-        }
-    };
     let Some(message) = normalize_chat_message(&body.message) else {
         respond_json(
             request,
@@ -6862,7 +6873,7 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
     let payload = serde_json::json!({
         "model": "ail-compound",
         "app_id": safe_app_id(body.app_id),
-        "route_id": safe_route_id(body.route_id),
+        "route_id": route_id,
         "messages": [
             {
                 "role": "system",
@@ -10713,14 +10724,26 @@ async fn ensure_default_pod_json(client: &atomek_pods::TytusClient, root: &mut s
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let alloc_route = alloc.route_id.as_deref();
+    let matches_alloc = |p: &serde_json::Value| {
+        if let Some(route) = alloc_route {
+            return p.get("route_id").and_then(|v| v.as_str()) == Some(route);
+        }
+        p.get("pod_id").and_then(|v| v.as_str()) == Some(alloc.pod_id.as_str())
+            && p
+                .get("agent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                == "none"
+    };
     let preserved_iface = pods
         .iter()
-        .find(|p| p.get("pod_id").and_then(|v| v.as_str()) == Some(alloc.pod_id.as_str()))
+        .find(|p| matches_alloc(p))
         .and_then(|p| p.get("tunnel_iface").cloned());
-    pods.retain(|p| p.get("pod_id").and_then(|v| v.as_str()) != Some(alloc.pod_id.as_str()));
+    pods.retain(|p| !matches_alloc(p));
     let mut pod = serde_json::json!({
         "pod_id": alloc.pod_id,
-        "route_id": null,
+        "route_id": alloc.route_id,
         "droplet_id": alloc.droplet_id,
         "droplet_ip": alloc.droplet_ip,
         "ai_endpoint": alloc.ai_endpoint,

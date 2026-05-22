@@ -124,6 +124,10 @@ pub fn cortex_profile_is_local(profile: &Option<String>) -> bool {
 pub struct PodEntry {
     #[serde(default)]
     pub pod_id: String,
+    /// Provider route identity. Pod numbers are only unique per droplet;
+    /// route_id is globally unique for Traylinx/Tytus UI and chat routing.
+    #[serde(default)]
+    pub route_id: Option<String>,
     #[serde(default)]
     pub droplet_id: String,
     #[serde(default)]
@@ -134,6 +138,10 @@ pub struct PodEntry {
     pub pod_api_key: Option<String>,
     #[serde(default)]
     pub agent_type: Option<String>,
+    #[serde(default)]
+    pub agent_units: Option<u32>,
+    #[serde(default)]
+    pub display_name: Option<String>,
     #[serde(default)]
     pub agent_endpoint: Option<String>,
     #[serde(default)]
