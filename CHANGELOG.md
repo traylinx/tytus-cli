@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.7.1 — 2026-05-22
+
+Sprint: `docs/sprints/tytus-account-aware-detection-2026-05-22/`.
+
+### Headline
+
+**Account-aware Tytus OS detection.** The tray daemon now exposes `GET /api/whoami` so traylinx.com can tell whether the Tytus OS install on this machine is paired to *your* account (not your friend's), and whether you're signed in at all. Web admin uses the answer to swap the install banner for "Open in Tytus OS" / "switch accounts" / "almost there — run `tytus login`" depending on state.
+
+### Added
+
+- New tray-daemon endpoint `GET /api/whoami` returning `{user_id, device_session_id, organization_id, status, version, hostname_label}`. Status is `ready` / `unpaired` / `degraded` based on stored token freshness. CORS allowlist limited to `https://traylinx.com`; Host header validated against the loopback allowlist `{localhost:4242, 127.0.0.1:4242, [::1]:4242}` as DNS-rebinding defense. Forbidden fields (`email`, `access_token`, `pod_count`, `secret_key`) explicitly excluded — covered by a unit test.
+- `OPTIONS /api/whoami` CORS preflight handler.
+- `CliState` and `AccountProfile` gain `device_session_id: Option<i64>`, persisted into `state.json` from the device-code grant response and propagated through token refresh (preserves the old value when a refresh response omits it — see D12 of the sprint).
+- Unit test `whoami_bind_is_loopback` asserts the bind constant resolves to `IpAddr::is_loopback()` — a future refactor that switches to `0.0.0.0` fails this test before reaching CI.
+
+### Security
+
+- Loopback-only bind contract is now test-enforced (D11 of the sprint). Code comment at the bind constant documents the rationale and the test name.
+- The whoami response shape was reviewed for PII surface — only an opaque `device_session_id` (server-issued integer) and a truncated, hyphen-suffixed hostname label (e.g. `MacBook-Air`) are returned; no email, no tokens, no secrets, no raw hostname.
+
+### Compatibility
+
+- Pre-v0.7.1 installs without `device_session_id` in their `state.json` still load — the field is `#[serde(default)]`.
+- traylinx.com's web hook falls back to the legacy favicon probe when whoami returns 404, so users running an older installed binary continue to work until they upgrade.
+
 ## v0.7.0 — 2026-05-22
 
 Sprint: `services/tytus-os/development/sprints/2026-05-21-chat-with-pods-local-cortex-parity/`.
