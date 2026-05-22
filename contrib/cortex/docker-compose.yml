@@ -1,0 +1,135 @@
+# Local Tytus Cortex stack — bundled with tytus-cli.
+#
+# This file is dropped into the user's data directory by `tytus cortex up`
+# (typically ~/Library/Application Support/tytus/cortex/docker-compose.yml on
+# macOS). The CLI shells out to `docker compose -f <that_path> up -d`.
+#
+# Required env vars (read from a co-located .env file or process env):
+#   - POSTGRES_PASSWORD          random per-user (auto-generated on install)
+#   - ENCRYPTION_KEY             random per-user (auto-generated on install)
+#   - INTERNAL_SERVICE_TOKEN     random per-user (auto-generated on install)
+#                                The tray daemon reads this from state.json
+#                                to call /tytus/chat. NEVER user-visible.
+#   - CORTEX_IMAGE_TAG           pinned tag baked by tytus-cli release.
+#                                Override via `tytus cortex up --pin <tag>`.
+#   - CORTEX_HOST_PORT           default 8098. Override via
+#                                `tytus cortex up --port <p>`.
+#   - SWITCH_AI_API_KEY          OPTIONAL. If set, Cortex uses this as the
+#                                fallback AIL key when no per-request key is
+#                                supplied. Local SwitchAILocal usually
+#                                doesn't need it.
+#
+# Image source: ghcr.io/traylinx/tytus-cortex:<tag>
+# CROSS-REPO DEPENDENCY: this image must be published from
+# services/tytus-cortex/. See `06-OPEN-QUESTIONS.md` Q18 for status.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: tytus-cortex-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: cortex_db
+    volumes:
+      - tytus_cortex_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortex_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: tytus-cortex-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - tytus_cortex_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  cortex:
+    # Published image — see CROSS-REPO DEPENDENCY note above.
+    image: ghcr.io/traylinx/tytus-cortex:${CORTEX_IMAGE_TAG:-2026-05-17}
+    container_name: tytus-cortex
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Operating mode — flips Tytus-specific routes on.
+      TYTUS_CORTEX_MODE: "true"
+      APP_NAME: "Tytus Cortex (local)"
+
+      # Database connections.
+      DATABASE_URL: "postgresql+asyncpg://cortex:${POSTGRES_PASSWORD}@postgres:5432/cortex_db"
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://redis:6379/1"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/2"
+      DATABASE_POOL_SIZE: "5"
+      DATABASE_MAX_OVERFLOW: "10"
+
+      # Secrets — auto-generated per-user on install.
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?set ENCRYPTION_KEY}"
+      INTERNAL_SERVICE_TOKEN: "${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}"
+
+      # Point at the user's local SwitchAILocal on the host machine.
+      # SwitchAILocal binds 127.0.0.1:18080 by default; from inside the
+      # container, host.docker.internal resolves to that.
+      #
+      # The `/v1` suffix is REQUIRED — LiteLLM's openai provider appends
+      # `/chat/completions` and `/embeddings` to the configured base
+      # without re-adding `/v1`. Without the suffix we hit
+      # /chat/completions on SwitchAILocal which 404s. Dogfood F8.
+      LLM_BASE_URL: "http://host.docker.internal:18080/v1"
+      EMBEDDING_BASE_URL: "http://host.docker.internal:18080/v1"
+      SWITCH_AI_API_KEY: "${SWITCH_AI_API_KEY:-}"
+
+      # Model aliases — match what local SwitchAILocal advertises.
+      # Production droplets configure ail-fast / ail-compound / ail-balanced /
+      # ail-embed via the AIL config layer; a fresh local SwitchAILocal exposes
+      # switchai-fast / switchai-chat / switchai-reasoner / switchai-embed
+      # directly. Override these env vars at install time if your gateway
+      # uses different names — see `tytus cortex up --help`. Dogfood F7
+      # (2026-05-22) caught the ail-* assumption.
+      MODEL_FAST: "${TYTUS_CORTEX_MODEL_FAST:-switchai-fast}"
+      MODEL_BALANCED: "${TYTUS_CORTEX_MODEL_BALANCED:-switchai-chat}"
+      MODEL_POWERFUL: "${TYTUS_CORTEX_MODEL_POWERFUL:-switchai-reasoner}"
+      EMBEDDING_MODEL: "${TYTUS_CORTEX_EMBEDDING_MODEL:-switchai-embed}"
+      EMBEDDING_DIMENSIONS: "1024"
+
+      # Brain-mode escape hatch. `test://local` tells Cortex's
+      # `_resolve_runtime` to skip the DAM lookup and use the env-level
+      # SWITCH_AI_API_KEY + LLM_BASE_URL directly. Without this, every
+      # local chat fails with `dam_unreachable` even when chat_target=brain
+      # (the audit confirmed Cortex resolves runtime BEFORE branching on
+      # chat_target). Mode 2b will replace this with a real DAM proxy URL.
+      DAM_BASE_URL: "test://local"
+
+      CORS_ALLOW_ORIGINS: "http://127.0.0.1"
+      LOG_LEVEL: "INFO"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # Bind to loopback only — local Cortex must never be reachable from
+      # other machines on the network.
+      - "127.0.0.1:${CORTEX_HOST_PORT:-8098}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health/live\").read()' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+volumes:
+  tytus_cortex_postgres:
+    name: tytus_cortex_postgres
+  tytus_cortex_redis:
+    name: tytus_cortex_redis

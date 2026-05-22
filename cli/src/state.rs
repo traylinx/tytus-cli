@@ -61,6 +61,47 @@ pub struct CliState {
     pub tier: Option<String>,
     #[serde(default)]
     pub pods: Vec<PodEntry>,
+
+    // ------------------------------------------------------------------
+    // Local Cortex (sprint: 2026-05-21-chat-with-pods-local-cortex-parity).
+    // All fields default to None / "cloud" so v0.6.x state files load
+    // unchanged. Tray daemon reads `cortex_profile` to pick the chat upstream.
+    // ------------------------------------------------------------------
+    /// `None` (default) | Some("cloud") | Some("local"). Drives
+    /// `/api/pods/{NN}/cortex/chat` upstream resolution in the tray daemon.
+    /// `None` is treated identically to "cloud" by the daemon — kept
+    /// optional so older state.json files load unchanged.
+    #[serde(default)]
+    pub cortex_profile: Option<String>,
+    /// Per-user `ctx_*` token minted by local Cortex `POST /v1/users`.
+    /// Used for `/v1/*` user-scoped endpoints only — NOT for `/tytus/chat`
+    /// (that uses `cortex_internal_service_token`).
+    #[serde(default)]
+    pub cortex_local_token: Option<String>,
+    /// UUID generated on first local Cortex enable. Identifies the local
+    /// Cortex user across token rotations.
+    #[serde(default)]
+    pub cortex_local_user_id: Option<String>,
+    /// Service-to-service shared secret mirrored from the local Cortex
+    /// docker-compose env (`INTERNAL_SERVICE_TOKEN`). The tray daemon
+    /// presents it on `/tytus/chat` calls. Never user-visible.
+    #[serde(default)]
+    pub cortex_internal_service_token: Option<String>,
+    /// Host port the local Cortex API binds to (default 8098).
+    #[serde(default)]
+    pub cortex_local_port: Option<u16>,
+    /// Pinned Cortex image tag for the local install. Bumped via
+    /// `tytus cortex upgrade`.
+    #[serde(default)]
+    pub cortex_local_version_pinned: Option<String>,
+    /// ISO 8601 timestamp of the most recent successful `cortex up`.
+    #[serde(default)]
+    pub cortex_local_started_at: Option<String>,
+}
+
+/// Canonical reading of `cortex_profile` — None and "cloud" both mean cloud.
+pub fn cortex_profile_is_local(profile: &Option<String>) -> bool {
+    matches!(profile.as_deref(), Some("local"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

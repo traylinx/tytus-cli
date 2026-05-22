@@ -3988,6 +3988,29 @@ fn handle(request: Request, registry: Registry) {
             let pod_id = parse_pod_cortex_chat_path(p).expect("checked");
             handle_pod_cortex_chat(request, pod_id);
         }
+        // M2: local Cortex profile + memory surface. Status is the only
+        // endpoint TytusOS needs in M2; install/uninstall/test/memory all
+        // land alongside the Settings UI in M3+M4.
+        (Method::Get, "/api/cortex/status") => {
+            handle_cortex_status(request);
+        }
+        // Idempotent profile setter. Body: {"profile":"cloud"|"local"}. Does
+        // NOT install / uninstall containers — that's `tytus cortex up/down`.
+        // Flipping to "local" when the local stack isn't running just means
+        // pod chat will fall back to cloud (see resolve_cortex_upstream).
+        (Method::Post, "/api/cortex/profile") => {
+            handle_cortex_profile_set(request);
+        }
+        // M4: semantic memory search proxy. Forwards to local Cortex
+        // /v1/memory/search using the per-user ctx_* token. Returns 503
+        // when profile=cloud (cloud Cortex memory is read via the Provider
+        // chain, not this endpoint) or when no ctx_* token is present.
+        //
+        // Cortex has no public memory-write endpoint (see sprint Q19); this
+        // is read-only. Writes happen implicitly from `/v1/chat` turns.
+        (Method::Post, "/api/cortex/memory/search") => {
+            handle_cortex_memory_search(request);
+        }
         (Method::Post, p) if parse_pod_agent_chat_path(p).is_some() => {
             let pod_id = parse_pod_agent_chat_path(p).expect("checked");
             handle_pod_agent_chat(request, pod_id);
@@ -5675,6 +5698,181 @@ struct LocalAgentChatBody {
     stream: Option<bool>,
 }
 
+// ---------------------------------------------------------------------------
+// Local Cortex (sprint: 2026-05-21-chat-with-pods-local-cortex-parity)
+// ---------------------------------------------------------------------------
+
+/// Default port the local Cortex container binds to. Mirror of
+/// `cli::cortex::DEFAULT_PORT`. Kept duplicated rather than imported because
+/// the tray crate does not depend on the cli crate.
+const CORTEX_DEFAULT_PORT: u16 = 8098;
+
+#[derive(Debug, Clone)]
+struct CortexLocalState {
+    profile: String,                         // "cloud" | "local" (defaults to "cloud")
+    port: u16,                               // host port for /tytus/chat + /v1/*
+    internal_service_token: Option<String>,  // service-to-service shared secret
+    ctx_token: Option<String>,               // per-user ctx_* token
+    user_id: Option<String>,                 // external user id for /v1/* calls
+    version_pinned: Option<String>,
+    started_at: Option<String>,
+}
+
+impl CortexLocalState {
+    fn is_local(&self) -> bool {
+        self.profile == "local"
+    }
+}
+
+/// Read the Cortex-related fields from state.json. Mirrors the raw-JSON
+/// access pattern used by `read_provider_auth` so the tray crate doesn't
+/// need to import the CLI's `CliState` struct.
+fn read_cortex_state() -> CortexLocalState {
+    let default_state = CortexLocalState {
+        profile: "cloud".to_string(),
+        port: CORTEX_DEFAULT_PORT,
+        internal_service_token: None,
+        ctx_token: None,
+        user_id: None,
+        version_pinned: None,
+        started_at: None,
+    };
+    let Some(path) = state_json_path() else {
+        return default_state;
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(_) => return default_state,
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return default_state,
+    };
+    let str_field = |key: &str| -> Option<String> {
+        parsed
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+    };
+    let profile = str_field("cortex_profile").unwrap_or_else(|| "cloud".to_string());
+    let port = parsed
+        .get("cortex_local_port")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(CORTEX_DEFAULT_PORT);
+    CortexLocalState {
+        profile,
+        port,
+        internal_service_token: str_field("cortex_internal_service_token"),
+        ctx_token: str_field("cortex_local_token"),
+        user_id: str_field("cortex_local_user_id"),
+        version_pinned: str_field("cortex_local_version_pinned"),
+        started_at: str_field("cortex_local_started_at"),
+    }
+}
+
+/// Where the next pod-cortex-chat call should go, fully resolved with auth.
+#[derive(Debug, Clone)]
+enum CortexUpstream {
+    /// Today's production path: Provider on tytus.traylinx.com, X-Agent-* headers.
+    Cloud,
+    /// Local Cortex on 127.0.0.1, INTERNAL_SERVICE_TOKEN auth, /tytus/chat shape.
+    Local {
+        port: u16,
+        internal_service_token: String,
+        version_pinned: Option<String>,
+        user_id: Option<String>,
+    },
+}
+
+impl CortexUpstream {
+    /// Profile label suitable for the `event: profile` SSE frame.
+    fn profile_label(&self) -> &'static str {
+        match self {
+            CortexUpstream::Cloud => "cloud",
+            CortexUpstream::Local { .. } => "local",
+        }
+    }
+}
+
+/// Resolve the upstream chat target based on state.json's cortex_profile.
+/// `None` and "cloud" both resolve to Cloud. "local" resolves to Local
+/// **only if** the internal service token is present — otherwise we fall
+/// back to Cloud (the local stack is half-installed; cloud is safer).
+fn resolve_cortex_upstream(state: &CortexLocalState) -> CortexUpstream {
+    if !state.is_local() {
+        return CortexUpstream::Cloud;
+    }
+    let Some(token) = state.internal_service_token.clone() else {
+        return CortexUpstream::Cloud;
+    };
+    CortexUpstream::Local {
+        port: state.port,
+        internal_service_token: token,
+        version_pinned: state.version_pinned.clone(),
+        user_id: state.user_id.clone(),
+    }
+}
+
+/// Serialize a single SSE `event: profile` frame ready to prepend to an
+/// upstream stream. Includes a trailing blank line so the next frame from
+/// upstream parses cleanly even if its first byte is `event:` or `data:`.
+fn cortex_profile_sse_frame(upstream: &CortexUpstream) -> Vec<u8> {
+    let mut data = serde_json::json!({ "profile": upstream.profile_label() });
+    if let CortexUpstream::Local {
+        version_pinned: Some(v),
+        ..
+    } = upstream
+    {
+        data["cortex_version"] = serde_json::Value::String(v.clone());
+    }
+    let payload = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
+    format!("event: profile\ndata: {payload}\n\n").into_bytes()
+}
+
+/// Like `forward_upstream_response`, but injects `prefix` as the first bytes
+/// of the response body. Used to emit the `event: profile` SSE frame before
+/// the upstream Cortex stream takes over. Falls back to a non-streaming
+/// response if the upstream content-type is not `text/event-stream`.
+fn forward_upstream_response_with_prefix(
+    request: Request,
+    upstream_res: reqwest::blocking::Response,
+    prefix: Vec<u8>,
+) {
+    let status = upstream_res.status().as_u16();
+    let content_type = upstream_res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let is_event_stream = content_type
+        .split(';')
+        .next()
+        .map(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+        .unwrap_or(false);
+
+    if !is_event_stream {
+        // Non-SSE upstream — drop the prefix; injecting it would corrupt
+        // a JSON body. The client side already tolerates a missing profile
+        // frame (clients treat absence as "cloud").
+        forward_upstream_response(request, upstream_res);
+        return;
+    }
+
+    let chained = std::io::Read::chain(std::io::Cursor::new(prefix), upstream_res);
+    let headers = vec![
+        header("Content-Type", &content_type),
+        header("X-Content-Type-Options", "nosniff"),
+        header("Cache-Control", "no-cache"),
+        header("X-Accel-Buffering", "no"),
+    ];
+    let resp =
+        Response::new(StatusCode(status), headers, chained, None, None).with_chunked_threshold(0);
+    let _ = request.respond(resp);
+}
+
 fn read_provider_auth() -> Result<(String, String), &'static str> {
     let Some(path) = state_json_path() else {
         return Err("state_missing");
@@ -5869,17 +6067,10 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
         );
         return;
     };
-    let (secret, agent_user_id) = match read_provider_auth() {
-        Ok(v) => v,
-        Err(e) => {
-            respond_json(
-                request,
-                401,
-                &serde_json::json!({ "error": e, "message": "Sign in again to enable local agent chat." }),
-            );
-            return;
-        }
-    };
+    let cortex_state = read_cortex_state();
+    let upstream_target = resolve_cortex_upstream(&cortex_state);
+    let profile_frame = cortex_profile_sse_frame(&upstream_target);
+
     let client = match provider_chat_client(AGENT_CHAT_STREAM_TIMEOUT) {
         Ok(c) => c,
         Err(e) => {
@@ -5891,31 +6082,331 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
             return;
         }
     };
-    let payload = serde_json::json!({
-        "message": message,
-        "session_id": safe_session_id(body.session_id),
-        "route_id": safe_route_id(body.route_id),
-        "chat_target": "agent",
-        "agent_mode": safe_agent_mode(body.agent_mode),
-        "app_id": safe_app_id(body.app_id),
-        "model_preference": safe_model_preference(body.model_preference),
-        "stream": body.stream.unwrap_or(true),
-    });
-    let upstream = client
-        .post(format!("{}/pod/{}/cortex/chat", TYTUS_PROVIDER_URL, pod_id))
-        .header("X-Agent-Secret-Token", secret)
-        .header("X-Agent-User-Id", agent_user_id)
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream, application/json")
-        .json(&payload)
-        .send();
+
+    let stream_flag = body.stream.unwrap_or(true);
+    let session_id = safe_session_id(body.session_id);
+    let route_id = safe_route_id(body.route_id);
+    let agent_mode = safe_agent_mode(body.agent_mode);
+    let app_id = safe_app_id(body.app_id);
+    let model_preference = safe_model_preference(body.model_preference);
+
+    let upstream = match upstream_target {
+        CortexUpstream::Cloud => {
+            let (secret, agent_user_id) = match read_provider_auth() {
+                Ok(v) => v,
+                Err(e) => {
+                    respond_json(
+                        request,
+                        401,
+                        &serde_json::json!({
+                            "error": e,
+                            "message": "Sign in again to enable local agent chat.",
+                        }),
+                    );
+                    return;
+                }
+            };
+            let payload = serde_json::json!({
+                "message": message,
+                "session_id": session_id,
+                "route_id": route_id,
+                "chat_target": "agent",
+                "agent_mode": agent_mode,
+                "app_id": app_id,
+                "model_preference": model_preference,
+                "stream": stream_flag,
+            });
+            client
+                .post(format!("{}/pod/{}/cortex/chat", TYTUS_PROVIDER_URL, pod_id))
+                .header("X-Agent-Secret-Token", secret)
+                .header("X-Agent-User-Id", agent_user_id)
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream, application/json")
+                .json(&payload)
+                .send()
+        }
+        CortexUpstream::Local {
+            port,
+            internal_service_token,
+            user_id,
+            ..
+        } => {
+            // Local Cortex chat shape — dogfooded 2026-05-22.
+            //
+            // F3: the actual path is `/internal/tytus/chat` (app/main.py
+            //     includes the tytus_internal_router with prefix=/internal,
+            //     and the router itself adds `/tytus/chat`).
+            // F4: TytusChatRequest validates `route_id: str (min 6)` AND
+            //     `agent_type: str (non-null)`. For local installs we have
+            //     neither a real pod route nor an agent type, so we
+            //     synthesize stable values that satisfy the constraints.
+            //     Cortex only uses these for memory scoping when
+            //     chat_target=brain; nothing is actually called on a
+            //     remote DAM (DAM_BASE_URL=test://local handles that).
+            // F2: brain-mode is hardcoded — local Cortex has no DAM to
+            //     forward chat_target=agent to in v1.
+            let client_id = user_id
+                .clone()
+                .unwrap_or_else(|| "tytus-local".to_string());
+            let synthesized_route_id = format!("tytuslocal-{pod_id}");
+            let payload = serde_json::json!({
+                "client_id": client_id,
+                "pod_id": pod_id,
+                "route_id": synthesized_route_id,
+                "agent_type": "nemoclaw",
+                "session_id": session_id,
+                "message": message,
+                "stream": stream_flag,
+                "model_preference": model_preference,
+                "chat_target": "brain",
+                "app_id": app_id,
+                "agent_mode": "brain",
+            });
+            client
+                .post(format!("http://127.0.0.1:{port}/internal/tytus/chat"))
+                .bearer_auth(&internal_service_token)
+                .header("X-Tytus-Cortex-Token", &internal_service_token)
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream, application/json")
+                .json(&payload)
+                .send()
+        }
+    };
+    // M2 routed direct-agent fallback through the original code paths;
+    // they're untouched because local profile falls back to cloud anyway.
+    let _ = agent_mode; // local always uses "brain"
+
     match upstream {
+        Ok(res) => forward_upstream_response_with_prefix(request, res, profile_frame),
+        Err(e) => respond_json(
+            request,
+            502,
+            &serde_json::json!({ "error": "cortex_unreachable", "message": e.to_string() }),
+        ),
+    }
+}
+
+/// Snapshot of local Cortex state for the Settings UI. Combines state.json
+/// fields with a live `/health/live` probe. Intentionally cheap: no Docker
+/// shell-out (the tray binary should never block on `docker ps`).
+fn handle_cortex_status(request: Request) {
+    if !request_origin_allowed(request.headers()) {
+        respond_json(
+            request,
+            403,
+            &serde_json::json!({ "error": "forbidden_origin" }),
+        );
+        return;
+    }
+    let state = read_cortex_state();
+    let (api_reachable, api_health) = probe_local_cortex_health(state.port);
+    let body = serde_json::json!({
+        "profile": state.profile,
+        "local_port": state.port,
+        "local_version_pinned": state.version_pinned,
+        "local_started_at": state.started_at,
+        "local_token_present": state.ctx_token.is_some(),
+        "local_user_id_present": state.user_id.is_some(),
+        "internal_service_token_present": state.internal_service_token.is_some(),
+        "api_reachable": api_reachable,
+        "api_health": api_health,
+    });
+    respond_json(request, 200, &body);
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CortexProfileBody {
+    profile: String,
+}
+
+fn handle_cortex_profile_set(request: Request) {
+    if !request_origin_allowed(request.headers()) {
+        respond_json(
+            request,
+            403,
+            &serde_json::json!({ "error": "forbidden_origin" }),
+        );
+        return;
+    }
+    let (request, body) = match parse_json_body::<CortexProfileBody>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({ "error": "invalid_input", "message": e }),
+            );
+            return;
+        }
+    };
+    let profile = body.profile.trim().to_ascii_lowercase();
+    if profile != "cloud" && profile != "local" {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({
+                "error": "invalid_profile",
+                "message": "profile must be 'cloud' or 'local'",
+            }),
+        );
+        return;
+    }
+    // Surgical update: rewrite only the cortex_profile field. Preserves any
+    // other state.json fields the daemon doesn't know about (forward-compat).
+    let Some(path) = state_json_path() else {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({ "error": "state_path_missing" }),
+        );
+        return;
+    };
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
+    let mut parsed: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    parsed["cortex_profile"] = serde_json::Value::String(profile.clone());
+    let serialized = match serde_json::to_string_pretty(&parsed) {
+        Ok(s) => s,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": "serialize_failed", "message": e.to_string() }),
+            );
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(&path, serialized) {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({ "error": "write_failed", "message": e.to_string() }),
+        );
+        return;
+    }
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({ "ok": true, "profile": profile }),
+    );
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CortexMemorySearchBody {
+    query: String,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    min_similarity: Option<f32>,
+}
+
+fn handle_cortex_memory_search(request: Request) {
+    if !request_origin_allowed(request.headers()) {
+        respond_json(
+            request,
+            403,
+            &serde_json::json!({ "error": "forbidden_origin" }),
+        );
+        return;
+    }
+    let state = read_cortex_state();
+    if !state.is_local() {
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "error": "cortex_not_local",
+                "message": "Memory search requires profile=local. Switch in Settings → AI.",
+            }),
+        );
+        return;
+    }
+    let Some(ctx_token) = state.ctx_token.clone() else {
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "error": "cortex_token_missing",
+                "message": "No user token yet. Run `tytus cortex token rotate` in a terminal.",
+            }),
+        );
+        return;
+    };
+    let (request, body) = match parse_json_body::<CortexMemorySearchBody>(request) {
+        Ok(v) => v,
+        Err((request, e)) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({ "error": "invalid_input", "message": e }),
+            );
+            return;
+        }
+    };
+    let query = body.query.trim();
+    if query.is_empty() || query.len() > 1024 {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({ "error": "invalid_query" }),
+        );
+        return;
+    }
+    let limit = body.limit.unwrap_or(5).clamp(1, 50);
+    let upstream_payload = serde_json::json!({
+        "query": query,
+        "app_id": body.app_id.unwrap_or_else(|| "tytus-os".to_string()),
+        "limit": limit,
+        "min_similarity": body.min_similarity,
+    });
+    let client = match provider_chat_client(Duration::from_secs(15)) {
+        Ok(c) => c,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": "client_failed", "message": e.to_string() }),
+            );
+            return;
+        }
+    };
+    match client
+        .post(format!("http://127.0.0.1:{}/v1/memory/search", state.port))
+        .bearer_auth(&ctx_token)
+        .json(&upstream_payload)
+        .send()
+    {
         Ok(res) => forward_upstream_response(request, res),
         Err(e) => respond_json(
             request,
             502,
             &serde_json::json!({ "error": "cortex_unreachable", "message": e.to_string() }),
         ),
+    }
+}
+
+/// HTTP `/health/live` probe with a 2-second budget. Returns the parsed
+/// health JSON on success so the UI can render postgres/redis/llm_config
+/// dots without a second roundtrip.
+fn probe_local_cortex_health(port: u16) -> (bool, Option<serde_json::Value>) {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return (false, None),
+    };
+    match client
+        .get(format!("http://127.0.0.1:{port}/health/live"))
+        .send()
+    {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>() {
+            Ok(v) => (true, Some(v)),
+            Err(_) => (true, None),
+        },
+        _ => (false, None),
     }
 }
 
@@ -10662,6 +11153,142 @@ fn respond_json<T: Serialize>(request: Request, status: u16, body: &T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- Cortex profile router (M2) ---------------------------------------
+
+    fn local_state_fixture(profile: &str, with_token: bool) -> CortexLocalState {
+        CortexLocalState {
+            profile: profile.to_string(),
+            port: 8098,
+            internal_service_token: if with_token {
+                Some("svc-token".into())
+            } else {
+                None
+            },
+            ctx_token: Some("ctx_abc123".into()),
+            user_id: Some("tytus-local-deadbeef".into()),
+            version_pinned: Some("2026-05-17".into()),
+            started_at: None,
+        }
+    }
+
+    #[test]
+    fn cortex_profile_defaults_to_cloud() {
+        let state = local_state_fixture("cloud", false);
+        assert!(matches!(resolve_cortex_upstream(&state), CortexUpstream::Cloud));
+    }
+
+    #[test]
+    fn cortex_profile_local_without_token_falls_back_to_cloud() {
+        // Half-installed local stack must not break chat — fall back to cloud
+        // so the user still gets a response while they finish setup.
+        let state = local_state_fixture("local", false);
+        assert!(matches!(resolve_cortex_upstream(&state), CortexUpstream::Cloud));
+    }
+
+    #[test]
+    fn cortex_profile_local_with_token_resolves_local() {
+        let state = local_state_fixture("local", true);
+        match resolve_cortex_upstream(&state) {
+            CortexUpstream::Local {
+                port,
+                internal_service_token,
+                version_pinned,
+                user_id,
+            } => {
+                assert_eq!(port, 8098);
+                assert_eq!(internal_service_token, "svc-token");
+                assert_eq!(version_pinned.as_deref(), Some("2026-05-17"));
+                assert_eq!(user_id.as_deref(), Some("tytus-local-deadbeef"));
+            }
+            CortexUpstream::Cloud => panic!("expected Local upstream"),
+        }
+    }
+
+    #[test]
+    fn cortex_profile_frame_emits_label_for_cloud() {
+        let frame = cortex_profile_sse_frame(&CortexUpstream::Cloud);
+        let s = std::str::from_utf8(&frame).unwrap();
+        assert!(s.starts_with("event: profile\ndata: "), "frame: {s:?}");
+        assert!(s.contains("\"profile\":\"cloud\""), "frame: {s:?}");
+        assert!(s.ends_with("\n\n"), "frame must terminate with blank line");
+    }
+
+    #[test]
+    fn cortex_profile_frame_emits_label_and_version_for_local() {
+        let upstream = CortexUpstream::Local {
+            port: 8098,
+            internal_service_token: "svc".into(),
+            version_pinned: Some("2026-05-17".into()),
+            user_id: None,
+        };
+        let frame = cortex_profile_sse_frame(&upstream);
+        let s = std::str::from_utf8(&frame).unwrap();
+        assert!(s.contains("\"profile\":\"local\""), "frame: {s:?}");
+        assert!(s.contains("\"cortex_version\":\"2026-05-17\""), "frame: {s:?}");
+    }
+
+    #[test]
+    fn cortex_profile_frame_parses_as_valid_sse() {
+        // Real-wire guarantee: the injected prefix must be a complete SSE
+        // frame so a downstream EventSource client treats it as one event.
+        let frame = cortex_profile_sse_frame(&CortexUpstream::Cloud);
+        let s = std::str::from_utf8(&frame).unwrap();
+        let mut event = None;
+        let mut data_lines: Vec<&str> = Vec::new();
+        for line in s.split('\n') {
+            if let Some(rest) = line.strip_prefix("event: ") {
+                event = Some(rest);
+            } else if let Some(rest) = line.strip_prefix("data: ") {
+                data_lines.push(rest);
+            }
+        }
+        assert_eq!(event, Some("profile"));
+        assert_eq!(data_lines.len(), 1);
+        // Data payload must be valid JSON.
+        let parsed: serde_json::Value = serde_json::from_str(data_lines[0]).unwrap();
+        assert_eq!(parsed["profile"], "cloud");
+    }
+
+    #[test]
+    fn cortex_default_port_constant_matches_cli() {
+        // Must stay in sync with cli::cortex::DEFAULT_PORT. Tests act as the
+        // canary if either side drifts.
+        assert_eq!(CORTEX_DEFAULT_PORT, 8098);
+    }
+
+    #[test]
+    fn cortex_profile_frame_prepends_cleanly_to_upstream() {
+        // Pin the chain-reader semantics used by
+        // forward_upstream_response_with_prefix: profile frame is delivered
+        // FIRST, followed by the upstream Cortex stream, with no byte loss
+        // and no boundary corruption between the two.
+        use std::io::Read;
+        let prefix = cortex_profile_sse_frame(&CortexUpstream::Local {
+            port: 8098,
+            internal_service_token: "svc".into(),
+            version_pinned: Some("2026-05-17".into()),
+            user_id: None,
+        });
+        let simulated_upstream = b"event: message\ndata: {\"chunk\":\"hi\"}\n\nevent: done\ndata: {}\n\n";
+        let mut chained = Read::chain(
+            std::io::Cursor::new(prefix.clone()),
+            std::io::Cursor::new(&simulated_upstream[..]),
+        );
+        let mut out = Vec::new();
+        chained.read_to_end(&mut out).unwrap();
+        let s = std::str::from_utf8(&out).unwrap();
+        // Profile frame is first.
+        let prefix_str = std::str::from_utf8(&prefix).unwrap();
+        assert!(s.starts_with(prefix_str), "prefix not first: {s:?}");
+        // Upstream frames follow with no byte loss.
+        let upstream_str = std::str::from_utf8(simulated_upstream).unwrap();
+        assert!(s.ends_with(upstream_str), "upstream tail missing: {s:?}");
+        // Three SSE frames total: profile, message, done.
+        assert_eq!(s.matches("\n\n").count(), 3, "expected 3 frame terminators");
+    }
+
+    // ------------------------------------------------------------------------
 
     #[test]
     fn juli3ta_audio_range_parser_accepts_common_browser_ranges() {

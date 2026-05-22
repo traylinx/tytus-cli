@@ -2,6 +2,7 @@ mod account;
 mod channels;
 mod channels_store;
 mod cmd_transfer;
+mod cortex;
 #[cfg(unix)]
 mod daemon;
 #[cfg(unix)]
@@ -705,6 +706,14 @@ enum Commands {
         /// Topic name. Omit to see the full topic list.
         topic: Option<String>,
     },
+    /// Manage the local Cortex backend — Postgres + Redis + Cortex API on
+    /// 127.0.0.1:8098 for opt-in privacy-preserving chat with memory.
+    /// Off by default; cloud Cortex (via the Provider) remains the default
+    /// chat path. See `tytus cortex up --help` to install.
+    Cortex {
+        #[command(subcommand)]
+        action: cortex::CortexAction,
+    },
 }
 
 #[derive(Clone, ValueEnum, Debug)]
@@ -876,6 +885,12 @@ async fn main() {
         Some(Commands::Lope { args }) => cmd_lope_passthrough("lope", args, cli.json).await,
         Some(Commands::Bridge { args }) => cmd_lope_passthrough("bridge", args, cli.json).await,
         Some(Commands::Channels { action }) => cmd_channels(&http, action, cli.json).await,
+        Some(Commands::Cortex { action }) => {
+            if let Err(err) = cortex::cmd_cortex(action, cli.json).await {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
         Some(Commands::Autostart { action }) => cmd_autostart(action, cli.json),
         Some(Commands::Ui {
             pod,

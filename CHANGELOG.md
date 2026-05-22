@@ -1,8 +1,59 @@
 # Changelog
 
-## Unreleased
+## v0.7.0 — 2026-05-22
 
-- No pending changes.
+Sprint: `services/tytus-os/development/sprints/2026-05-21-chat-with-pods-local-cortex-parity/`.
+
+### Headline
+
+Opt-in **Local Cortex**: chat with your pod through a Cortex stack running on your own Mac, with memory that never leaves your machine. Cloud Cortex remains the default — nothing changes for existing users unless they explicitly switch.
+
+### Added
+
+- New `tytus cortex` subcommand surface (`up`, `down`, `status`, `test`, `reset`, `token rotate|show`, `logs`, `upgrade`, `version`). All commands support `--json` and `--headless`. The CLI shells out to Docker Compose against a bundled `docker-compose.yml` (templated into `~/Library/Application Support/tytus/cortex/`).
+- Bundled `contrib/cortex/{docker-compose.yml, .env.example, README.md}` — pinned Postgres 16 + Redis 7 + Cortex stack bound to `127.0.0.1:8098` with the user's local SwitchAILocal as the LLM backend.
+- Tray daemon profile router: `handle_pod_cortex_chat` resolves the upstream via `resolve_cortex_upstream()` and adapts the request body for local Cortex's `/tytus/chat` shape. `forward_upstream_response_with_prefix()` injects an `event: profile` SSE frame as the first chunk of every chat response so UI can label "Cloud Cortex" / "Local Cortex".
+- New daemon endpoints (origin-checked, JSON):
+  - `GET /api/cortex/status` — profile + container state + `/health/live` probe.
+  - `POST /api/cortex/profile` — flip between cloud and local (idempotent, no install).
+  - `POST /api/cortex/memory/search` — proxy to local Cortex `/v1/memory/search`. Returns 503 when profile=cloud or no token is present.
+- `CliState` gains 6 additive cortex fields (`cortex_profile`, `cortex_local_token`, `cortex_local_user_id`, `cortex_internal_service_token`, `cortex_local_port`, `cortex_local_version_pinned`, `cortex_local_started_at`). Old state.json files load unchanged.
+
+### TytusOS
+
+- ai-engine (`packages/ai-engine`) gains opt-in Cortex memory recall: `SessionOptions.useCortex` injects top-K `host.ai.cortexSearch` hits as a `<cortex_memory>` system block before each user turn. Recall-only — Memo/Sheet/Studio apps opt in per session, default off. 5 new vitest cases, 206/206 ai-engine suite green.
+- New **AI** category in Settings between Daemon and Sharing. Cloud/Local profile picker with 5s status polling and terminal-command install guidance. EN + ES i18n (27 keys × 2 locales).
+- host-api package: `AgentChatEvent` gains a `profile` variant. New `CortexProfile`, `CortexSearchInput`, `CortexMemoryHit` types. `AiApi.cortexProfile()` and `AiApi.cortexSearch()` for opt-in apps with `ai.memory.read` permission.
+- agent-chat runtime parses the new `event: profile` frame and yields it before any other event so the assistant message can carry a profile chip from frame zero.
+
+### Atomek (v0.4.29)
+
+- Consumes the profile frame and updates each assistant message's `gatewayLabel` to "Cloud Cortex" or "Local Cortex".
+- Backward compatible: older daemons that don't emit the frame leave the existing "Tytus pod agent" label intact.
+
+### Tests
+
+- 3 new `cargo test` cases in `atomek-cli` (`cortex::` module).
+- 7 new `cargo test` cases in `tytus-tray` (cortex profile resolution + frame format + chain-reader semantics; total 155/155 passing).
+- 5 new `vitest` cases across `app/src/lib/daemon.test.ts` and `app/src/runtime/agent-chat.test.ts` (cortex status fixtures, profile setter, profile-frame parsing with payload + with missing payload).
+- New sprint test matrix script (`services/tytus-os/development/sprints/.../test-matrix.sh`) — 6/6 PASS, 1 SKIP (Docker wire test, opt-in).
+
+### Documentation
+
+- New user manual page: `services/tytus-os/docs/user-manual/local-cortex.md` (install, switch, troubleshoot, two-token model, privacy posture, what's not supported).
+- `settings.md` updated with the new AI panel.
+- `llm-docs.md` gains §6b (Local Cortex), error-catalog entries for cortex failure modes, hard rules for AI agents driving the surface.
+- `os-docs.md` gains a "Cortex memory profile" section before "Install and check agents".
+
+### Scope drops + open questions
+
+- **Dropped:** explicit `cortexRemember` / `host.ai.cortexRemember()`. Cortex has no public `POST /v1/memory` endpoint (see sprint Q19). Memories are consolidated implicitly via chat turns. Atomek's existing workbench-scoped "Remember" button is unchanged.
+- **Cross-repo dependency (Q18):** the bundled `docker-compose.yml` references `ghcr.io/traylinx/tytus-cortex:<tag>`, but the tytus-cortex repo has no published image yet. End-user `tytus cortex up` will fail until the Cortex CI is updated to publish. Local development works via `docker build` from the Cortex source tree.
+
+### Migration
+
+- Zero-touch for v0.6.x users. `cortex_profile` defaults to `cloud`. Existing chat flows unchanged.
+- TytusOS bundle pin will move to a `v1.0.45+` (or whatever number this sprint takes) once Atomek 0.4.29 ships through the catalog.
 
 ## v0.6.20 — 2026-05-19
 

@@ -490,6 +490,51 @@ tytus llm-docs                     Print THIS document.
 | `--json` | — | Machine-readable JSON output on all commands |
 | `--headless` | `TYTUS_HEADLESS=1` | Force non-interactive mode. Disables browser device-auth, logs diagnostics to `/tmp/tytus/autostart.log`. Use in LaunchAgents, cron, CI. |
 
+### 6b. Local Cortex (opt-in, v0.7.0+)
+
+By default, chat with a pod routes through the cloud Cortex on Strato. Users
+who want chat memory to stay on their Mac can run Cortex locally instead.
+Cloud remains the default for everyone; nothing flips until the user
+explicitly switches in Settings → AI or via `tytus cortex up`.
+
+All commands below speak the same `--json` and `--headless` conventions.
+None of them call out to the network on their own — they shell out to
+Docker on the user's machine, plus HTTP to `127.0.0.1:8098`.
+
+```bash
+tytus cortex up [--port N] [--pin TAG]    # install + start the local stack
+tytus cortex down [--purge]               # stop containers; --purge wipes volumes
+tytus cortex status [--json]              # state + container + /health/live probe
+tytus cortex test [MESSAGE]               # probe message + latency report
+tytus cortex reset --yes                  # full factory reset (destructive)
+tytus cortex token rotate                 # mint a new per-user ctx_* token
+tytus cortex token show                   # token presence + prefix (never the body)
+tytus cortex logs [--tail N] [--follow]   # `docker compose logs` tail
+tytus cortex upgrade                      # pull pinned image + run migrations
+tytus cortex version                      # show pinned image tag
+```
+
+**Two-token model — don't mix them up:**
+
+- `INTERNAL_SERVICE_TOKEN` (state.json::`cortex_internal_service_token`) is
+  the service-to-service shared secret between the tray daemon and local
+  Cortex. The daemon presents it on `/tytus/chat` calls. Never user-visible.
+- `ctx_*` user token (state.json::`cortex_local_token`) is for `/v1/*`
+  user-scoped endpoints (memory search, session list, profile). Minted by
+  `POST /v1/users` during `tytus cortex up`.
+
+Mixing them is a 401 trap.
+
+**Hard rules for AI agents driving local Cortex:**
+
+- Never run `tytus cortex down --purge` or `tytus cortex reset` without
+  explicit user confirmation. Both wipe the user's memory store.
+- `tytus cortex up` is idempotent — safe to retry on failure.
+- If `tytus cortex status` returns `"docker_status": "Unavailable"`, the
+  user has not started Docker Desktop. Tell them, don't retry blindly.
+- Cortex has no public memory-write endpoint. Memories are populated
+  implicitly via chat. Do not promise users an explicit "save fact" verb.
+
 ## 7. MCP tools (when the MCP server is wired up)
 
 The `tytus` CLI ships a sister binary `tytus-mcp` that speaks JSON-RPC 2.0
@@ -596,6 +641,12 @@ wants one: `tytus agent install openclaw`.
 | `Token refresh failed: AuthExpired` | Refresh token expired or revoked | `tytus login` from an interactive terminal |
 | `Cannot open browser for login in non-interactive context` | Headless mode blocked device auth | `tytus login` interactively, then `tytus autostart install` |
 | `No refresh token available` | Fresh state or state was cleared | `tytus login` from an interactive terminal |
+| `Docker CLI not found or not executable` (cortex) | Docker Desktop not installed or not on PATH | Install from docker.com; restart shell; retry |
+| `Docker daemon not reachable` (cortex) | Docker Desktop installed but not running | Open Docker Desktop, wait for whale icon, retry |
+| `Cortex did not become healthy within 90s` | Image pull slow, or SwitchAILocal unreachable from container | `tytus cortex logs` to investigate; verify host SwitchAILocal binds 127.0.0.1:18080 |
+| `cortex_not_local` (HTTP 503) | App called `/api/cortex/memory/*` while profile=cloud | Switch profile to local in Settings → AI, or accept that the API is no-op on cloud |
+| `cortex_token_missing` (HTTP 503) | Local stack running but no ctx_* token minted | `tytus cortex token rotate` |
+| `cortex_unreachable` (HTTP 502 from tray) | Local Cortex stopped or crashed | `tytus cortex status` then `tytus cortex up` if needed |
 
 ## 10. Hard rules for AI agents
 

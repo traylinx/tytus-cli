@@ -216,6 +216,44 @@ Tytus works best when agents act as a team instead of isolated chat boxes. OpenC
 
 Use the brand names **OpenClaw** and **Hermes** in user-facing docs and UI. Old internal labels should not leak into the product.
 
+## Cortex memory profile (v0.7.0+)
+
+Every chat with OpenClaw or Hermes flows through a Cortex layer that keeps
+the agent's memory. There are two profiles:
+
+- **Cloud Cortex** (default). Memory lives on Strato. Routes through
+  `tytus.traylinx.com`. Works out of the box, no extra setup.
+- **Local Cortex** (opt-in). Memory lives on the user's Mac. Routes
+  through `127.0.0.1:8098`. Requires Docker Desktop + one `tytus cortex
+  up` step.
+
+For end users, the picker lives in **Settings → AI**. For AI agents
+driving TytusOS, the wire is:
+
+- `GET /api/cortex/status` — read profile + reachability.
+- `POST /api/cortex/profile` with `{profile:"cloud"|"local"}` — flip.
+- `POST /api/cortex/memory/search` — semantic recall (local profile only).
+
+Apps that consume the Cortex surface go through the Host API:
+
+- `host.ai.cortexProfile()` — `{profile, available, port?, cortexVersion?}`.
+- `host.ai.cortexSearch({query, limit?, appId?, minSimilarity?})` —
+  returns `CortexMemoryHit[]` (empty array on cloud or when unreachable —
+  apps don't need to branch on errors).
+
+Chat events now include a leading `{type:'profile', profile, cortexVersion?}`
+frame so the UI can label "Cloud Cortex" vs "Local Cortex" beside each
+assistant response.
+
+**Memory is NOT writable through an explicit verb.** Cortex consolidates
+memories from chats; there is no `cortexRemember()` API. Atomek's existing
+"Remember" button writes to a separate workbench-scoped store and is
+unchanged.
+
+See `tytus cortex --help` and the user-facing manual page
+`services/tytus-os/docs/user-manual/local-cortex.md` for install/operate
+details.
+
 ## Install and check agents
 
 CLI examples:
