@@ -84,5 +84,5 @@ jobs:
             echo "No changes to formula"
             exit 0
           fi
-          git commit -m "tytus ${{ steps.sums.outputs.version }}"
+          git commit -m "tytus ${{ steps.tag.outputs.version }}"
           git push origin HEAD:main
