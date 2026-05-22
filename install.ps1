@@ -28,7 +28,7 @@
 #     $env:TYTUS_SKIP_CHECKSUM  Skip SHA256 verification when using
 #                                release artifacts (NOT RECOMMENDED)
 #     $env:TYTUS_RELEASE_TAG    Install a specific GitHub release tag instead
-#                                of the public catalog tag, e.g. v0.6.20
+#                                of the public catalog tag, e.g. v0.7.0
 #     $env:TYTUS_CATALOG_URL    Override public catalog URL used to resolve
 #                                the default release tag
 #
