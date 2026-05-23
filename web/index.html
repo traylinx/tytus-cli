@@ -140,6 +140,35 @@
     .card .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }
     .small-btn { text-decoration: none; border-radius: 4px; border: 1px solid var(--line); padding: 8px 12px; font-size: 13px; font-weight: 800; color: var(--teal); }
     .small-btn.primaryish { background: var(--teal); color: #04120f; }
+
+    .pricing-intro { text-align: center; margin: 86px auto 26px; max-width: 760px; }
+    .pricing-intro h2 { margin: 0 0 10px; font-size: clamp(30px, 4vw, 44px); line-height: 1.08; letter-spacing: -.04em; }
+    .pricing-intro p { margin: 0; color: var(--muted); line-height: 1.6; font-size: 16px; }
+    .billing-toggle { display: inline-flex; gap: 4px; padding: 5px; border-radius: 999px; background: rgba(255,255,255,.06); border: 1px solid var(--line); margin: 24px auto 0; }
+    .billing-toggle button { border: 0; border-radius: 999px; padding: 10px 18px; color: var(--muted); background: transparent; font-weight: 800; cursor: pointer; }
+    .billing-toggle button.active { background: var(--teal); color: #04120f; }
+    .billing-toggle .save { color: var(--teal); font-size: 12px; align-self: center; padding-right: 12px; }
+    .pricing-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+    .pricing-card { position: relative; display: flex; flex-direction: column; min-height: 590px; background: rgba(22,22,22,.88); border: 1px solid var(--line-soft); border-radius: 4px; padding: 32px; }
+    .pricing-card.primary-plan { border-color: var(--teal); background: linear-gradient(180deg, rgba(0,212,170,.22), rgba(0,212,170,.08)); }
+    .pricing-badge { position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: var(--teal); color: #04120f; border-radius: 999px; padding: 6px 14px; font-size: 12px; font-weight: 900; letter-spacing: .03em; white-space: nowrap; }
+    .plan-name { color: var(--teal); font: 900 12px var(--mono); letter-spacing: .18em; text-transform: uppercase; margin-bottom: 14px; }
+    .price-line { display: flex; align-items: baseline; gap: 4px; margin-bottom: 8px; }
+    .price-line strong { font-size: 44px; line-height: 1; letter-spacing: -.05em; }
+    .price-line span { color: var(--muted); }
+    .tax-line { color: var(--muted); font-size: 13px; min-height: 20px; }
+    .plan-copy { color: #d7dce0; line-height: 1.55; margin: 24px 0 20px; }
+    .feature-list { list-style: none; padding: 0; margin: 0 0 28px; display: grid; gap: 13px; }
+    .feature-list li { color: #e7edf1; line-height: 1.35; display: flex; gap: 10px; align-items: flex-start; }
+    .feature-list li::before { content: '✓'; color: var(--teal); font-weight: 900; flex: 0 0 auto; }
+    .pricing-card .small-btn { margin-top: auto; justify-content: center; text-align: center; padding: 13px 16px; }
+    .free-plan { margin-top: 16px; display: grid; grid-template-columns: 1.2fr 2fr auto; gap: 22px; align-items: center; background: rgba(22,22,22,.82); border: 1px solid var(--line); border-radius: 4px; padding: 28px 32px; }
+    .free-plan .price-line strong { font-size: 34px; }
+    .free-features { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px 22px; }
+    .free-features span { color: #e7edf1; display: flex; gap: 9px; line-height: 1.35; }
+    .free-features span::before { content: '✓'; color: var(--teal); font-weight: 900; }
+    .pricing-footnote { margin: 22px auto 0; max-width: 760px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.5; }
+
     .flow { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
     .flow .num { width: 30px; height: 30px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; background: var(--teal); color: #04120f; font-weight: 900; margin-bottom: 12px; }
     .warning { border: 1px solid rgba(255,213,79,.26); background: rgba(255,213,79,.07); color: #d6d0bb; border-radius: 6px; padding: 18px 20px; line-height: 1.6; font-size: 14px; }
@@ -147,7 +176,7 @@
     footer { margin: 86px 0 34px; padding-top: 22px; border-top: 1px solid var(--line); display: flex; gap: 22px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
     footer a { color: var(--muted); text-decoration: none; }
     footer a:hover { color: var(--teal); }
-    @media (max-width: 900px) { .installer, .grid, .flow { grid-template-columns: 1fr; } .nav { height: auto; padding: 16px 0; flex-wrap: wrap; } .tabs { order: 3; width: 100%; justify-content: center; } .nav-actions { margin-left: auto; } }
+    @media (max-width: 900px) { .installer, .grid, .flow, .pricing-grid, .free-plan { grid-template-columns: 1fr; } .free-features { grid-template-columns: 1fr; } .pricing-card { min-height: auto; } .nav { height: auto; padding: 16px 0; flex-wrap: wrap; } .tabs { order: 3; width: 100%; justify-content: center; } .nav-actions { margin-left: auto; } }
     @media (max-width: 560px) { .shell { width: min(100% - 28px, 1180px); } .hero { padding-top: 58px; } .lockup .wordmark { font-size: 34px; } .lockup img { width: 56px; height: 56px; } .cmd code { font-size: 12px; } }
   </style>
 </head>
@@ -222,6 +251,89 @@
         </div>
       </section>
 
+
+      <section id="pricing">
+        <div class="pricing-intro">
+          <h2>Private pod pricing.</h2>
+          <p id="pricing-subtitle">Start free, then reserve a dedicated Tytus pod when you need private infrastructure, stable keys, and bundled model credits.</p>
+          <div class="billing-toggle" aria-label="Billing cadence">
+            <button type="button" class="active" data-billing="monthly">Monthly</button>
+            <button type="button" data-billing="yearly">Yearly</button>
+            <span class="save">Save 2 months</span>
+          </div>
+        </div>
+        <div class="pricing-grid">
+          <article class="pricing-card primary-plan">
+            <span class="pricing-badge">Most popular</span>
+            <div class="plan-name">Explorer</div>
+            <div class="price-line"><strong data-price-monthly="39" data-price-yearly="390">$39</strong><span data-period>/mo</span></div>
+            <div class="tax-line" data-tax-line>+ applicable taxes; checkout confirms final billing address tax.</div>
+            <p class="plan-copy">Your own private Tytus pod. Run OpenClaw inside an isolated WireGuard tunnel.</p>
+            <ul class="feature-list">
+              <li>1 Dedicated Tytus AI Pod</li>
+              <li>Runs OpenClaw (1 pod unit)</li>
+              <li>WireGuard-encrypted tunnel</li>
+              <li>Dedicated OpenAI-compatible gateway per pod</li>
+              <li>Stable URL + stable per-user API key</li>
+              <li>Bundled token plan: text, vision, audio, image, embeddings</li>
+              <li>Sentinel Pass credentials</li>
+              <li>BYOK on top of bundled tokens</li>
+              <li>7-day money-back guarantee</li>
+            </ul>
+            <a class="small-btn primaryish" href="https://traylinx.com/admin/tytus">Deploy my pod</a>
+          </article>
+          <article class="pricing-card">
+            <div class="plan-name">Creator</div>
+            <div class="price-line"><strong data-price-monthly="79" data-price-yearly="790">$79</strong><span data-period>/mo</span></div>
+            <div class="tax-line" data-tax-line>+ applicable taxes; checkout confirms final billing address tax.</div>
+            <p class="plan-copy">Run OpenClaw and Hermes side by side. The most popular plan for builders.</p>
+            <ul class="feature-list">
+              <li>Up to 2 Dedicated Tytus AI Pods</li>
+              <li>Run OpenClaw and/or Hermes Agent (Hermes = 2 units)</li>
+              <li>Everything in Explorer</li>
+              <li>Team access for Sentinel Passes</li>
+              <li>Custom model preferences in your gateway</li>
+              <li>Advanced routing across providers</li>
+              <li>Bundled token plan, doubled</li>
+            </ul>
+            <a class="small-btn" href="https://traylinx.com/admin/tytus">Get started</a>
+          </article>
+          <article class="pricing-card">
+            <div class="plan-name">Operator</div>
+            <div class="price-line"><strong data-price-monthly="149" data-price-yearly="1490">$149</strong><span data-period>/mo</span></div>
+            <div class="tax-line" data-tax-line>+ applicable taxes; checkout confirms final billing address tax.</div>
+            <p class="plan-copy">For teams and agencies. Up to 4 pods running OpenClaw and Hermes in parallel.</p>
+            <ul class="feature-list">
+              <li>Up to 4 Dedicated Tytus AI Pods</li>
+              <li>Run OpenClaw and Hermes in parallel</li>
+              <li>Everything in Creator</li>
+              <li>Dev / Staging / Prod pod split</li>
+              <li>Hierarchical Sentinel policies</li>
+              <li>Central organization management</li>
+              <li>Bundled token plan, quadrupled</li>
+            </ul>
+            <a class="small-btn" href="https://traylinx.com/admin/tytus">Get started</a>
+          </article>
+        </div>
+        <div class="free-plan">
+          <div>
+            <div class="plan-name">Free</div>
+            <div class="price-line"><strong data-price-free>$0</strong><span data-period>/mo</span></div>
+            <p class="caption">Forever. No card. Try Tytus on shared infrastructure.</p>
+          </div>
+          <div class="free-features">
+            <span>Shared SwitchAI infrastructure</span>
+            <span>Bring Your Own API Keys (BYOK)</span>
+            <span>100 API requests included</span>
+            <span>Up to 4 Sentinel Passes</span>
+            <span>Try OpenClaw and Hermes via BYOK</span>
+            <span>Community support</span>
+          </div>
+          <a class="small-btn" href="https://traylinx.com/admin/tytus">Start free</a>
+        </div>
+        <p id="pricing-footnote" class="pricing-footnote">All prices in USD. Taxes calculated at checkout from your billing address. Annual billing saves 2 months. 7-day money-back on first paid month.</p>
+      </section>
+
       <section>
         <h2 class="section-title">Native installer previews</h2>
         <div class="warning"><strong>Public beta. Not production GA.</strong> Native packages are unsigned while signing/notarization/MSI work is finalized. Prefer one-line installers above; direct packages stay available for locked-down machines.</div>
@@ -236,11 +348,14 @@
       <section>
         <h2 class="section-title">Built for your agents</h2>
         <div class="grid">
-          <div class="card highlight"><h3>tytusOS marketing page</h3><p>See the full product story: local desktop, private pods, apps, shared folders, pricing and agent ecosystem.</p><a class="small-btn primaryish" href="https://tytus-os.traylinx.com/">Open tytusOS page</a></div>
+          <div class="card highlight"><h3>tytusOS local desktop</h3><p>Control pods, shared folders, local apps, logs, and gateway status from a private desktop.</p><a class="small-btn primaryish" href="https://tytus-os.traylinx.com/">Open tytusOS page</a></div>
           <div class="card highlight"><h3>OpenClaw on your pod</h3><p>Run the open-source coding agent against your own private Tytus infrastructure.</p><a class="small-btn primaryish" href="https://openclaw.traylinx.com/">OpenClaw page</a></div>
-          <div class="card highlight"><h3>Hermes with memory</h3><p>Messenger-native agent with memory, skills, and scheduled work.</p><a class="small-btn primaryish" href="https://hermes.traylinx.com/">Hermes page</a></div>
-          <div class="card"><h3>Drop-in AIL gateway</h3><p>Use one OpenAI-compatible URL + key for text, vision, audio, images, and embeddings.</p><a class="small-btn" href="https://traylinx.com/admin/tytus">Get gateway data</a></div>
-          <div class="card"><h3>LLM docs built in</h3><p>Run <code>tytus llm-docs</code> to hand exact setup instructions to any coding assistant.</p><a class="small-btn" href="https://github.com/traylinx/tytus-cli#readme">Read docs</a></div>
+          <div class="card highlight"><h3>Hermes with memory</h3><p>Messenger-native agent with memory, skills, scheduled work, and durable project context.</p><a class="small-btn primaryish" href="https://hermes.traylinx.com/">Hermes page</a></div>
+          <div class="card highlight"><h3>Drop-in AIL gateway</h3><p>Use one OpenAI-compatible URL + key for text, vision, audio, images, and embeddings.</p><a class="small-btn primaryish" href="https://traylinx.com/admin/tytus">Get gateway data</a></div>
+          <div class="card"><h3>LLM docs built in</h3><p>Run <code>tytus llm-docs</code> to hand exact setup instructions to Claude Code, Codex, OpenCode, Cursor, and Gemini.</p><a class="small-btn" href="https://github.com/traylinx/tytus-cli#readme">Read docs</a></div>
+          <div class="card"><h3>Shared folders</h3><p>Move files between your local machine, pods, and agents without copy-pasting secrets into chats.</p><a class="small-btn" href="https://tytus-os.traylinx.com/">See workflow</a></div>
+          <div class="card"><h3>Sentinel Passes</h3><p>Issue scoped credentials per user, agent, or workspace instead of handing out one master key.</p><a class="small-btn" href="https://traylinx.com/sentinelpass">Open SentinelPass</a></div>
+          <div class="card"><h3>Verified releases</h3><p>Public beta assets ship with SHA256SUMS and release notes so locked-down machines can audit installs.</p><a class="small-btn" href="https://github.com/traylinx/tytus-cli/releases/tag/v0.7.2">View release</a></div>
         </div>
       </section>
     </main>
@@ -259,12 +374,90 @@
       <span style="margin-left:auto">MIT licensed · built on Traylinx</span>
     </footer>
     <p style="font-size:11px;color:var(--muted);text-align:center;margin:8px 0 24px;opacity:0.75;">
-      Tytus is a business-only platform. By installing or using it you agree to
+      Tytus is managed by Traylinx. By installing or using it you agree to
       our <a href="https://traylinx.com/terms" style="color:var(--muted);">Terms</a>
       and <a href="https://traylinx.com/privacy" style="color:var(--muted);">Privacy Policy</a>.
     </p>
   </div>
   <script>
+
+    const EU_VAT_COUNTRIES = new Set(['AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE']);
+    const GEO_ENDPOINTS = [
+      { url: 'https://api.country.is/', pick: d => d.country },
+      { url: 'https://get.geojs.io/v1/ip/country.json', pick: d => d.country },
+      { url: 'https://ipwho.is/', pick: d => d.country_code },
+      { url: 'https://ipapi.co/json/', pick: d => d.country_code },
+    ];
+    let billingMode = 'monthly';
+    let pricingCurrency = 'usd';
+
+    function countryFromLocale() {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+      const lang = (navigator.languages && navigator.languages[0]) || navigator.language || '';
+      if (/Europe\//.test(tz)) return 'DE';
+      const m = lang.match(/-([A-Z]{2})$/i);
+      return m ? m[1].toUpperCase() : null;
+    }
+
+    function pricingRegion(countryCode) {
+      const code = (countryCode || '').toUpperCase();
+      if (EU_VAT_COUNTRIES.has(code)) {
+        return {
+          currency: 'eur',
+          symbol: '€',
+          taxLine: 'VAT included where applicable',
+          subtitle: 'EU consumer prices are shown in EUR with VAT included where applicable. Checkout confirms the exact recurring total from your billing address.',
+          footnote: 'EU consumer prices shown in EUR include VAT where applicable. Stripe Checkout confirms the exact recurring total from your billing address. Annual billing saves 2 months. 7-day money-back on first paid month.'
+        };
+      }
+      return {
+        currency: 'usd',
+        symbol: '$',
+        taxLine: '+ applicable taxes; checkout confirms final billing address tax.',
+        subtitle: 'Global prices are shown in USD. Checkout confirms taxes from your billing address before payment.',
+        footnote: 'All prices in USD. Taxes calculated at checkout from your billing address. Annual billing saves 2 months. 7-day money-back on first paid month.'
+      };
+    }
+
+    function applyPricing(countryCode) {
+      const region = pricingRegion(countryCode);
+      pricingCurrency = region.currency;
+      document.querySelectorAll('[data-price-monthly]').forEach(el => {
+        const amount = el.getAttribute(billingMode === 'yearly' ? 'data-price-yearly' : 'data-price-monthly');
+        el.textContent = region.symbol + amount;
+      });
+      document.querySelectorAll('[data-price-free]').forEach(el => { el.textContent = region.symbol + '0'; });
+      document.querySelectorAll('[data-period]').forEach(el => { el.textContent = billingMode === 'yearly' ? '/year' : '/mo'; });
+      document.querySelectorAll('[data-tax-line]').forEach(el => { el.textContent = region.taxLine; });
+      const subtitle = document.getElementById('pricing-subtitle');
+      const footnote = document.getElementById('pricing-footnote');
+      if (subtitle) subtitle.textContent = region.subtitle;
+      if (footnote) footnote.textContent = region.footnote;
+    }
+
+    async function detectPricingCountry() {
+      applyPricing(countryFromLocale());
+      for (const endpoint of GEO_ENDPOINTS) {
+        try {
+          const res = await fetch(endpoint.url, { cache: 'no-store' });
+          if (!res.ok) continue;
+          const data = await res.json();
+          const country = endpoint.pick(data);
+          if (country) { applyPricing(country); return; }
+        } catch (_) {}
+      }
+    }
+
+    document.querySelectorAll('[data-billing]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        billingMode = btn.getAttribute('data-billing');
+        document.querySelectorAll('[data-billing]').forEach(b => b.classList.toggle('active', b === btn));
+        applyPricing(pricingCurrency === 'eur' ? 'DE' : 'US');
+      });
+    });
+
+    detectPricingCountry();
+
     function copyCmd(id, btn) {
       const code = document.querySelector('#' + id + ' code').innerText;
       navigator.clipboard.writeText(code).then(() => {
