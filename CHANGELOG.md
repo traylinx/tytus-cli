@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.7.4 — 2026-05-24
+
+### Headline
+
+**host.fs daemon health observability.** The Tytus OS shell now shows a `HostFsStatusChip` in the TopPanel right-rail when the daemon FS is unreachable, with a tooltip naming the last error and the time since the last probe. Previously, when the daemon went away mid-session, apps that wrote to the user's Documents / Downloads / Music folders just threw and the user got no signal that "the OS layer can't talk to the daemon right now." Embeds TytusOS v1.0.49.
+
+### Added
+
+- New `runtime/host-fs-health.ts` singleton state machine in the OS dist (`unknown | ok | degraded | offline`), visibility-gated 30s probe of `/api/files/list?source=user-documents`, rolling error window (3 errors in 60s → offline).
+- `createDaemonFs({ onTransport })` option: every FS op emits a typed `{ kind: 'success' | 'error' | 'fallback', op }` event. Default no-op so external callers aren't affected.
+- `useHostFsHealth()` React hook via `useSyncExternalStore`.
+- TopPanel chip hidden when status='ok' or 'unknown' (no boot flash).
+
+### Invariant locked
+
+No silent mid-session fallback to localStorage from a daemon node id. If the daemon goes offline after `ensureUserFolder` returned a `daemonfs:` id, reads/writes throw and the chip flips to 'offline'. Falling back invisibly would orphan data between backends — the chip is the UX, not a hidden retry.
+
+### Tests
+
+OS-side: +25 (12 health-module unit + 4 hook + 5 host-fs-daemon onTransport + 4 misc). Full OS suite **1146/1146** pass, no regressions. `tsc --noEmit` clean.
+
 ## v0.7.1 — 2026-05-22
 
 Sprint: `docs/sprints/tytus-account-aware-detection-2026-05-22/`.
