@@ -266,7 +266,19 @@ async fn main() {
             }
         };
 
-        let id = req.id.clone().unwrap_or(Value::Null);
+        let id = match req.id.clone() {
+            Some(id) => id,
+            None => {
+                // JSON-RPC notifications do not have an id and MUST NOT get a
+                // response. Returning {"id": null, ...} for
+                // notifications/initialized makes strict MCP clients (Codex
+                // rmcp) reject the stream and close the server.
+                if let Err(e) = handle_request(req).await {
+                    tracing::warn!("notification failed: {}", e);
+                }
+                continue;
+            }
+        };
         let resp = handle_request(req).await;
         let resp = match resp {
             Ok(result) => JsonRpcResponse::success(id, result),

@@ -366,12 +366,12 @@ fn bootstrap_health_cache() -> &'static Mutex<HashMap<String, BootstrapHealthEnt
     BOOTSTRAP_HEALTH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Read the cached status for `pod_id`. Returns `Unknown` for cache
+/// Read the cached status for a stable pod selector. Returns `Unknown` for cache
 /// miss + kicks a background refresh if the entry is stale or missing
 /// AND `api_url` + `user_key` are non-empty (we can't probe without
 /// them).
 fn agent_status_cached(
-    pod_id: &str,
+    cache_key: &str,
     agent_type: &str,
     api_url: Option<&str>,
     user_key: &str,
@@ -381,7 +381,7 @@ fn agent_status_cached(
     let now = now_secs();
     let (cached, needs_refresh) = {
         let cache = status_cache().lock().unwrap();
-        match cache.get(pod_id) {
+        match cache.get(cache_key) {
             Some(e) => {
                 let stale = now.saturating_sub(e.fetched_at) >= STATUS_TTL_SECS;
                 (e.status, stale)
@@ -393,7 +393,7 @@ fn agent_status_cached(
     if needs_refresh {
         if let (Some(url), false) = (api_url, user_key.is_empty()) {
             if !url.is_empty() {
-                let pod = pod_id.to_string();
+                let pod = cache_key.to_string();
                 let agent = agent_type.to_string();
                 let url = url.to_string();
                 let key = user_key.to_string();
@@ -422,17 +422,20 @@ fn agent_status_cached(
     cached
 }
 
-/// Synchronous-blocking probe of a pod's gateway. Mirrors
-/// handle_pod_ready's classification — same Authorization header,
-/// same 4s timeout, same status-code map. Run inside a per-call
-/// tokio runtime so we can block until it finishes (called from
-/// thread::spawn — never from the request thread).
+/// Synchronous-blocking probe of a pod's OpenAI-compatible gateway.
+///
+/// Important: this is the *chat/API* readiness signal, not the browser-UI
+/// readiness signal. New DAM fleets can report duplicate human pod IDs
+/// (`pod_id="01"`) across distinct routes, so TytusOS must not call a pod
+/// "not ready" merely because a browser UI token or route-scoped shell exec is
+/// unavailable. If `/v1/models` answers with the stable user key, chat and SDK
+/// use are ready.
 fn probe_agent_status(
     agent_type: &str,
     api_url: &str,
     user_key: &str,
     gateway_token: Option<&str>,
-    ui_url: Option<&str>,
+    _ui_url: Option<&str>,
 ) -> AgentStatus {
     if api_url.is_empty() {
         return AgentStatus::Stopped;
@@ -467,41 +470,43 @@ fn probe_agent_status(
         Err(_) => AgentStatus::Stopped,
     };
 
-    if api_status != AgentStatus::Ready {
-        return api_status;
-    }
-
-    // OpenClaw and Hermes expose browser UIs. The SDK gateway can
-    // answer before Caddy has the SPA/dashboard upstream fully wired, which made
-    // TytusOS show "Running" while the user's browser still saw 502.
-    // Treat browser agents as ready only when BOTH /v1/models and the
-    // authenticated UI root serve successfully.
-    if agent_has_browser_ui(agent_type) {
-        let Some(ui) = ui_url.filter(|u| !u.is_empty()) else {
-            return AgentStatus::Starting;
-        };
-        let ui_result = rt.block_on(async {
-            http.get(ui)
-                .timeout(std::time::Duration::from_secs(4))
-                .send()
-                .await
-        });
-        match ui_result {
-            Ok(resp) => match resp.status().as_u16() {
-                200 => AgentStatus::Ready,
-                401 | 403 | 404 => AgentStatus::Starting,
-                500..=599 => AgentStatus::Unhealthy,
-                _ => AgentStatus::Unknown,
-            },
-            Err(_) => AgentStatus::Stopped,
-        }
-    } else {
-        AgentStatus::Ready
-    }
+    api_status
 }
 
 fn agent_has_browser_ui(agent_type: &str) -> bool {
     matches!(agent_type, "nemoclaw" | "openclaw" | "hermes")
+}
+
+fn probe_agent_ui_status(agent_type: &str, ui_url: Option<&str>) -> AgentStatus {
+    if !agent_has_browser_ui(agent_type) {
+        return AgentStatus::Ready;
+    }
+    let Some(ui) = ui_url.filter(|u| !u.is_empty()) else {
+        return AgentStatus::Starting;
+    };
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(_) => return AgentStatus::Unknown,
+    };
+    let http = atomek_core::HttpClient::new();
+    let ui_result = rt.block_on(async {
+        http.get(ui)
+            .timeout(std::time::Duration::from_secs(4))
+            .send()
+            .await
+    });
+    match ui_result {
+        Ok(resp) => match resp.status().as_u16() {
+            200 => AgentStatus::Ready,
+            401 | 403 | 404 => AgentStatus::Starting,
+            500..=599 => AgentStatus::Unhealthy,
+            _ => AgentStatus::Unknown,
+        },
+        Err(_) => AgentStatus::Stopped,
+    }
 }
 
 fn probe_bearer_token(agent_type: &str, user_key: &str, gateway_token: Option<&str>) -> String {
@@ -893,6 +898,46 @@ PY
         ),
         Err(e) => ("unknown".to_string(), e),
     }
+}
+
+fn route_scoped_exec_available(agent: &AgentSlot, snap: &StateSnapshot) -> bool {
+    let same_agent_pod = snap
+        .agents
+        .iter()
+        .filter(|slot| slot.pod_id == agent.pod_id)
+        .count();
+    let same_included_pod = snap
+        .included
+        .iter()
+        .filter(|slot| slot.pod_id == agent.pod_id)
+        .count();
+    same_agent_pod + same_included_pod <= 1
+}
+
+fn duplicate_pod_exec_skip_entry(agent: &AgentSlot) -> BootstrapHealthEntry {
+    BootstrapHealthEntry {
+        status: "degraded".to_string(),
+        detail: format!(
+            "route-scoped shell exec is not available for duplicate pod id {}; skipping optional bootstrap smoke for route {}",
+            agent.pod_id,
+            agent.route_id.as_deref().unwrap_or(&agent.id)
+        ),
+        overall: "route-scoped-exec-skipped".to_string(),
+        fetched_at: now_secs(),
+    }
+}
+
+fn check_agent_shared_storage_stage(agent: &AgentSlot, snap: &StateSnapshot) -> (String, String) {
+    if !route_scoped_exec_available(agent, snap) {
+        return (
+            "skipped".to_string(),
+            format!(
+                "route-scoped shell exec unavailable for duplicate pod id {}; shared storage probe skipped",
+                agent.pod_id
+            ),
+        );
+    }
+    check_pod_shared_storage_stage(&agent.pod_id)
 }
 
 fn bootstrap_stage_detail(entry: &BootstrapHealthEntry) -> String {
@@ -5401,8 +5446,13 @@ struct StateSnapshot {
 
 #[derive(Serialize, Clone)]
 struct AgentSlot {
+    /// Stable local identity. Prefer route_id because DAM pod_id can repeat
+    /// across droplets (all three of Sebastian's current pods report "01").
+    id: String,
     pod_id: String,
     route_id: Option<String>,
+    /// User-facing label. Prefer display_name; fall back to "Pod NN".
+    display_label: String,
     display_name: Option<String>,
     agent_type: String,
     units: u32,
@@ -5432,8 +5482,11 @@ struct AgentSlot {
 
 #[derive(Serialize, Clone)]
 struct IncludedSlot {
+    /// Stable local identity. Prefer route_id because DAM pod_id can repeat.
+    id: String,
     pod_id: String,
     route_id: Option<String>,
+    display_label: String,
     kind: &'static str, // "ail" for now; future types can reuse
     endpoint: String,   // stable_ai_endpoint (e.g. http://10.42.42.1:18080)
     user_key: String,   // stable_user_key (sk-tytus-user-…)
@@ -5603,11 +5656,7 @@ fn handle_version(request: Request) {
 /// Allowed Host header values for /api/whoami. Anything else is
 /// likely a DNS-rebinding attack (browser tricked into resolving
 /// `evil.com` → 127.0.0.1) and the daemon refuses to answer.
-const WHOAMI_ALLOWED_HOSTS: &[&str] = &[
-    "localhost:4242",
-    "127.0.0.1:4242",
-    "[::1]:4242",
-];
+const WHOAMI_ALLOWED_HOSTS: &[&str] = &["localhost:4242", "127.0.0.1:4242", "[::1]:4242"];
 
 /// Origin the web admin is served from. Locked to a single allowlist
 /// entry — `*` would let any site read the identity envelope.
@@ -5660,9 +5709,7 @@ fn build_whoami_body(parsed: Option<&serde_json::Value>) -> serde_json::Value {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
-    let device_session_id = parsed
-        .get("device_session_id")
-        .and_then(|v| v.as_i64());
+    let device_session_id = parsed.get("device_session_id").and_then(|v| v.as_i64());
 
     // status: "ready" if we have a non-expired access token + user_id,
     // "degraded" if we have a user_id but the access token is expired,
@@ -5713,9 +5760,8 @@ fn whoami_hostname_label() -> String {
         {
             use std::ffi::CStr;
             let mut buf = [0u8; 256];
-            let ret = unsafe {
-                libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len())
-            };
+            let ret =
+                unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
             if ret != 0 {
                 return None;
             }
@@ -5784,9 +5830,8 @@ fn handle_whoami(request: Request) {
 
     let body = build_whoami_body(parsed_owned.as_ref());
     let body_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
-    let resp = with_whoami_cors_headers(
-        Response::from_string(body_str).with_status_code(StatusCode(200)),
-    );
+    let resp =
+        with_whoami_cors_headers(Response::from_string(body_str).with_status_code(StatusCode(200)));
     let _ = request.respond(resp);
 }
 
@@ -5798,9 +5843,8 @@ fn handle_whoami_preflight(request: Request) {
         let _ = request.respond(resp);
         return;
     }
-    let resp = with_whoami_cors_headers(
-        Response::from_string("").with_status_code(StatusCode(204)),
-    );
+    let resp =
+        with_whoami_cors_headers(Response::from_string("").with_status_code(StatusCode(204)));
     let _ = request.respond(resp);
 }
 
@@ -5970,11 +6014,11 @@ const CORTEX_DEFAULT_PORT: u16 = 8098;
 
 #[derive(Debug, Clone)]
 struct CortexLocalState {
-    profile: String,                         // "cloud" | "local" (defaults to "cloud")
-    port: u16,                               // host port for /tytus/chat + /v1/*
-    internal_service_token: Option<String>,  // service-to-service shared secret
-    ctx_token: Option<String>,               // per-user ctx_* token
-    user_id: Option<String>,                 // external user id for /v1/* calls
+    profile: String,                        // "cloud" | "local" (defaults to "cloud")
+    port: u16,                              // host port for /tytus/chat + /v1/*
+    internal_service_token: Option<String>, // service-to-service shared secret
+    ctx_token: Option<String>,              // per-user ctx_* token
+    user_id: Option<String>,                // external user id for /v1/* calls
     version_pinned: Option<String>,
     started_at: Option<String>,
 }
@@ -6308,7 +6352,7 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
         if let Some(route_id) = route_id.as_deref() {
             p.route_id.as_deref() == Some(route_id)
         } else {
-            p.pod_id == pod_id
+            agent_matches_selector(p, &pod_id)
         }
     }) else {
         respond_json(
@@ -6318,6 +6362,8 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
         );
         return;
     };
+    let cli_pod_id = slot.pod_id.clone();
+    let effective_route_id = route_id.clone().or_else(|| slot.route_id.clone());
     if matches!(slot.status, AgentStatus::Stopped) {
         respond_json(
             request,
@@ -6375,7 +6421,7 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
             let payload = serde_json::json!({
                 "message": message,
                 "session_id": session_id,
-                "route_id": route_id,
+                "route_id": effective_route_id.clone(),
                 "chat_target": "agent",
                 "agent_mode": agent_mode,
                 "app_id": app_id,
@@ -6383,7 +6429,10 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
                 "stream": stream_flag,
             });
             client
-                .post(format!("{}/pod/{}/cortex/chat", TYTUS_PROVIDER_URL, pod_id))
+                .post(format!(
+                    "{}/pod/{}/cortex/chat",
+                    TYTUS_PROVIDER_URL, cli_pod_id
+                ))
                 .header("X-Agent-Secret-Token", secret)
                 .header("X-Agent-User-Id", agent_user_id)
                 .header("Content-Type", "application/json")
@@ -6411,14 +6460,12 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
             //     remote DAM (DAM_BASE_URL=test://local handles that).
             // F2: brain-mode is hardcoded — local Cortex has no DAM to
             //     forward chat_target=agent to in v1.
-            let client_id = user_id
-                .clone()
-                .unwrap_or_else(|| "tytus-local".to_string());
-            let synthesized_route_id = format!("tytuslocal-{pod_id}");
+            let client_id = user_id.clone().unwrap_or_else(|| "tytus-local".to_string());
+            let synthesized_route_id = format!("tytuslocal-{cli_pod_id}");
             let payload = serde_json::json!({
                 "client_id": client_id,
-                "pod_id": pod_id,
-                "route_id": route_id.unwrap_or(synthesized_route_id),
+                "pod_id": cli_pod_id,
+                "route_id": effective_route_id.unwrap_or(synthesized_route_id),
                 "agent_type": slot.agent_type.clone(),
                 "session_id": session_id,
                 "message": message,
@@ -7191,6 +7238,10 @@ fn compute_state_snapshot() -> StateSnapshot {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
+            let slot_id = route_id.clone().unwrap_or_else(|| pod_id.clone());
+            let display_label = display_name
+                .clone()
+                .unwrap_or_else(|| format!("Pod {}", pod_id));
             let edge_public_url: Option<String> = p
                 .get("edge_public_url")
                 .and_then(|v| v.as_str())
@@ -7249,8 +7300,10 @@ fn compute_state_snapshot() -> StateSnapshot {
                     .unwrap_or("")
                     .to_string();
                 included.push(IncludedSlot {
+                    id: slot_id,
                     pod_id,
                     route_id,
+                    display_label,
                     kind: "ail",
                     endpoint,
                     user_key,
@@ -7270,7 +7323,7 @@ fn compute_state_snapshot() -> StateSnapshot {
             // value. First poll for a never-probed pod returns
             // Unknown, which the OS renders as "checking".
             let status = agent_status_cached(
-                &pod_id,
+                &slot_id,
                 &agent_type,
                 api_url.as_deref(),
                 &user_key,
@@ -7278,8 +7331,10 @@ fn compute_state_snapshot() -> StateSnapshot {
                 ui_url.as_deref(),
             );
             agents.push(AgentSlot {
+                id: slot_id,
                 pod_id,
                 route_id,
+                display_label,
                 display_name,
                 agent_type,
                 units,
@@ -7334,8 +7389,12 @@ fn compute_state_snapshot() -> StateSnapshot {
         uptime_secs: daemon_snap.uptime_secs,
         keychain_healthy: daemon_snap.keychain_healthy,
         last_refresh_error,
-        daemon_running: daemon_snap.daemon_running,
-        daemon_pid: daemon_snap.daemon_pid,
+        daemon_running: true,
+        daemon_pid: if daemon_snap.daemon_pid > 0 {
+            daemon_snap.daemon_pid
+        } else {
+            std::process::id() as u64
+        },
         app_bundle_installed: crate::check_app_bundle_installed(),
         forwarders,
         daemon_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -7485,6 +7544,37 @@ fn parse_pod_id(query: &str) -> Option<String> {
     canonical_pod_id(&raw)
 }
 
+/// Modern local UI selector. Numeric pod ids are still accepted, but route_id
+/// is the real unique key once pods live on multiple droplets and all report
+/// the same DAM-local pod_id ("01").
+fn canonical_pod_selector(raw: &str) -> Option<String> {
+    canonical_pod_id(raw).or_else(|| {
+        let v = raw.trim();
+        if valid_local_pod_id(v) {
+            Some(v.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_pod_selector(query: &str) -> Option<String> {
+    let raw = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("pod=").map(|v| v.to_string()))?;
+    canonical_pod_selector(&raw)
+}
+
+fn agent_matches_selector(agent: &AgentSlot, selector: &str) -> bool {
+    agent.id == selector || agent.route_id.as_deref() == Some(selector) || agent.pod_id == selector
+}
+
+fn included_matches_selector(included: &IncludedSlot, selector: &str) -> bool {
+    included.id == selector
+        || included.route_id.as_deref() == Some(selector)
+        || included.pod_id == selector
+}
+
 /// Confirm the pod id exists in local state (defense-in-depth — parse_pod_id
 /// already restricts to digits, this catches "pod=99 doesn't exist").
 fn pod_exists(pod_id: &str) -> bool {
@@ -7493,15 +7583,59 @@ fn pod_exists(pod_id: &str) -> bool {
         || snap.included.iter().any(|i| i.pod_id == pod_id)
 }
 
+fn pod_selector_exists(selector: &str) -> bool {
+    let snap = compute_state_snapshot();
+    snap.agents
+        .iter()
+        .any(|a| agent_matches_selector(a, selector))
+        || snap
+            .included
+            .iter()
+            .any(|i| included_matches_selector(i, selector))
+}
+
+fn cli_pod_id_for_selector(selector: &str) -> Option<String> {
+    let snap = compute_state_snapshot();
+    snap.agents
+        .iter()
+        .find(|a| agent_matches_selector(a, selector))
+        .map(|a| a.pod_id.clone())
+        .or_else(|| {
+            snap.included
+                .iter()
+                .find(|i| included_matches_selector(i, selector))
+                .map(|i| i.pod_id.clone())
+        })
+}
+
+fn route_scoped_channel_ops_required(selector: &str, pod_id: &str) -> bool {
+    if selector == pod_id {
+        return false;
+    }
+    let snap = compute_state_snapshot();
+    let mut matches = 0usize;
+    for agent in &snap.agents {
+        if agent.pod_id == pod_id {
+            matches += 1;
+        }
+    }
+    for included in &snap.included {
+        if included.pod_id == pod_id {
+            matches += 1;
+        }
+    }
+    matches > 1
+}
+
 fn handle_pod_open(request: Request, query: &str) {
-    let pod_id = match parse_pod_id(query) {
+    let selector = match parse_pod_selector(query) {
         Some(p) => p,
         None => {
             respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
             return;
         }
     };
-    if !pod_exists(&pod_id) {
+    if !pod_selector_exists(&selector) {
         respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
         return;
     }
@@ -7514,7 +7648,7 @@ fn handle_pod_open(request: Request, query: &str) {
     let url = snap
         .agents
         .iter()
-        .find(|a| a.pod_id == pod_id)
+        .find(|a| agent_matches_selector(a, &selector))
         .and_then(|a| a.ui_url.clone().or_else(|| a.public_url.clone()));
     match url {
         Some(u) => {
@@ -7534,17 +7668,17 @@ fn handle_pod_open(request: Request, query: &str) {
 }
 
 fn handle_pod_restart(request: Request, query: &str) {
-    let pod_id = match parse_pod_id(query) {
+    let selector = match parse_pod_selector(query) {
         Some(p) => p,
         None => {
             respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
             return;
         }
     };
-    if !pod_exists(&pod_id) {
+    let Some(pod_id) = cli_pod_id_for_selector(&selector) else {
         respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
         return;
-    }
+    };
     // Spawn detached so the wizard response doesn't block the 30-90s
     // DAM round-trip. CLI logs to its own stderr; we don't stream here
     // (keeps this endpoint a fire-and-poll primitive — the chooser view
@@ -7576,17 +7710,17 @@ fn handle_pod_restart(request: Request, query: &str) {
 /// actual Scalesys revoke is fast (<1 s) but DAM teardown of the
 /// container can take 5-15 s.
 fn handle_pod_revoke(request: Request, query: &str) {
-    let pod_id = match parse_pod_id(query) {
+    let selector = match parse_pod_selector(query) {
         Some(p) => p,
         None => {
             respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
             return;
         }
     };
-    if !pod_exists(&pod_id) {
+    let Some(pod_id) = cli_pod_id_for_selector(&selector) else {
         respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
         return;
-    }
+    };
     let bin = resolve_tytus_bin();
     // `tytus revoke` has no interactive confirm (Scalesys takes the
     // wipe immediately on POST /pod/revoke) so detached spawn is
@@ -7656,6 +7790,20 @@ fn pod_action_argv(action: &str, pod_id: &str) -> Option<Vec<String>> {
 }
 
 fn handle_pod_run_streamed(mut request: Request, registry: &Registry, pod_id: String) {
+    let selector = match canonical_pod_selector(&pod_id) {
+        Some(v) => v,
+        None => {
+            respond_json(request, 400, &serde_json::json!({"error":"invalid pod id"}));
+            return;
+        }
+    };
+    let pod_id = match cli_pod_id_for_selector(&selector) {
+        Some(v) => v,
+        None => {
+            respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
+            return;
+        }
+    };
     if !valid_pod_id(&pod_id) {
         respond_json(request, 400, &serde_json::json!({"error":"invalid pod id"}));
         return;
@@ -8462,8 +8610,9 @@ fn list_local_dir(root: &Path, rel: &Path) -> Result<Vec<FileListEntry>, String>
     Ok(rows)
 }
 
-
-fn registered_shared_folder_open_target(local_path: &str) -> Result<PathBuf, (u16, serde_json::Value)> {
+fn registered_shared_folder_open_target(
+    local_path: &str,
+) -> Result<PathBuf, (u16, serde_json::Value)> {
     let requested = PathBuf::from(local_path);
     if !requested.is_absolute() {
         return Err((
@@ -9783,12 +9932,16 @@ fn handle_pod_refresh_creds(request: Request, registry: &Registry, query: &str) 
         respond_sharing_paused(request);
         return;
     }
-    let pod_id = match parse_pod_id(query) {
+    let selector = match parse_pod_selector(query) {
         Some(p) => p,
         None => {
             respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
             return;
         }
+    };
+    let Some(pod_id) = cli_pod_id_for_selector(&selector) else {
+        respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
+        return;
     };
     let bin = resolve_garagetytus_helper("garagetytus-pod-refresh");
     let (job_id, job) = registry.create();
@@ -9952,12 +10105,16 @@ fn parse_reveal_flag(query: &str) -> bool {
 /// passthrough that forwards stdout JSON unchanged. A non-zero exit
 /// code is mapped to a 502 with the captured stderr line.
 fn handle_pod_env(request: Request, query: &str) {
-    let pod_id = match parse_pod_id(query) {
+    let selector = match parse_pod_selector(query) {
         Some(p) => p,
         None => {
             respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
             return;
         }
+    };
+    let Some(pod_id) = cli_pod_id_for_selector(&selector) else {
+        respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
+        return;
     };
     let reveal = parse_reveal_flag(query);
     let bin = resolve_tytus_bin();
@@ -10009,7 +10166,7 @@ fn handle_pod_env(request: Request, query: &str) {
 }
 
 fn handle_pod_ready(request: Request, query: &str) {
-    let pod_id = match parse_pod_id(query) {
+    let selector = match parse_pod_selector(query) {
         Some(p) => p,
         None => {
             respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
@@ -10017,7 +10174,11 @@ fn handle_pod_ready(request: Request, query: &str) {
         }
     };
     let snap = compute_state_snapshot();
-    let agent = snap.agents.iter().find(|a| a.pod_id == pod_id).cloned();
+    let agent = snap
+        .agents
+        .iter()
+        .find(|a| agent_matches_selector(a, &selector))
+        .cloned();
     let api = match agent.as_ref().and_then(|a| a.api_url.clone()) {
         Some(u) => u,
         None => {
@@ -10054,7 +10215,11 @@ fn handle_pod_ready(request: Request, query: &str) {
     let mut bootstrap_probe: Option<BootstrapHealthEntry> = None;
     let mut bootstrap_reason: Option<String> = None;
     if status == AgentStatus::Ready && readiness_strict_enabled() {
-        let bootstrap = check_pod_tytus_bootstrap_entry(&pod_id, false);
+        let bootstrap = if route_scoped_exec_available(&agent, &snap) {
+            check_pod_tytus_bootstrap_entry(&agent.pod_id, false)
+        } else {
+            duplicate_pod_exec_skip_entry(&agent)
+        };
         if !bootstrap_status_allows_open(&bootstrap.status) {
             status = AgentStatus::Starting;
             bootstrap_reason = Some(format!(
@@ -10065,7 +10230,7 @@ fn handle_pod_ready(request: Request, query: &str) {
         }
         bootstrap_probe = Some(bootstrap);
     }
-    cache_agent_status(&pod_id, status);
+    cache_agent_status(&agent.id, status);
     let (ready, status_label, reason) = match status {
         AgentStatus::Ready => (
             true,
@@ -10079,14 +10244,13 @@ fn handle_pod_ready(request: Request, query: &str) {
                         bootstrap_stage_detail(b)
                     )
                 })
-                .unwrap_or_else(|| "API, UI, and Tytus bootstrap are serving".to_string()),
+                .unwrap_or_else(|| "API and Tytus bootstrap are serving".to_string()),
         ),
         AgentStatus::Starting => (
             false,
             "starting",
-            bootstrap_reason.unwrap_or_else(|| {
-                "edge, auth, route, UI, or bootstrap still starting".to_string()
-            }),
+            bootstrap_reason
+                .unwrap_or_else(|| "edge, auth, route, or bootstrap still starting".to_string()),
         ),
         AgentStatus::Unhealthy => (
             false,
@@ -10114,7 +10278,7 @@ fn handle_pod_ready(request: Request, query: &str) {
 }
 
 fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
-    let pod_id = match canonical_pod_id(pod_id_raw) {
+    let selector = match canonical_pod_selector(pod_id_raw) {
         Some(p) => p,
         None => {
             respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
@@ -10123,12 +10287,17 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
     };
 
     let snap = compute_state_snapshot();
-    let Some(agent) = snap.agents.iter().find(|a| a.pod_id == pod_id).cloned() else {
+    let Some(agent) = snap
+        .agents
+        .iter()
+        .find(|a| agent_matches_selector(a, &selector))
+        .cloned()
+    else {
         respond_json(
             request,
             200,
             &serde_json::json!({
-                "pod_id": pod_id,
+                "pod_id": selector,
                 "agent": null,
                 "overall": "failed",
                 "open_enabled": false,
@@ -10143,7 +10312,7 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
     };
 
     let api_url = agent.api_url.clone().unwrap_or_default();
-    let base_status = if !readiness_strict_enabled() && !api_url.is_empty() {
+    let api_status = if !readiness_strict_enabled() && !api_url.is_empty() {
         AgentStatus::Ready
     } else {
         probe_agent_status(
@@ -10154,17 +10323,25 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
             agent.ui_url.as_deref(),
         )
     };
-    let bootstrap = check_pod_tytus_bootstrap_entry(&pod_id, false);
+    let ui_status = probe_agent_ui_status(&agent.agent_type, agent.ui_url.as_deref());
+    let bootstrap = if route_scoped_exec_available(&agent, &snap) {
+        check_pod_tytus_bootstrap_entry(&agent.pod_id, false)
+    } else {
+        duplicate_pod_exec_skip_entry(&agent)
+    };
     let bootstrap_ok = bootstrap_status_allows_open(&bootstrap.status);
-    let core_ready = base_status == AgentStatus::Ready;
-    let open_enabled = core_ready && bootstrap_ok;
+    let core_ready = api_status == AgentStatus::Ready;
+    let ui_ready = ui_status == AgentStatus::Ready;
+    let open_enabled = core_ready && ui_ready && bootstrap_ok;
     let overall = if open_enabled {
         if bootstrap.status == "degraded" {
             "degraded"
         } else {
             "ready"
         }
-    } else if matches!(base_status, AgentStatus::Unhealthy | AgentStatus::Stopped)
+    } else if core_ready {
+        "degraded"
+    } else if matches!(api_status, AgentStatus::Unhealthy | AgentStatus::Stopped)
         || bootstrap_status_is_failed(&bootstrap.status)
     {
         "failed"
@@ -10172,11 +10349,11 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
         "starting"
     };
     cache_agent_status(
-        &pod_id,
+        &agent.id,
         if open_enabled {
             AgentStatus::Ready
         } else {
-            base_status
+            api_status
         },
     );
 
@@ -10193,13 +10370,13 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
     stages.push(serde_json::json!({
         "id":"agent_http",
         "label":"Agent HTTP/API health",
-        "status": stage_status_from_agent(base_status),
-        "detail": agent_status_label(base_status)
+        "status": stage_status_from_agent(api_status),
+        "detail": agent_status_label(api_status)
     }));
     stages.push(serde_json::json!({
         "id":"agent_ui",
         "label":"Agent UI route",
-        "status": if agent_has_browser_ui(&agent.agent_type) { stage_status_from_agent(base_status) } else { "skipped" },
+        "status": if agent_has_browser_ui(&agent.agent_type) { stage_status_from_agent(ui_status) } else { "skipped" },
         "detail": agent.ui_url.clone()
     }));
     stages.push(serde_json::json!({
@@ -10208,7 +10385,7 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
         "status": bootstrap.status.clone(),
         "detail": bootstrap_stage_detail(&bootstrap)
     }));
-    let (shared_status, shared_detail) = check_pod_shared_storage_stage(&pod_id);
+    let (shared_status, shared_detail) = check_agent_shared_storage_stage(&agent, &snap);
     stages.push(serde_json::json!({
         "id":"shared_storage",
         "label":"Shared storage",
@@ -10220,7 +10397,10 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
         request,
         200,
         &serde_json::json!({
-            "pod_id": pod_id,
+            "pod_id": agent.pod_id,
+            "id": agent.id,
+            "route_id": agent.route_id,
+            "display_label": agent.display_label,
             "agent": agent.agent_type,
             "overall": overall,
             "open_enabled": open_enabled,
@@ -10232,7 +10412,7 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
 }
 
 fn handle_pod_uninstall(request: Request, query: &str) {
-    let pod_id = match parse_pod_id(query) {
+    let selector = match parse_pod_selector(query) {
         Some(p) => p,
         None => {
             respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
@@ -10243,7 +10423,12 @@ fn handle_pod_uninstall(request: Request, query: &str) {
     // pods have no agent to remove — `tytus agent uninstall <pod>` on a
     // default pod is a no-op + confusing error.
     let snap = compute_state_snapshot();
-    if !snap.agents.iter().any(|a| a.pod_id == pod_id) {
+    let Some(agent) = snap
+        .agents
+        .iter()
+        .find(|a| agent_matches_selector(a, &selector))
+        .cloned()
+    else {
         respond_json(
             request,
             400,
@@ -10252,7 +10437,8 @@ fn handle_pod_uninstall(request: Request, query: &str) {
             }),
         );
         return;
-    }
+    };
+    let pod_id = agent.pod_id;
     let bin = resolve_tytus_bin();
     let spawned = Command::new(&bin)
         .args(["agent", "uninstall", &pod_id, "--json"])
@@ -10422,7 +10608,10 @@ fn update_catalog_url() -> String {
 
 fn update_install_command() -> String {
     if cfg!(windows) {
-        format!("powershell -c \"irm {} | iex\"", TYTUS_UPDATE_INSTALL_PS1_URL)
+        format!(
+            "powershell -c \"irm {} | iex\"",
+            TYTUS_UPDATE_INSTALL_PS1_URL
+        )
     } else {
         format!("curl -fsSL {} | bash", TYTUS_UPDATE_INSTALL_SH_URL)
     }
@@ -10894,8 +11083,7 @@ fn json_pod_matches_status(p: &serde_json::Value, sp: &atomek_pods::PodEntry) ->
         (None, None) => {}
     }
     p.get("pod_id").and_then(|v| v.as_str()) == Some(sp.pod_id.as_str())
-        && p
-            .get("agent_type")
+        && p.get("agent_type")
             .and_then(|v| v.as_str())
             .unwrap_or("none")
             == sp.agent_type.as_deref().unwrap_or("none")
@@ -10916,8 +11104,7 @@ async fn ensure_default_pod_json(client: &atomek_pods::TytusClient, root: &mut s
             return p.get("route_id").and_then(|v| v.as_str()) == Some(route);
         }
         p.get("pod_id").and_then(|v| v.as_str()) == Some(alloc.pod_id.as_str())
-            && p
-                .get("agent_type")
+            && p.get("agent_type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("none")
                 == "none"
@@ -10951,10 +11138,45 @@ async fn ensure_default_pod_json(client: &atomek_pods::TytusClient, root: &mut s
 }
 
 fn handle_logout(request: Request) {
-    // Destructive: revokes all pods + clears keychain. JS confirms before
-    // POSTing. Run headless inline so TytusOS logs out inside the page instead
-    // of spawning a macOS Terminal window.
-    run_tytus_inline(request, &["logout"]);
+    // Local sign-out only.
+    //
+    // Do NOT call `tytus logout` here. That command is intentionally
+    // destructive: it revokes every server-side pod allocation for the
+    // account. Browser/TytusOS "Sign out" must only unpair this computer;
+    // pod destruction belongs behind explicit per-pod revoke flows.
+    let Some(email) = active_account_email_from_state() else {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({
+                "ok": false,
+                "error": "no active Tytus account to sign out"
+            }),
+        );
+        return;
+    };
+    run_tytus_inline_owned(
+        request,
+        vec![
+            "account".to_string(),
+            "remove".to_string(),
+            email,
+            "--force".to_string(),
+        ],
+    );
+}
+
+fn active_account_email_from_state() -> Option<String> {
+    let path = state_json_path()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let state: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    state
+        .get("active_email")
+        .or_else(|| state.get("email"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn parse_toggle_body(request: &mut Request) -> Result<bool, ()> {
@@ -10970,9 +11192,13 @@ fn parse_toggle_body(request: &mut Request) -> Result<bool, ()> {
 }
 
 fn run_tytus_inline(request: Request, args: &[&str]) {
+    run_tytus_inline_owned(request, args.iter().map(|s| (*s).to_string()).collect());
+}
+
+fn run_tytus_inline_owned(request: Request, args: Vec<String>) {
     let bin = resolve_tytus_bin();
     let out = Command::new(&bin)
-        .args(args)
+        .args(&args)
         .env("TYTUS_HEADLESS", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -11435,9 +11661,7 @@ fn parse_channel_query(query: &str) -> (Option<String>, Option<String>) {
         if let Some((k, v)) = pair.split_once('=') {
             match k {
                 "pod" => {
-                    if valid_pod_id(v) {
-                        pod = Some(v.to_string());
-                    }
+                    pod = canonical_pod_selector(v);
                 }
                 "name" => {
                     if valid_channel_name(v) {
@@ -11453,7 +11677,7 @@ fn parse_channel_query(query: &str) -> (Option<String>, Option<String>) {
 
 fn handle_channels_list(request: Request, query: &str) {
     let (pod, _) = parse_channel_query(query);
-    let pod_id = match pod {
+    let selector = match pod {
         Some(p) => p,
         None => {
             respond_json(
@@ -11464,16 +11688,24 @@ fn handle_channels_list(request: Request, query: &str) {
             return;
         }
     };
-    let configured: Vec<serde_json::Value> = crate::read_channels_for_pod(&pod_id)
-        .into_iter()
-        .map(|(name, count)| {
-            serde_json::json!({
-                "name": name,
-                "label": crate::channel_label(&name),
-                "secret_count": count,
+    let pod_id = match cli_pod_id_for_selector(&selector) {
+        Some(p) => p,
+        None => {
+            respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
+            return;
+        }
+    };
+    let configured: Vec<serde_json::Value> =
+        crate::read_channels_for_pod_identity(&selector, &pod_id)
+            .into_iter()
+            .map(|(name, count)| {
+                serde_json::json!({
+                    "name": name,
+                    "label": crate::channel_label(&name),
+                    "secret_count": count,
+                })
             })
-        })
-        .collect();
+            .collect();
     // Available = everything in CHANNEL_MENU_ENTRIES that isn't already
     // configured on this pod. Matches what the tray's channels submenu
     // shows when building the "Add X…" list.
@@ -11491,6 +11723,7 @@ fn handle_channels_list(request: Request, query: &str) {
         200,
         &serde_json::json!({
             "pod_id": pod_id,
+            "id": selector,
             "configured": configured,
             "available": available,
         }),
@@ -11537,8 +11770,34 @@ fn handle_channels_add(mut request: Request, _query: &str) {
             return;
         }
     };
-    if !valid_pod_id(&body.pod) {
+    let selector = match canonical_pod_selector(&body.pod) {
+        Some(p) => p,
+        None => {
+            respond_json(request, 400, &serde_json::json!({"error": "invalid pod"}));
+            return;
+        }
+    };
+    let pod_id = match cli_pod_id_for_selector(&selector) {
+        Some(p) => p,
+        None => {
+            respond_json(request, 400, &serde_json::json!({"error": "invalid pod"}));
+            return;
+        }
+    };
+    if !valid_pod_id(&pod_id) {
         respond_json(request, 400, &serde_json::json!({"error": "invalid pod"}));
+        return;
+    }
+    if route_scoped_channel_ops_required(&selector, &pod_id) {
+        respond_json(
+            request,
+            409,
+            &serde_json::json!({
+                "error": "channel install is blocked for duplicate pod_id routes until provider channel ops are route-scoped",
+                "pod_id": pod_id,
+                "route_id": selector,
+            }),
+        );
         return;
     }
     if !valid_channel_name(&body.channel) {
@@ -11562,7 +11821,7 @@ fn handle_channels_add(mut request: Request, _query: &str) {
             "channels",
             "add",
             "--pod",
-            &body.pod,
+            &pod_id,
             "--type",
             &body.channel,
             "--token",
@@ -11573,7 +11832,7 @@ fn handle_channels_add(mut request: Request, _query: &str) {
 
 fn handle_channels_remove(request: Request, query: &str) {
     let (pod, name) = parse_channel_query(query);
-    let (Some(pod_id), Some(channel)) = (pod, name) else {
+    let (Some(selector), Some(channel)) = (pod, name) else {
         respond_json(
             request,
             400,
@@ -11581,6 +11840,22 @@ fn handle_channels_remove(request: Request, query: &str) {
         );
         return;
     };
+    let Some(pod_id) = cli_pod_id_for_selector(&selector) else {
+        respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
+        return;
+    };
+    if route_scoped_channel_ops_required(&selector, &pod_id) {
+        respond_json(
+            request,
+            409,
+            &serde_json::json!({
+                "error": "channel removal is blocked for duplicate pod_id routes until provider channel ops are route-scoped",
+                "pod_id": pod_id,
+                "route_id": selector,
+            }),
+        );
+        return;
+    }
     // Client confirms first; server runs the subprocess inline. The
     // credential wipe + redeploy takes ~10s, so the HTTP thread blocks
     // for that window — acceptable since each click is its own thread
@@ -11700,7 +11975,10 @@ mod tests {
     #[test]
     fn cortex_profile_defaults_to_cloud() {
         let state = local_state_fixture("cloud", false);
-        assert!(matches!(resolve_cortex_upstream(&state), CortexUpstream::Cloud));
+        assert!(matches!(
+            resolve_cortex_upstream(&state),
+            CortexUpstream::Cloud
+        ));
     }
 
     #[test]
@@ -11708,7 +11986,10 @@ mod tests {
         // Half-installed local stack must not break chat — fall back to cloud
         // so the user still gets a response while they finish setup.
         let state = local_state_fixture("local", false);
-        assert!(matches!(resolve_cortex_upstream(&state), CortexUpstream::Cloud));
+        assert!(matches!(
+            resolve_cortex_upstream(&state),
+            CortexUpstream::Cloud
+        ));
     }
 
     #[test]
@@ -11750,7 +12031,10 @@ mod tests {
         let frame = cortex_profile_sse_frame(&upstream);
         let s = std::str::from_utf8(&frame).unwrap();
         assert!(s.contains("\"profile\":\"local\""), "frame: {s:?}");
-        assert!(s.contains("\"cortex_version\":\"2026-05-17\""), "frame: {s:?}");
+        assert!(
+            s.contains("\"cortex_version\":\"2026-05-17\""),
+            "frame: {s:?}"
+        );
     }
 
     #[test]
@@ -11795,7 +12079,8 @@ mod tests {
             version_pinned: Some("2026-05-17".into()),
             user_id: None,
         });
-        let simulated_upstream = b"event: message\ndata: {\"chunk\":\"hi\"}\n\nevent: done\ndata: {}\n\n";
+        let simulated_upstream =
+            b"event: message\ndata: {\"chunk\":\"hi\"}\n\nevent: done\ndata: {}\n\n";
         let mut chained = Read::chain(
             std::io::Cursor::new(prefix.clone()),
             std::io::Cursor::new(&simulated_upstream[..]),
@@ -11909,12 +12194,16 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root =
-                std::env::temp_dir().join(format!("tytus-tray-home-{}-{nonce}", std::process::id()));
+            let root = std::env::temp_dir()
+                .join(format!("tytus-tray-home-{}-{nonce}", std::process::id()));
             std::fs::create_dir_all(&root).unwrap();
             let prev = std::env::var_os("HOME");
             std::env::set_var("HOME", &root);
-            Self { _lock: lock, prev, root }
+            Self {
+                _lock: lock,
+                prev,
+                root,
+            }
         }
 
         fn bind_shared_folder(&self, local_path: &std::path::Path) {
@@ -13611,8 +13900,13 @@ mod tests {
         assert!(body["device_session_id"].is_null());
         assert!(body["organization_id"].is_null());
         assert_eq!(body["status"], serde_json::json!("unpaired"));
-        assert_eq!(body["version"], serde_json::json!(env!("CARGO_PKG_VERSION")));
-        let label = body["hostname_label"].as_str().expect("hostname_label string");
+        assert_eq!(
+            body["version"],
+            serde_json::json!(env!("CARGO_PKG_VERSION"))
+        );
+        let label = body["hostname_label"]
+            .as_str()
+            .expect("hostname_label string");
         assert!(!label.is_empty(), "hostname_label must always be set");
         assert!(
             label.len() <= 32,

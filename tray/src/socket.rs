@@ -47,7 +47,7 @@ fn derive_gateway_token(pod_api_key: &str, pod_id: &str) -> String {
 ///      stored gateway_token is null. Deterministic formula.
 ///
 /// `shared_base` is the first non-empty `edge_public_url` found across
-/// the caller's pod set. `api_keys_by_pod` is a pod_id → pod_api_key
+/// the caller's pod set. `api_keys_by_pod` is a route_id/pod_id → pod_api_key
 /// map supplied by the caller (typically built from state.json, which
 /// always has the raw pod key — the daemon's JSON response REDACTS
 /// pod_api_key as a secrets-hygiene measure, so derivation would
@@ -86,6 +86,11 @@ fn build_pod_info(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
+        .or_else(|| {
+            route_id
+                .as_ref()
+                .and_then(|rid| api_keys_by_pod.get(rid).cloned())
+        })
         .or_else(|| api_keys_by_pod.get(&pod_id).cloned());
     let derived_token = pod_api_key
         .as_ref()
@@ -130,7 +135,7 @@ fn build_pod_info(
     }
 }
 
-/// Build the pod_id → pod_api_key map from state.json. Cheap (a few
+/// Build the route_id/pod_id → pod_api_key map from state.json. Cheap (a few
 /// KB file read + JSON parse) and called only when a pod info
 /// construction path needs to supply pod_api_key for derivation —
 /// which is every tray poll, ~every 2 s. Fails silently to empty map
@@ -149,9 +154,15 @@ fn load_api_keys_from_state() -> std::collections::HashMap<String, String> {
     if let Some(arr) = v.get("pods").and_then(|x| x.as_array()) {
         for p in arr {
             let id = p.get("pod_id").and_then(|v| v.as_str()).unwrap_or("");
+            let route = p.get("route_id").and_then(|v| v.as_str()).unwrap_or("");
             let key = p.get("pod_api_key").and_then(|v| v.as_str()).unwrap_or("");
-            if !id.is_empty() && !key.is_empty() {
-                m.insert(id.to_string(), key.to_string());
+            if !key.is_empty() {
+                if !route.is_empty() {
+                    m.insert(route.to_string(), key.to_string());
+                }
+                if !id.is_empty() {
+                    m.entry(id.to_string()).or_insert_with(|| key.to_string());
+                }
             }
         }
     }
@@ -229,6 +240,13 @@ pub fn poll_daemon_status() -> super::TrayState {
         // available. Uptime is unknown in this fallback, so leave it at 0.
         out.daemon_running = true;
         out.daemon_pid = pid;
+    } else {
+        // In the desktop app the tray process itself serves localhost:4242.
+        // There may be no separate legacy tytus-daemon socket/pidfile, but
+        // reporting "daemon offline" while this process is serving the OS is
+        // wrong and scares users. Treat the current tray as the local daemon.
+        out.daemon_running = true;
+        out.daemon_pid = std::process::id() as u64;
     }
 
     // Overlay state.json. The file is the atomic source of truth for auth
@@ -252,9 +270,11 @@ pub fn poll_daemon_status() -> super::TrayState {
         if out.tier.is_empty() {
             out.tier = f.tier;
         }
-        // Prefer the file's pod list when the daemon didn't contribute
-        // one (daemon down, just started, or has a smaller view).
-        if out.pods.is_empty() {
+        // Prefer the file's pod list whenever present. The daemon can lag
+        // after a sync and can strip/lose UI-critical metadata (route_id,
+        // display_name, stable keys) while state.json is the atomic local
+        // source of truth written by `tytus status/connect`.
+        if !f.pods.is_empty() {
             out.pods = f.pods;
         }
     }
@@ -500,12 +520,17 @@ fn read_state_file() -> Option<FileSnap> {
     let api_keys = pods_json
         .iter()
         .filter_map(|p| {
-            let id = p.get("pod_id").and_then(|v| v.as_str())?;
+            let id = p.get("pod_id").and_then(|v| v.as_str()).unwrap_or("");
+            let route = p.get("route_id").and_then(|v| v.as_str()).unwrap_or("");
             let key = p.get("pod_api_key").and_then(|v| v.as_str())?;
-            if id.is_empty() || key.is_empty() {
+            if key.is_empty() {
+                return None;
+            }
+            let map_key = if !route.is_empty() { route } else { id };
+            if map_key.is_empty() {
                 None
             } else {
-                Some((id.to_string(), key.to_string()))
+                Some((map_key.to_string(), key.to_string()))
             }
         })
         .collect::<std::collections::HashMap<_, _>>();

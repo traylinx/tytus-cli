@@ -230,7 +230,11 @@ fn print_status_text(report: &CortexStatusReport, is_local: bool) {
     );
     println!(
         "ctx_* token present:      {}",
-        if report.local_token_present { "yes" } else { "NO" }
+        if report.local_token_present {
+            "yes"
+        } else {
+            "NO"
+        }
     );
     println!(
         "Internal service token:   {}",
@@ -242,7 +246,10 @@ fn print_status_text(report: &CortexStatusReport, is_local: bool) {
     );
     match &report.docker_status {
         DockerStatus::Running { containers } => {
-            println!("Docker:                   running ({} container(s))", containers.len());
+            println!(
+                "Docker:                   running ({} container(s))",
+                containers.len()
+            );
             for c in containers {
                 println!("  - {c}");
             }
@@ -262,7 +269,10 @@ fn print_status_text(report: &CortexStatusReport, is_local: bool) {
             println!("  llm_config: {}", h.llm_config);
         }
     } else {
-        println!("API (/health/live):       unreachable on 127.0.0.1:{}", report.local_port);
+        println!(
+            "API (/health/live):       unreachable on 127.0.0.1:{}",
+            report.local_port
+        );
     }
 }
 
@@ -584,11 +594,14 @@ async fn cmd_test(message: Option<String>, json: bool) -> Result<(), String> {
     // no ctx_* token is mintable. Cortex IS reachable via the service token on
     // /internal/tytus/chat — same path the tray daemon uses. Reuse it here so
     // `tytus cortex test` actually works.
-    let service_token = state.cortex_internal_service_token.as_deref().ok_or_else(|| {
-        "no INTERNAL_SERVICE_TOKEN in state.json. Run `tytus cortex up` to mint \
+    let service_token = state
+        .cortex_internal_service_token
+        .as_deref()
+        .ok_or_else(|| {
+            "no INTERNAL_SERVICE_TOKEN in state.json. Run `tytus cortex up` to mint \
          the local stack secrets."
-            .to_string()
-    })?;
+                .to_string()
+        })?;
     let user_id = state
         .cortex_local_user_id
         .clone()
@@ -822,7 +835,10 @@ fn state_dir() -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     {
         let home = dirs::home_dir().ok_or_else(|| "home dir not found".to_string())?;
-        Ok(home.join("Library").join("Application Support").join("tytus"))
+        Ok(home
+            .join("Library")
+            .join("Application Support")
+            .join("tytus"))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -856,7 +872,10 @@ async fn ensure_docker_reachable() -> Result<(), String> {
 
 async fn wait_for_health(port: u16, max_secs: u64) -> bool {
     let url = format!("http://127.0.0.1:{port}/health/live");
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(3)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -987,7 +1006,9 @@ mod tests {
     fn pinned_tag_is_iso_date_like() {
         // Sanity: pinned tag follows a stable shape. Bump deliberately, not by typo.
         assert!(CORTEX_PINNED_TAG.len() >= 8);
-        assert!(CORTEX_PINNED_TAG.chars().all(|c| c.is_ascii_digit() || c == '-'));
+        assert!(CORTEX_PINNED_TAG
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '-'));
     }
 
     #[test]

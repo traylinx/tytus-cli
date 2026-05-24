@@ -398,7 +398,11 @@ impl PodInfo {
     }
     /// Human label for menus. Falls back to the raw id if we don't know it.
     pub fn display_name(&self) -> String {
-        if let Some(name) = self.custom_display_name.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(name) = self
+            .custom_display_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
             return match self.agent_type.as_str() {
                 "nemoclaw" => format!("{} · OpenClaw", name),
                 "hermes" => format!("{} · Hermes", name),
@@ -423,6 +427,16 @@ impl PodInfo {
     /// AIL-gateway-only). Added SPRINT §4.1.
     pub fn is_default(&self) -> bool {
         self.agent_type == "none"
+    }
+
+    /// Stable menu/UI selector. DAM pod_id can repeat when multiple agents
+    /// live on the same customer allocation; route_id is unique per pod.
+    pub fn selector_id(&self) -> String {
+        self.route_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.pod_id)
+            .to_string()
     }
 }
 
@@ -473,6 +487,19 @@ pub fn channel_label(short: &str) -> String {
 /// just a small JSON parse. Returns an empty vec if the file is
 /// missing or unparseable, so the menu degrades gracefully to "No
 /// channels configured".
+/// Read channels by stable route identity first, with legacy numeric pod-id
+/// fallback. New Tytus fleets can have multiple route-scoped resources that
+/// all report pod_id="01" (included AIL + OpenClaw + Hermes). Reading only
+/// by pod_id makes their channel state collide and hides the real local config.
+pub fn read_channels_for_pod_identity(selector: &str, pod_id: &str) -> Vec<(String, usize)> {
+    let by_selector = read_channels_for_pod(selector);
+    if !by_selector.is_empty() || selector == pod_id {
+        by_selector
+    } else {
+        read_channels_for_pod(pod_id)
+    }
+}
+
 pub fn read_channels_for_pod(pod_id: &str) -> Vec<(String, usize)> {
     let home = match std::env::var("HOME") {
         Ok(h) => h,
@@ -936,14 +963,14 @@ fn build_menu(state: &TrayState) -> Menu {
     // double-click doesn't fire a second `tytus connect` in parallel.
     // The busy status line above already tells the user what's
     // happening; the grayed-out item reinforces it.
-    // Phase C — top-level menu collapses to ≤8 items via a Quick actions
+    // Phase C — top-level menu collapses to ≤8 items via a Controls
     // submenu. This builder is populated incrementally throughout the
     // logged-in branches below (Connect/Disconnect, Open-in, Health test,
     // Pods & Agents, Shared Folders, AIL connection info) and finally
     // appended to the top-level menu in one place, after TytusOS deep-links
     // and before Settings/Help. Empty when not logged in (we skip the
     // append).
-    let quick_actions_sub = Submenu::new("Quick actions", true);
+    let controls_sub = Submenu::new("Controls", true);
 
     let is_busy = busy_current().is_some();
     if !state.logged_in {
@@ -988,17 +1015,16 @@ fn build_menu(state: &TrayState) -> Menu {
         // tear it down), Connect is the primary when it isn't (to bring
         // it up for users who want the encrypted path). Users with the
         // public URL already wired don't need to touch either.
-        // All three of these now nest under Quick actions ▸ per Phase C.
+        // All three of these now nest under Controls ▸ per Phase C.
         if state.tunnel_active {
-            let _ = quick_actions_sub.append(&MenuItem::with_id(
+            let _ = controls_sub.append(&MenuItem::with_id(
                 "disconnect",
                 "Disconnect",
                 !is_busy,
                 None,
             ));
         } else {
-            let _ =
-                quick_actions_sub.append(&MenuItem::with_id("connect", "Connect", !is_busy, None));
+            let _ = controls_sub.append(&MenuItem::with_id("connect", "Connect", !is_busy, None));
         }
 
         let clis = launcher::detect_installed_clis();
@@ -1016,10 +1042,10 @@ fn build_menu(state: &TrayState) -> Menu {
             true,
             None,
         ));
-        let _ = quick_actions_sub.append(&open_sub);
+        let _ = controls_sub.append(&open_sub);
 
-        let _ = quick_actions_sub.append(&MenuItem::with_id("test", "Run Health Test", true, None));
-        let _ = quick_actions_sub.append(&PredefinedMenuItem::separator());
+        let _ = controls_sub.append(&MenuItem::with_id("test", "Run Health Test", true, None));
+        let _ = controls_sub.append(&PredefinedMenuItem::separator());
     }
 
     // ── AIL Connection Info ▸ ─────────────────────────────────
@@ -1123,12 +1149,12 @@ fn build_menu(state: &TrayState) -> Menu {
             None,
         ));
 
-        // Phase C: AIL Connection Info nests under Quick actions ▸ — it's
+        // Phase C: AIL Connection Info nests under Controls ▸ — it's
         // a power-user surface (export blocks for Claude/Cursor/OpenCode)
         // that grandma never reaches but power users still want one menu
         // expand away.
-        let _ = quick_actions_sub.append(&info_sub);
-        let _ = quick_actions_sub.append(&PredefinedMenuItem::separator());
+        let _ = controls_sub.append(&info_sub);
+        let _ = controls_sub.append(&PredefinedMenuItem::separator());
     }
 
     // ── Pods & Agents ▸ ───────────────────────────────────
@@ -1145,36 +1171,56 @@ fn build_menu(state: &TrayState) -> Menu {
             ));
             let _ = pods_sub.append(&PredefinedMenuItem::separator());
         } else {
-            // Surface the default pod (agent-less, 0 units) on its own row
-            // as informational — no actions. It's universal, costs
-            // nothing, and auto-reprovisions on every `tytus login`, so
-            // there's nothing a user ever gains from "revoking" it (the
-            // next login would just allocate another one, churning the
-            // slot and the stable key map without freeing units). Power
-            // users who genuinely want to release the droplet slot can
-            // still `tytus revoke <pod_id>` from the CLI. Per §4.1 +
-            // user feedback 2026-04-19.
+            // Surface the included AIL gateway as a real pod entry. It is
+            // agent-less and costs 0 units, but it is still a provisioned
+            // route with a public/private API URL. Rendering it as a grey
+            // disabled header made users think Tytus had "lost" a pod.
             for p in state.pods.iter().filter(|p| p.is_default()) {
-                let header = format!("Default Pod {} — AIL only  (0 units)", p.pod_id,);
-                let _ = pods_sub.append(&MenuItem::with_id(
-                    format!("pod_header_{}", p.pod_id),
-                    &header,
-                    false,
+                let selector = p.selector_id();
+                let ail_sub = Submenu::new("Default AIL gateway  (included · 0 units)", true);
+
+                let _ = ail_sub.append(&MenuItem::with_id(
+                    format!("pod_{}_copy_url", selector),
+                    "Copy Public API URL",
+                    p.public_pod_url().is_some(),
                     None,
                 ));
+                let _ = ail_sub.append(&MenuItem::with_id(
+                    "copy_ail_url",
+                    "Copy Private AIL URL",
+                    true,
+                    None,
+                ));
+                let _ = ail_sub.append(&MenuItem::with_id(
+                    "copy_ail_exports",
+                    "Copy env block",
+                    p.stable_user_key
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .is_some(),
+                    None,
+                ));
+                let _ = ail_sub.append(&PredefinedMenuItem::separator());
+                let _ = ail_sub.append(&MenuItem::with_id(
+                    "open_tytusos",
+                    "Open in TytusOS",
+                    true,
+                    None,
+                ));
+                let _ = pods_sub.append(&ail_sub);
                 let _ = pods_sub.append(&PredefinedMenuItem::separator());
             }
 
             for p in state.pods.iter().filter(|p| !p.is_default()) {
+                let selector = p.selector_id();
                 let header = format!(
-                    "Pod {} — {}  ({} unit{})",
-                    p.pod_id,
+                    "{}  ({} unit{})",
                     p.display_name(),
                     p.units(),
                     if p.units() == 1 { "" } else { "s" },
                 );
                 let _ = pods_sub.append(&MenuItem::with_id(
-                    format!("pod_header_{}", p.pod_id),
+                    format!("pod_header_{}", selector),
                     &header,
                     false,
                     None,
@@ -1218,7 +1264,7 @@ fn build_menu(state: &TrayState) -> Menu {
                         (false, false, false) => "  💬 Connect & chat…",
                     };
                     let _ = pods_sub.append(&MenuItem::with_id(
-                        format!("pod_{}_open", p.pod_id),
+                        format!("pod_{}_open", selector),
                         open_label,
                         true,
                         None,
@@ -1236,26 +1282,26 @@ fn build_menu(state: &TrayState) -> Menu {
                 // click and zero native-code risk.
                 let files_sub = Submenu::new("  📁 Files", true);
                 let _ = files_sub.append(&MenuItem::with_id(
-                    files::menu_id_push_file(&p.pod_id),
+                    files::menu_id_push_file(&selector),
                     "Push file…",
                     true,
                     None,
                 ));
                 let _ = files_sub.append(&MenuItem::with_id(
-                    files::menu_id_push_folder(&p.pod_id),
+                    files::menu_id_push_folder(&selector),
                     "Push folder…",
                     true,
                     None,
                 ));
                 let _ = files_sub.append(&PredefinedMenuItem::separator());
                 let _ = files_sub.append(&MenuItem::with_id(
-                    files::menu_id_list_inbox(&p.pod_id),
+                    files::menu_id_list_inbox(&selector),
                     "List inbox in Terminal",
                     true,
                     None,
                 ));
                 let _ = files_sub.append(&MenuItem::with_id(
-                    files::menu_id_open_downloads(&p.pod_id),
+                    files::menu_id_open_downloads(&selector),
                     "Open local download folder",
                     true,
                     None,
@@ -1282,7 +1328,7 @@ fn build_menu(state: &TrayState) -> Menu {
                             .unwrap_or(false);
                 let _ = files_sub.append(&PredefinedMenuItem::separator());
                 let _ = files_sub.append(&MenuItem::with_id(
-                    shared_folders::menu_id_bind_folder(&p.pod_id),
+                    shared_folders::menu_id_bind_folder(&selector),
                     if bind_helper_present {
                         "Bind a Mac folder to this pod…"
                     } else {
@@ -1292,7 +1338,7 @@ fn build_menu(state: &TrayState) -> Menu {
                     None,
                 ));
                 let _ = files_sub.append(&MenuItem::with_id(
-                    shared_folders::menu_id_refresh_creds(&p.pod_id),
+                    shared_folders::menu_id_refresh_creds(&selector),
                     "Refresh shared-folder credentials",
                     bind_helper_present,
                     None,
@@ -1312,10 +1358,10 @@ fn build_menu(state: &TrayState) -> Menu {
                 // The tray reads it cheaply on each menu rebuild — no
                 // network, no daemon call, always fresh.
                 let channel_sub = Submenu::new("  📨 Channels", true);
-                let configured = read_channels_for_pod(&p.pod_id);
+                let configured = read_channels_for_pod_identity(&selector, &p.pod_id);
                 if configured.is_empty() {
                     let _ = channel_sub.append(&MenuItem::with_id(
-                        format!("pod_{}_channels_empty", p.pod_id),
+                        format!("pod_{}_channels_empty", selector),
                         "No channels configured",
                         false,
                         None,
@@ -1324,7 +1370,7 @@ fn build_menu(state: &TrayState) -> Menu {
                 } else {
                     for (name, cred_count) in &configured {
                         let _ = channel_sub.append(&MenuItem::with_id(
-                            format!("pod_{}_channel_{}_info", p.pod_id, name),
+                            format!("pod_{}_channel_{}_info", selector, name),
                             format!(
                                 "{}  ✓  ({} secret{})",
                                 channel_label(name),
@@ -1341,7 +1387,7 @@ fn build_menu(state: &TrayState) -> Menu {
                     // exact spelling.
                     for (name, _) in &configured {
                         let _ = channel_sub.append(&MenuItem::with_id(
-                            format!("pod_{}_channel_{}_remove", p.pod_id, name),
+                            format!("pod_{}_channel_{}_remove", selector, name),
                             format!("Remove {}", channel_label(name)),
                             true,
                             None,
@@ -1353,7 +1399,7 @@ fn build_menu(state: &TrayState) -> Menu {
                 // always find the "add" affordance even when the pod has
                 // no channels yet.
                 let _ = channel_sub.append(&MenuItem::with_id(
-                    format!("pod_{}_channels_catalog", p.pod_id),
+                    format!("pod_{}_channels_catalog", selector),
                     "Browse available channels…",
                     true,
                     None,
@@ -1365,7 +1411,7 @@ fn build_menu(state: &TrayState) -> Menu {
                         continue;
                     }
                     let _ = channel_sub.append(&MenuItem::with_id(
-                        format!("pod_{}_channel_{}_add", p.pod_id, known.0),
+                        format!("pod_{}_channel_{}_add", selector, known.0),
                         format!("Add {}…", known.1),
                         true,
                         None,
@@ -1383,7 +1429,7 @@ fn build_menu(state: &TrayState) -> Menu {
                 let manage_sub = Submenu::new("  ⚙ Manage", true);
                 if public_pod_url.is_some() {
                     let _ = manage_sub.append(&MenuItem::with_id(
-                        format!("pod_{}_copy_url", p.pod_id),
+                        format!("pod_{}_copy_url", selector),
                         "Copy Public API URL",
                         true,
                         None,
@@ -1391,14 +1437,14 @@ fn build_menu(state: &TrayState) -> Menu {
                 }
                 if forwarder_live {
                     let _ = manage_sub.append(&MenuItem::with_id(
-                        format!("pod_{}_stop_forwarder", p.pod_id),
+                        format!("pod_{}_stop_forwarder", selector),
                         "Stop Forwarder",
                         true,
                         None,
                     ));
                 }
                 let _ = manage_sub.append(&MenuItem::with_id(
-                    format!("pod_{}_restart", p.pod_id),
+                    format!("pod_{}_restart", selector),
                     "Restart Agent",
                     true,
                     None,
@@ -1414,14 +1460,14 @@ fn build_menu(state: &TrayState) -> Menu {
                 // safe in-place swap while still destroying container
                 // workspace state. (Decision: 2026-04-18, post-sprint UX.)
                 let _ = manage_sub.append(&MenuItem::with_id(
-                    format!("pod_{}_uninstall", p.pod_id),
+                    format!("pod_{}_uninstall", selector),
                     "Uninstall Agent  (keeps pod)",
                     true,
                     None,
                 ));
                 let _ = manage_sub.append(&PredefinedMenuItem::separator());
                 let _ = manage_sub.append(&MenuItem::with_id(
-                    format!("pod_{}_revoke", p.pod_id),
+                    format!("pod_{}_revoke", selector),
                     "Revoke Pod",
                     true,
                     None,
@@ -1487,8 +1533,8 @@ fn build_menu(state: &TrayState) -> Menu {
         }
 
         // Phase C: Pods & Agents — renamed "Show all pods" — nests under
-        // Quick actions ▸ instead of being a top-level submenu.
-        let _ = quick_actions_sub.append(&pods_sub);
+        // Controls ▸ instead of being a top-level submenu.
+        let _ = controls_sub.append(&pods_sub);
 
         // ── Shared Folders ▸ (garagetytus v0.5.3 integration) ──
         // Top-level submenu for global shared-folder ops. Per-pod
@@ -1574,17 +1620,17 @@ fn build_menu(state: &TrayState) -> Menu {
             true,
             None,
         ));
-        // Phase C: Shared Folders nests under Quick actions ▸. Direct
+        // Phase C: Shared Folders nests under Controls ▸. Direct
         // per-binding "open in Finder" entries are still ≤3 clicks deep
-        // (T → Quick actions → Shared Folders → click row).
-        let _ = quick_actions_sub.append(&shared_sub);
+        // (T → Controls → Shared Folders → click row).
+        let _ = controls_sub.append(&shared_sub);
     }
 
-    // Phase C: Append the populated Quick actions ▸ submenu once, after
+    // Phase C: Append the populated Controls ▸ submenu once, after
     // every contributor has had its turn. No-op when not logged in (the
     // submenu is empty and never appended).
     if state.logged_in {
-        let _ = menu.append(&quick_actions_sub);
+        let _ = menu.append(&controls_sub);
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
 
@@ -1871,12 +1917,13 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             open_in_terminal_simple("tytus login");
         }
         "logout" => {
-            // Destructive: revokes all pods and clears keychain. Confirm first.
+            // Local sign-out only. `tytus logout` revokes server-side pods;
+            // never wire the normal tray sign-out UX to that destructive path.
             if confirm_dialog(
                 "Sign out of Tytus?",
-                "This revokes all your pods, clears stored credentials, and tears down any active tunnels. You'll need to sign in again to reconnect.",
+                "This removes this computer's Tytus login. Your cloud pods stay allocated and keep running.",
             ) {
-                open_in_terminal_simple("tytus logout; echo; echo 'Press Enter to close…'; read _");
+                open_in_terminal_simple("email=$(tytus account current 2>/dev/null); if [ -n \"$email\" ]; then tytus account remove \"$email\" --force; else echo 'No active Tytus account.'; fi; echo; echo 'Press Enter to close…'; read _");
             }
         }
         "daemon_start" => {
@@ -1932,7 +1979,10 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                             let release = release_tag.unwrap_or_else(|| format!("v{}", latest));
                             notify(
                                 "Tytus update available",
-                                &format!("Version {} is available. Use Settings → Update Tytus…", latest),
+                                &format!(
+                                    "Version {} is available. Use Settings → Update Tytus…",
+                                    latest
+                                ),
                             );
                             let msg = format!(
                                 "Tytus {} is available (installed: {}).\n\nUse Settings → Update Tytus… or run:\n{}",
@@ -1940,7 +1990,10 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                                 current,
                                 tytus_install_command()
                             );
-                            let _ = atomek_core::platform::dialog::show_info("Tytus update available", &msg);
+                            let _ = atomek_core::platform::dialog::show_info(
+                                "Tytus update available",
+                                &msg,
+                            );
                         } else {
                             notify("Tytus", &format!("Tytus {} is up to date.", current));
                         }
@@ -2096,42 +2149,38 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             // which validates the token there. Falls back to the legacy
             // forwarder when either the edge URL or the gateway-token is
             // missing (old daemon, EDGE_PATH_ENABLED=0, mid-rollout).
-            let pod_id = other
+            let selector = other
                 .trim_start_matches("pod_")
                 .trim_end_matches("_open")
                 .to_string();
-            let public_ui = {
-                let s = state.lock().unwrap();
-                s.pods
-                    .iter()
-                    .find(|p| p.pod_id == pod_id)
-                    .and_then(|p| p.public_ui_url())
-            };
+            let pod = pod_for_selector(state, &selector);
+            let public_ui = pod.as_ref().and_then(|p| p.public_ui_url());
             match public_ui {
                 Some(url) => {
                     // Direct browser open — no forwarder spawn, no tunnel
                     // reachability check needed.
                     let _ = atomek_core::platform::open::open_url(&url);
-                    notify("Tytus", &format!("Opening pod {} via public edge", pod_id));
+                    let label = pod
+                        .as_ref()
+                        .map(|p| p.display_name())
+                        .unwrap_or_else(|| selector.clone());
+                    notify("Tytus", &format!("Opening {} via public edge", label));
                 }
-                None => open_pod_via_forwarder(&pod_id),
+                None => {
+                    let pod_id = pod.map(|p| p.pod_id).unwrap_or(selector);
+                    open_pod_via_forwarder(&pod_id);
+                }
             }
         }
         other if other.starts_with("pod_") && other.ends_with("_copy_url") => {
             // Copy the per-pod public API URL to clipboard for paste into
             // OpenAI-shaped client config (Cursor / Claude Desktop / SDKs).
             // Includes the trailing `/v1` so it's a drop-in OPENAI_BASE_URL.
-            let pod_id = other
+            let selector = other
                 .trim_start_matches("pod_")
                 .trim_end_matches("_copy_url")
                 .to_string();
-            let url = {
-                let s = state.lock().unwrap();
-                s.pods
-                    .iter()
-                    .find(|p| p.pod_id == pod_id)
-                    .and_then(|p| p.public_pod_url())
-            };
+            let url = pod_for_selector(state, &selector).and_then(|p| p.public_pod_url());
             match url {
                 Some(u) => {
                     let api_url = format!("{}/v1", u);
@@ -2146,10 +2195,11 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         }
         // Stop the per-pod forwarder daemon.
         other if other.starts_with("pod_") && other.ends_with("_stop_forwarder") => {
-            let pod_id = other
+            let selector = other
                 .trim_start_matches("pod_")
                 .trim_end_matches("_stop_forwarder")
                 .to_string();
+            let pod_id = cli_pod_id_for_selector(state, &selector);
             // Run via CLI so we get the same marker cleanup + exit code path
             // that CLI users see. Detached — no Terminal window for this.
             spawn_detached("tytus", &["ui", "--stop", "--pod", &pod_id]);
@@ -2299,7 +2349,8 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // suffix wins, and `_bind_folder` / `_refresh_creds` are
         // unique to shared_folders).
         other if shared_folders::parse_pod_action(other).is_some() => {
-            let (pod_id, action) = shared_folders::parse_pod_action(other).unwrap();
+            let (selector, action) = shared_folders::parse_pod_action(other).unwrap();
+            let pod_id = cli_pod_id_for_selector(state, &selector);
             match action {
                 shared_folders::SharedFoldersPodAction::BindFolder => {
                     if let Some(path) = files::pick_path(files::PickerKind::Folder) {
@@ -2325,7 +2376,8 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         }
         // File sharing (Phase 2 of SPRINT-tytus-shared-folders).
         other if files::parse_pod_from_files_id(other).is_some() => {
-            let (pod_id, action) = files::parse_pod_from_files_id(other).unwrap();
+            let (selector, action) = files::parse_pod_from_files_id(other).unwrap();
+            let pod_id = cli_pod_id_for_selector(state, &selector);
             match action {
                 files::FilesAction::PushFile => {
                     if let Some(path) = files::pick_path(files::PickerKind::File) {
@@ -2358,6 +2410,20 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         }
         _ => {}
     }
+}
+
+fn pod_for_selector(state: &Arc<Mutex<TrayState>>, selector: &str) -> Option<PodInfo> {
+    let s = state.lock().unwrap();
+    s.pods
+        .iter()
+        .find(|p| p.pod_id == selector || p.route_id.as_deref() == Some(selector))
+        .cloned()
+}
+
+fn cli_pod_id_for_selector(state: &Arc<Mutex<TrayState>>, selector: &str) -> String {
+    pod_for_selector(state, selector)
+        .map(|p| p.pod_id)
+        .unwrap_or_else(|| selector.to_string())
 }
 
 fn short_basename(path: &str) -> String {
@@ -2934,10 +3000,12 @@ fn log_file_with_legacy(
     }
 }
 
-
 fn tytus_install_command() -> String {
     if cfg!(windows) {
-        format!("powershell -c \"irm {} | iex\"", TYTUS_UPDATE_INSTALL_PS1_URL)
+        format!(
+            "powershell -c \"irm {} | iex\"",
+            TYTUS_UPDATE_INSTALL_PS1_URL
+        )
     } else {
         format!("curl -fsSL {} | bash", TYTUS_UPDATE_INSTALL_SH_URL)
     }

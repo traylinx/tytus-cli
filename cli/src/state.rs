@@ -539,12 +539,16 @@ impl CliState {
     /// refresh token is recovered and normal flow resumes.
     ///
     /// Semantically: "logged in" means "has email + means to call the
-    /// API". RT and a current AT both satisfy that; only the absence
-    /// of BOTH means the user really needs to `tytus login`.
+    /// API". RT and a current AT both satisfy that. For Tytus pod status,
+    /// the saved Sentinel pass also satisfies it: browser OAuth may need a
+    /// keychain refresh while the user still has a valid Tytus pass for
+    /// `/pod/status`, and local UI must not collapse to "0 pods".
     pub fn is_logged_in(&self) -> bool {
         let has_email = self.email.as_ref().is_some_and(|e| !e.is_empty());
         let has_rt = self.refresh_token.as_ref().is_some_and(|t| !t.is_empty());
-        has_email && (has_rt || self.has_valid_token())
+        let has_tytus_pass = self.secret_key.as_ref().is_some_and(|s| !s.is_empty())
+            && self.agent_user_id.as_ref().is_some_and(|s| !s.is_empty());
+        has_email && (has_rt || self.has_valid_token() || has_tytus_pass)
     }
 
     pub fn has_valid_token(&self) -> bool {

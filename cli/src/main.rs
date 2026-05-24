@@ -758,6 +758,7 @@ fn init_tracing() {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_target(false)
+            .with_writer(std::io::stderr)
             .init();
         return;
     }
@@ -806,6 +807,7 @@ fn init_tracing() {
             tracing_subscriber::fmt()
                 .with_env_filter("error")
                 .with_target(false)
+                .with_writer(std::io::stderr)
                 .init();
         }
     }
@@ -1017,7 +1019,7 @@ fn cmd_help_topic(topic: Option<&str>, json: bool) {
             "First, click the menu-bar T → Help → Run diagnostics. That walks\n\
              through every layer (sign-in, connection, AI gateway). Each\n\
              failure ends with a Try this → action you can click. If diagnostics\n\
-             pass but the chat still fails, try Quick actions → Disconnect, then\n\
+             pass but the chat still fails, try Controls → Disconnect, then\n\
              Connect again.",
         ),
         (
@@ -1782,14 +1784,7 @@ async fn cmd_status(http: &atomek_core::HttpClient, json: bool) {
         return;
     }
 
-    if let Err(e) = ensure_token(&mut state, http).await {
-        if json {
-            println!(r#"{{"logged_in":true,"token_error":"{}"}}"#, e);
-        } else {
-            eprintln!("Token refresh failed: {}. Run: tytus login", e);
-        }
-        return;
-    }
+    let token_error = ensure_token(&mut state, http).await.err();
     sync_tytus(&mut state, http).await;
 
     // Detect stale tunnels: state says tunnel is up but interface/daemon is dead
@@ -1799,6 +1794,12 @@ async fn cmd_status(http: &atomek_core::HttpClient, json: bool) {
     if json {
         print_json_status(&state);
     } else {
+        if let Some(e) = token_error {
+            eprintln!(
+                "Token refresh failed: {}. Using saved Tytus pass for pod status.",
+                e
+            );
+        }
         print_human_status(&state);
     }
 }
@@ -9833,31 +9834,45 @@ pub(crate) async fn get_credentials(
 }
 
 async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
-    let token = match &state.access_token {
-        Some(t) => t.clone(),
-        None => return,
-    };
-
-    match atomek_auth::fetch_wannolot_pass(http, &token).await {
-        Ok(creds) => {
-            state.secret_key = Some(creds.secret_key.clone());
-            state.agent_user_id = Some(creds.agent_user_id.clone());
-            state.organization_id = Some(creds.organization_id.clone());
-            state.tier = Some(creds.tier.clone());
+    if let Some(token) = state.access_token.clone() {
+        match atomek_auth::fetch_wannolot_pass(http, &token).await {
+            Ok(creds) => {
+                state.secret_key = Some(creds.secret_key.clone());
+                state.agent_user_id = Some(creds.agent_user_id.clone());
+                state.organization_id = Some(creds.organization_id.clone());
+                state.tier = Some(creds.tier.clone());
+            }
+            Err(atomek_core::AtomekError::NoSubscription)
+                if state.secret_key.is_none() || state.agent_user_id.is_none() =>
+            {
+                state.tier = None;
+                return;
+            }
+            Err(_) => {
+                // Keep going with the saved Tytus pass. Browser OAuth refresh
+                // can fail locally (keychain prompt/expired browser token)
+                // while the Sentinel pass remains valid for Provider pod
+                // status. Status/UI must not collapse to "0 pods" just
+                // because login refresh needs user attention.
+            }
         }
-        Err(atomek_core::AtomekError::NoSubscription) => {
-            state.tier = None;
-            return;
-        }
-        Err(_) => return,
     }
 
     if let (Some(ref sk), Some(ref auid)) = (&state.secret_key, &state.agent_user_id) {
         let client = atomek_pods::TytusClient::new(http, sk, auid);
+        // `/pod/status` is intentionally a thin fleet listing: it may omit
+        // stable_user_key/stable_ai_endpoint and never returns per-pod raw
+        // secrets. Keep status sync lossless by hydrating the stable user
+        // gateway fields from `/pod/user-key` and by preserving any richer
+        // local fields already present in state.json.
+        let user_key = atomek_pods::get_user_key_full(&client).await.ok();
         if let Ok(status) = atomek_pods::get_pod_status(&client).await {
-            state
-                .pods
-                .retain(|local| status.pods.iter().any(|remote| cli_pod_matches_status(local, remote)));
+            state.pods.retain(|local| {
+                status
+                    .pods
+                    .iter()
+                    .any(|remote| cli_pod_matches_status(local, remote))
+            });
 
             for pod in &status.pods {
                 if let Some(existing) = state
@@ -9866,6 +9881,7 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
                     .find(|local| cli_pod_matches_status(local, pod))
                 {
                     merge_status_pod(existing, pod);
+                    hydrate_status_pod_from_user_key(existing, user_key.as_ref());
                     continue;
                 }
 
@@ -9889,6 +9905,7 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
                     pod_public_url: None,
                 };
                 merge_status_pod(&mut entry, pod);
+                hydrate_status_pod_from_user_key(&mut entry, user_key.as_ref());
                 state.pods.push(entry);
             }
         }
@@ -9908,13 +9925,19 @@ fn cli_pod_matches_status(local: &PodEntry, remote: &atomek_pods::PodEntry) -> b
 
 fn merge_status_pod(local: &mut PodEntry, remote: &atomek_pods::PodEntry) {
     local.pod_id = remote.pod_id.clone();
-    local.route_id = remote.route_id.clone();
+    if remote.route_id.is_some() {
+        local.route_id = remote.route_id.clone();
+    }
     if let Some(did) = remote.droplet_id.clone() {
         local.droplet_id = did;
     }
     local.agent_type = remote.agent_type.clone();
-    local.agent_units = remote.agent_units;
-    local.display_name = remote.display_name.clone();
+    if remote.agent_units.is_some() {
+        local.agent_units = remote.agent_units;
+    }
+    if remote.display_name.is_some() {
+        local.display_name = remote.display_name.clone();
+    }
     if let Some(v) = remote.stable_ai_endpoint.clone() {
         local.stable_ai_endpoint = Some(v);
     }
@@ -9926,6 +9949,27 @@ fn merge_status_pod(local: &mut PodEntry, remote: &atomek_pods::PodEntry) {
     }
     if let Some(v) = remote.pod_public_url.clone() {
         local.pod_public_url = Some(v);
+    }
+}
+
+fn hydrate_status_pod_from_user_key(local: &mut PodEntry, user_key: Option<&atomek_pods::UserKey>) {
+    let Some(uk) = user_key else {
+        return;
+    };
+    if local.stable_ai_endpoint.is_none() {
+        local.stable_ai_endpoint = Some(uk.endpoint.clone());
+    }
+    if local.stable_user_key.is_none() {
+        local.stable_user_key = Some(uk.key.clone());
+    }
+    if local.edge_slug.is_none() {
+        local.edge_slug = uk.slug.clone();
+    }
+    if local.edge_public_url.is_none() {
+        local.edge_public_url = uk.public_url.clone();
+    }
+    if local.pod_public_url.is_none() {
+        local.pod_public_url = uk.compose_pod_public_url(&local.pod_id);
     }
 }
 

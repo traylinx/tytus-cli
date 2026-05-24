@@ -148,7 +148,7 @@ const PATTERNS: &[Pattern] = &[
         needles: &["connection refused", "econnrefused", "eof on stdin"],
         title: "Tytus isn't running",
         body: "The background service isn't reachable.",
-        try_this: "Click the menu-bar T → Quick actions → Connect.",
+        try_this: "Click the menu-bar T → Controls → Connect.",
     },
     Pattern {
         needles: &["address already in use", "eaddrinuse", "port in use"],

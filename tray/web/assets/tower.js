@@ -3061,13 +3061,13 @@
   $('st-signout')?.addEventListener('click', async () => {
     const ok = window.confirm(
       'Sign out of Tytus?\n\n' +
-      'This revokes all your pods, clears stored credentials, and tears ' +
-      'down any active tunnels. You will need to sign in again to reconnect.'
+      'This removes this computer\\'s Tytus login. Your cloud pods stay ' +
+      'allocated and keep running. You will need to sign in again to reconnect.'
     );
     if (!ok) return;
     try {
       await fetch('/api/logout', { method: 'POST' });
-      showToast('Logging out — see the Terminal window.');
+      showToast('Signed out locally. Your pods stay allocated.');
     } catch (err) {
       showToast('Sign out failed', 'err');
     }
