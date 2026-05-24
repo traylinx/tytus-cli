@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.7.5 — 2026-05-24 — hotfix: Pods settings panel crash
+
+### Fixed
+
+- **Settings → Pods crashed with `TypeError: Cannot read properties of null (reading 'replace')`** whenever any allocated agent had a `null` `ui_url` (which is normal — agents without a browser UI route return `ui_url: null` from `/api/state`). The whole panel blanked.
+- Two-layer fix: `lib/secrets.ts` helpers (`maskSecret`, `revealSecret`, `maskTokenUrl`, `revealTokenUrl`) now accept `Secret | null | undefined` and return `""` / `"—"` placeholders instead of crashing. The PodCard in Settings hides the UI URL row entirely when `agent.ui_url` is null.
+- 10 new tests pin the null-safe contract; full TytusOS suite 1156/1156 pass. Embeds TytusOS v1.0.50.
+
+### Known issues still open from v0.7.4 dogfood
+
+- Tray "Show all pods" submenu groups the included AIL gateway separately from agent pods. The traylinx admin lists all three (gateway + 2 agents) as "3 pods"; the tray + Pod Inspector show "1 included gateway + 2 agents" instead. Same data, different framing. Tracked for a UX pass.
+
 ## v0.7.4 — 2026-05-24
 
 ### Headline
