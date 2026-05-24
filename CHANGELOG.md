@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.7.6 — 2026-05-24 — install.sh upgrade-safe tray refresh
+
+### Fixed
+
+- **`install.sh` now refreshes `/Applications/Tytus.app` on upgrade.** Previously, running the curl-pipe installer over an existing install copied new binaries to `/usr/local/bin/` but left the menubar `Tytus.app` bundle untouched — the running tray process kept serving the OLD embedded TytusOS bundle from the previous version (cf. `feedback_tray_binary_staleness`). End users had to manually run `tytus tray uninstall && tytus tray install` to actually pick up the new release. Now `install_tray_macos()` detects an existing `/Applications/Tytus.app`, runs `tytus tray uninstall` first (with `pkill` belt-and-braces for stuck processes + a 1 s settle), then reinstalls from the just-copied binary. Caught during the v0.7.4 → v0.7.5 dogfood when the released Pods-crash hotfix did not take effect on Sebastian's machine.
+- No source change in TytusOS, CLI, or daemon binaries — same TytusOS v1.0.50 dist as v0.7.5. Only the installer flow changed.
+
 ## v0.7.5 — 2026-05-24 — hotfix: Pods settings panel crash
 
 ### Fixed

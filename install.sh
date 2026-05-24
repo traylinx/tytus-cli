@@ -451,6 +451,27 @@ install_tray_macos() {
         warn "Re-run after fixing PATH: tytus tray install"
         return 0
     fi
+    # Upgrade-safe install: if /Applications/Tytus.app already exists, it
+    # was built against an older CLI binary and a long-running tray
+    # process may still be holding port 4242. `tytus tray install` does
+    # not replace a running app, so first uninstall (which kills the
+    # process + removes the .app + clears the LaunchAgent) and then
+    # install fresh from the just-installed v$(tytus --version) binary.
+    # Without this step, end users on the curl-pipe upgrade path keep
+    # serving the old TytusOS bundle until they manually run
+    # `tytus tray uninstall && tytus tray install` — a footgun caught
+    # during the v0.7.4 → v0.7.5 dogfood (2026-05-24).
+    if [ -d "/Applications/Tytus.app" ]; then
+        msg "Tytus.app exists — refreshing to current binary..."
+        "${CLI_NAME}" tray uninstall >/dev/null 2>&1 || true
+        # Belt + braces: the uninstall above sometimes leaves a running
+        # process if launchctl didn't grab the right pid. Kill any
+        # lingering Tytus.app or tytus-tray process before reinstall.
+        pkill -9 -f "Tytus.app/Contents/MacOS/Tytus" >/dev/null 2>&1 || true
+        pkill -9 -f "tytus-tray" >/dev/null 2>&1 || true
+        # Give launchd a beat to release the LaunchAgent + port 4242.
+        sleep 1
+    fi
     msg "Installing menubar app (Tytus.app)..."
     if "${CLI_NAME}" tray install >/dev/null 2>&1; then
         ok "Tytus.app installed in /Applications + auto-start at login"
