@@ -228,6 +228,35 @@ pub async fn run_daemon() {
         return;
     }
 
+    // Macos: warn loudly when the daemon is started from an interactive
+    // terminal instead of via the tray-managed LaunchAgent. Shell-launched
+    // daemons inherit the Terminal's keychain access scope and can't
+    // prompt for "Always Allow" because they have no UI session — leading
+    // to the silent `keychain_healthy=false` state Sebastian hit on
+    // 2026-05-24 (see tray's yellow-dot row).
+    //
+    // Detection: stdout is a TTY iff a human ran `tytus daemon run`. When
+    // launched by launchd from `com.traylinx.tytus.daemon.plist`, stdout
+    // is redirected to /tmp/tytus/daemon.log and IsTerminal returns false.
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::IsTerminal;
+        if std::io::stdout().is_terminal() {
+            eprintln!();
+            eprintln!("⚠︎  Tytus daemon launched from a terminal.");
+            eprintln!("   Background daemons started this way inherit your Terminal's");
+            eprintln!("   keychain access — which can't prompt for 'Always Allow' and");
+            eprintln!("   often leads to a degraded refresh-token state (tray yellow dot).");
+            eprintln!();
+            eprintln!("   Prefer the tray-managed daemon:");
+            eprintln!("     tytus tray install    # launches a properly-scoped daemon at login");
+            eprintln!();
+            eprintln!("   Continuing anyway. If the tray shows a yellow ⚠ row, click");
+            eprintln!("   'Keychain access pending — Sign in again' to recover.");
+            eprintln!();
+        }
+    }
+
     let sock_dir = atomek_core::platform::paths::runtime_dir();
     let sock_dir = sock_dir.as_path();
     let _ = atomek_core::platform::paths::ensure_private_dir(sock_dir);

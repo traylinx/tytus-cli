@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.7.7 — 2026-05-25 — actionable keychain-degraded UX
+
+### Fixed
+
+- **Yellow tray with no path to recovery.** When the daemon couldn't read the refresh token out of the macOS Keychain — a state that normally appears after a terminal-launched `tytus daemon run &` inherits a non-GUI keychain scope — the menu's metadata row showed a disabled label `⚠︎ keychain access pending — re-run \`tytus login\`` that the user couldn't click. They had to know to open Terminal, type the command, and hope the dialog appeared. Caught during 2026-05-25 dogfood (Sebastian's tray went yellow after the v0.7.5 → v0.7.6 backgrounded-daemon recovery).
+- The keychain warning is now a separate **clickable** menu item: `⚠︎  Keychain access pending — Sign in again`. One click routes to the same `tytus login` flow as the top-level "Sign In…" entry (opens Terminal.app, runs the device-auth, stores the rotated RT under the right ACL). Once the daemon's next refresh tick reads the new RT, the warning row disappears and the dot flips back to green.
+
+### Added
+
+- **One-shot macOS notification** when `keychain_healthy` transitions `true → false`. The tray menu rebuilds every few seconds while the warning is active; we de-dup via an edge-trigger so the user gets one banner, not a flood. Gated on `logged_in` so the first paint after cold launch (when `TrayState::default()` has `keychain_healthy=false`) doesn't fire a bogus notification before the first daemon poll lands.
+- **Interactive-terminal warning in `tytus daemon run`** (macOS only). When stdout is a TTY — meaning a human typed the command instead of launchd invoking it from the LaunchAgent — print a 6-line banner explaining the keychain caveat and pointing at `tytus tray install` for the properly-scoped GUI daemon. The daemon still starts; the warning is informational, not blocking.
+- Troubleshooting docs: new **"Tray icon is yellow"** section in `docs/end-user/troubleshooting.html` covering all three yellow causes (tunnel down, keychain pending, token expiring) and the one-click fix for each.
+
+### Code map
+
+- `tray/src/main.rs`: new `observe_keychain_health()` + `LAST_KEYCHAIN_HEALTHY` OnceLock; warning row promoted from disabled label to clickable `MenuItem` with id `login_keychain`; handler match arm extended `"login" | "login_keychain" =>` so both ids hit the same `open_in_terminal_simple("tytus login")` path.
+- `cli/src/daemon.rs`: `IsTerminal::is_terminal()` check at top of `run_daemon()` prints the banner when interactive.
+
+### Tests
+
+- Existing build pass via `cargo check -p tytus-tray -p atomek-cli` clean.
+- Manual: the edge-trigger semantics are pinned by gating on `state.logged_in` and by the `OnceLock` sentinel (`None` defaults to `was_healthy=true`).
+
+### Known issues still open from v0.7.4 dogfood
+
+- Tray "Show all pods" submenu groups the included AIL gateway separately from agent pods. The traylinx admin lists all three (gateway + 2 agents) as "3 pods"; the tray + Pod Inspector show "1 included gateway + 2 agents". Same data, different framing. Tracked for a UX pass.
+
 ## v0.7.6 — 2026-05-24 — install.sh upgrade-safe tray refresh
 
 ### Fixed

@@ -118,6 +118,38 @@ static REFRESH_GLOBAL: std::sync::OnceLock<Arc<(std::sync::Mutex<bool>, std::syn
 static BUSY_STATUS: std::sync::OnceLock<Arc<std::sync::Mutex<Option<BusyState>>>> =
     std::sync::OnceLock::new();
 
+/// Last observed value of `state.keychain_healthy`, used to detect the
+/// `true → false` edge so we fire the macOS notification ONCE per
+/// degradation event (not every menu rebuild — that would spam the
+/// user every few seconds while the warning is active).
+///
+/// Sentinel: `None` means "never seen" (first render after launch).
+/// Set during `build_menu`; the actual `notify()` call happens there
+/// too, off-main-thread via the platform dialog helper.
+static LAST_KEYCHAIN_HEALTHY: std::sync::OnceLock<Arc<std::sync::Mutex<Option<bool>>>> =
+    std::sync::OnceLock::new();
+
+fn observe_keychain_health(current: bool) {
+    let cell = LAST_KEYCHAIN_HEALTHY.get_or_init(|| Arc::new(std::sync::Mutex::new(None)));
+    let mut prev = cell.lock().unwrap();
+    let was_healthy = prev.unwrap_or(true);
+    *prev = Some(current);
+    drop(prev);
+    if was_healthy && !current {
+        // Edge: true → false (including first-render-since-launch when
+        // the daemon is ALREADY degraded — `was_healthy` defaults to
+        // true so the very first false we see fires once). Notify on
+        // a worker thread so we don't block menu construction if the
+        // platform dialog helper happens to be slow.
+        std::thread::spawn(|| {
+            notify(
+                "Tytus — keychain access pending",
+                "The daemon can't read your refresh token. Click the tray ⚠ row to sign in again.",
+            );
+        });
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BusyState {
     pub label: String,
@@ -929,21 +961,46 @@ fn build_menu(state: &TrayState) -> Menu {
             bits.push(format!("up {}", format_uptime(state.uptime_secs)));
         }
         // Soft warnings — gateway works but something admin-y is stale.
+        // Keychain warning is special: it has a one-click fix, so it gets
+        // its own clickable MenuItem instead of being baked into the
+        // disabled meta-row. The other two warnings stay informational.
+        let mut keychain_warning = false;
         if state.gateway_reachable {
             if !state.daemon_running {
                 bits.push("⚠︎ daemon offline".into());
             } else if !state.keychain_healthy {
-                // Daemon is alive but the macOS keychain hasn't yielded
-                // the refresh token. Data plane works; next `tytus login`
-                // may be needed before the current AT expires. User-
-                // actionable via the Troubleshoot menu.
-                bits.push("⚠︎ keychain access pending — re-run `tytus login`".into());
+                // Edge-trigger the macOS notification on transition
+                // true→false (handled inside observe_keychain_health).
+                keychain_warning = true;
             } else if state.logged_in && !state.token_valid {
                 bits.push("⚠︎ token expiring — will auto-refresh".into());
             }
         }
+        // Track keychain health regardless of gateway_reachable so the
+        // notification still fires if the daemon's data plane is also
+        // down (the user still needs to re-login eventually).
+        //
+        // Gate on `logged_in` so the first paint after launch — which
+        // happens with TrayState::default() (keychain_healthy=false) BEFORE
+        // the first daemon poll returns the real value — doesn't fire a
+        // bogus "keychain degraded" notification at startup.
+        if state.logged_in {
+            observe_keychain_health(state.keychain_healthy);
+        }
         if !bits.is_empty() {
             let _ = menu.append(&MenuItem::with_id("meta", bits.join(" · "), false, None));
+        }
+        if keychain_warning {
+            // Clickable: routes to the same path as "Sign In…" (opens
+            // `tytus login` in Terminal.app for the device-auth flow).
+            // Distinct id so we can extend the handler later without
+            // touching the original "login" entry's call sites.
+            let _ = menu.append(&MenuItem::with_id(
+                "login_keychain",
+                "⚠︎  Keychain access pending — Sign in again",
+                true,
+                None,
+            ));
         }
     }
 
@@ -1910,10 +1967,15 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 busy_clear();
             });
         }
-        "login" => {
+        "login" | "login_keychain" => {
             // `tytus login` opens a browser — must run in terminal so the user
             // sees the verification code & prompts. Pipe through the Terminal.app
             // launcher the same way launch_terminal does.
+            //
+            // Two IDs route here:
+            //   "login"          — top-level "Sign In…" item (when logged out)
+            //   "login_keychain" — clickable ⚠ row shown when keychain_healthy=false
+            //                      (daemon alive, gateway reachable, but RT unreadable)
             open_in_terminal_simple("tytus login");
         }
         "logout" => {
