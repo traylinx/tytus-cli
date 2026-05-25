@@ -306,6 +306,25 @@ pub fn poll_daemon_status() -> super::TrayState {
     // nothing because `tytus disconnect` SIGTERMs a long-dead PID.
     out.tunnel_active = gateway_reachable;
 
+    // Update-availability: read the cache written by spawn_update_check_loop.
+    // Compare against this binary's own CARGO_PKG_VERSION; the OnceLock
+    // edge-trigger in observe_update_available() handles the notification.
+    if let Some((latest, tag)) = super::read_cached_update_prefs() {
+        let current = env!("CARGO_PKG_VERSION");
+        if super::is_newer_tytus_version(&latest, current) {
+            out.update_available = true;
+            out.latest_release_tag = tag.clone().or_else(|| Some(format!("v{}", latest)));
+            out.latest_version = Some(latest);
+        } else {
+            // Catalog version equals or pre-dates installed version — no
+            // banner. Keep the cached strings for diagnostic surfacing if
+            // future UX wants to show "Last checked: up to date".
+            out.update_available = false;
+            out.latest_version = Some(latest);
+            out.latest_release_tag = tag;
+        }
+    }
+
     out
 }
 

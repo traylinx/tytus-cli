@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.7.8 — 2026-05-25 — Docker-Desktop-style update-available banner
+
+### Added
+
+- **Prominent ⬆ update-available row at the top of the tray menu** when `get.traylinx.com/catalog.json` advertises a newer SemVer than the running binary. Renders as `⬆  Update available — v0.7.8 (Install & Restart)`, sits directly below the status/meta lines (before the Connect separator), and routes to the existing `install_update` handler that opens Terminal.app and pipes the install script. v0.7.6's upgrade-safe `install.sh` takes care of refreshing `/Applications/Tytus.app` so the running tray sees the new bundle on respawn.
+- **Background update check loop** in the tray process (`spawn_update_check_loop`). Warms up 30s after launch (lets the gateway probe + daemon connection settle first), then fetches every 6h. Writes the result to `~/.config/tytus/update.json` — the same file the existing `/api/update/status` HTTP handlers read, so TytusOS-triggered and tray-triggered checks converge on a single store. Kicks the refresh `Condvar` after each successful fetch so the menu reflects the new value within 1s.
+- **One-shot macOS notification** on transition `update_available: false → true` AND when a newer version supersedes a previously-detected one (e.g., user dismissed v0.7.8 and v0.7.9 lands later — they get a fresh banner pointing at v0.7.9). Edge-trigger semantics mirror the v0.7.7 keychain pattern via a new `LAST_UPDATE_AVAILABLE: OnceLock<(bool, Option<String>)>` sentinel.
+- New `read_cached_update_prefs()` / `write_cached_update_prefs()` helpers in `tray/src/main.rs` for the JSON-cache round-trip without taking a dep on `web_server`'s private `UpdatePrefs` struct. Shape-compatible: the existing TytusOS shell endpoint still parses the same file.
+
+### TrayState additions
+
+- `update_available: bool`
+- `latest_version: Option<String>`
+- `latest_release_tag: Option<String>`
+
+All populated in `socket::poll_daemon_status()` by reading the cache file; `is_newer_tytus_version()` (already in main.rs since v0.5.x) does the SemVer comparison against `env!("CARGO_PKG_VERSION")`.
+
+### Code map
+
+- `tray/src/main.rs`: TrayState fields + `LAST_UPDATE_AVAILABLE` static + `observe_update_available()` + `update_prefs_file_path()` + `read_cached_update_prefs()` + `write_cached_update_prefs()` + `spawn_update_check_loop()` + ⬆ banner render block in `build_menu()` + handler match arm `"install_update" | "install_update_banner"` + `menu_signature` includes `up={available}:{version}` so banner transitions trigger an immediate rebuild.
+- `tray/src/socket.rs`: at the tail of `poll_daemon_status()`, read the cache file and populate the three new state fields. Existing fields unchanged.
+
+### Tests
+
+- `cargo check -p tytus-tray` clean.
+- Manual: the prominent row appears when `~/.config/tytus/update.json` is hand-seeded with `{"latest_version":"99.9.9"}` and disappears when the cache version matches the binary.
+
+### Why now
+
+Docker Desktop's tray icon shows a small orange dot + "Install and restart" item when an update is ready — visible without opening any submenu. Tytus had the SAME detection plumbing (`/api/update/status` returning `update_available: bool` for 3 releases now) but buried the recovery under Settings → Update Tytus…, so users never noticed. Sebastian asked for parity with Docker UX during the 2026-05-25 dogfood. Icon-badge variant (the actual orange dot ON the menubar T) is deferred to v0.7.9 because it needs custom NSImage rendering.
+
 ## v0.7.7 — 2026-05-25 — actionable keychain-degraded UX
 
 ### Fixed

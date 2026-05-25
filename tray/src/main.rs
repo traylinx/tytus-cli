@@ -129,6 +129,16 @@ static BUSY_STATUS: std::sync::OnceLock<Arc<std::sync::Mutex<Option<BusyState>>>
 static LAST_KEYCHAIN_HEALTHY: std::sync::OnceLock<Arc<std::sync::Mutex<Option<bool>>>> =
     std::sync::OnceLock::new();
 
+/// Edge-trigger sibling of `LAST_KEYCHAIN_HEALTHY` for the
+/// update-available indicator. `(was_available, latest_version_seen)`.
+/// Notification fires on `false → true` transition AND when a NEWER
+/// `latest_version` appears while still in the available state (i.e.,
+/// user dismissed v0.7.8 and v0.7.9 lands — they should get a fresh
+/// banner pointing at v0.7.9).
+static LAST_UPDATE_AVAILABLE: std::sync::OnceLock<
+    Arc<std::sync::Mutex<Option<(bool, Option<String>)>>>,
+> = std::sync::OnceLock::new();
+
 fn observe_keychain_health(current: bool) {
     let cell = LAST_KEYCHAIN_HEALTHY.get_or_init(|| Arc::new(std::sync::Mutex::new(None)));
     let mut prev = cell.lock().unwrap();
@@ -148,6 +158,41 @@ fn observe_keychain_health(current: bool) {
             );
         });
     }
+}
+
+/// Mirror of `observe_keychain_health` for the update indicator. Two
+/// fire conditions:
+///   1. `was_available=false` and `available=true`    — first detection
+///   2. `was_available=true` and version stamp differs — newer release
+///      published while the user has been ignoring the previous one
+fn observe_update_available(available: bool, latest: Option<&str>) {
+    let cell = LAST_UPDATE_AVAILABLE.get_or_init(|| Arc::new(std::sync::Mutex::new(None)));
+    let mut prev = cell.lock().unwrap();
+    let (was_available, was_version) = prev
+        .clone()
+        .unwrap_or((false, None));
+    let now_version = latest.map(|s| s.to_string());
+    *prev = Some((available, now_version.clone()));
+    drop(prev);
+
+    let new_detection = available && !was_available;
+    let newer_version = available
+        && was_available
+        && now_version.is_some()
+        && now_version != was_version;
+    if !new_detection && !newer_version {
+        return;
+    }
+    let version_label = now_version.unwrap_or_else(|| "a new version".to_string());
+    std::thread::spawn(move || {
+        notify(
+            "Tytus update available",
+            &format!(
+                "v{} is ready. Click the ⬆ row in the tray menu to install & restart.",
+                version_label
+            ),
+        );
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +309,14 @@ fn menu_signature(s: &TrayState) -> String {
         "err={}",
         s.last_refresh_error.as_deref().unwrap_or("")
     ));
+    // Update-banner state — included so the menu rebuilds the moment a
+    // background catalog fetch lands a newer version (no need to wait
+    // for the user to click anything).
+    parts.push(format!(
+        "up={}:{}",
+        s.update_available,
+        s.latest_version.as_deref().unwrap_or("")
+    ));
     // When a long action is in flight, include the elapsed-second
     // count in the signature so the menu rebuilds each second and the
     // "Connecting… (4s)" counter advances visibly without waiting for
@@ -356,6 +409,22 @@ pub struct TrayState {
     /// Human-readable last refresh error the daemon observed. Displayed
     /// verbatim in the troubleshoot menu when present.
     pub last_refresh_error: Option<String>,
+    /// True when `get.traylinx.com/catalog.json` reports a `version`
+    /// strictly newer than `env!("CARGO_PKG_VERSION")`. Populated by the
+    /// background `update_check_loop` thread; renders as a prominent ⬆
+    /// row at the top of the tray menu (Docker-Desktop-style) plus a
+    /// one-shot macOS notification on `false → true` transition.
+    pub update_available: bool,
+    /// SemVer string of the latest published Tytus CLI (e.g. `"0.7.8"`),
+    /// populated alongside `update_available`. Used in the menu row label
+    /// and the notification body. `None` until the first successful
+    /// catalog fetch completes.
+    pub latest_version: Option<String>,
+    /// Matching `release_tag` from the catalog (e.g. `"v0.7.8"`). Used
+    /// to build the "View release notes" link if surfaced in future UX.
+    /// Falls back to `format!("v{}", latest_version)` when the catalog
+    /// omits it.
+    pub latest_release_tag: Option<String>,
 }
 
 /// Per-pod info. Agent types beyond the two we ship are silently displayed
@@ -777,6 +846,12 @@ fn main() {
     let _ = REFRESH_GLOBAL.set(refresh_pair.clone());
     REFRESH_PAIR.with(|cell| *cell.borrow_mut() = Some(refresh_pair.clone()));
 
+    // Background update-availability check: queries get.traylinx.com
+    // catalog every 6h, writes to ~/.config/tytus/update.json, kicks the
+    // refresh pair so the menu rebuilds within 1s of new info landing.
+    // Reuses the same file the existing /api/update/status handlers read.
+    spawn_update_check_loop(refresh_pair.clone());
+
     // Fast FS watcher.
     let fs_pair = refresh_pair.clone();
     std::thread::spawn(move || {
@@ -1002,6 +1077,31 @@ fn build_menu(state: &TrayState) -> Menu {
                 None,
             ));
         }
+    }
+
+    // ── Update-available row (Docker-Desktop-style) ──────────
+    //
+    // When the background catalog check reports a newer version, surface
+    // a prominent ⬆ row directly under the status/meta lines. Clicking
+    // routes to `install_update` (same handler as Settings → Update
+    // Tytus…), which opens Terminal.app and pipes the install.sh / .ps1
+    // through bash / powershell. The user sees the install log live and
+    // the tray respawns when it finishes (v0.7.6's upgrade-safe install.sh
+    // handles the Tytus.app refresh transparently).
+    //
+    // observe_update_available() fires a one-shot macOS notification on
+    // the false→true transition AND when a newer version supersedes the
+    // one the user has been ignoring.
+    observe_update_available(
+        state.update_available,
+        state.latest_version.as_deref(),
+    );
+    if state.update_available {
+        let label = match state.latest_version.as_deref() {
+            Some(v) => format!("⬆  Update available — v{} (Install & Restart)", v),
+            None => "⬆  Update available (Install & Restart)".to_string(),
+        };
+        let _ = menu.append(&MenuItem::with_id("install_update_banner", label, true, None));
     }
 
     let _ = menu.append(&PredefinedMenuItem::separator());
@@ -2067,7 +2167,13 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 busy_clear();
             });
         }
-        "install_update" => {
+        "install_update" | "install_update_banner" => {
+            // Same path for both: the prominent ⬆ banner row above the
+            // separator AND the Settings → Update Tytus… submenu item.
+            // Opens Terminal.app and pipes the install.sh / install.ps1
+            // through bash/powershell. v0.7.6's upgrade-safe installer
+            // takes care of refreshing /Applications/Tytus.app so the
+            // running tray sees the new bundle on respawn.
             open_in_terminal_simple(&tytus_update_terminal_command());
         }
         "copy_env" => {
@@ -3111,6 +3217,131 @@ fn is_newer_tytus_version(latest: &str, current: &str) -> bool {
         }
     }
     false
+}
+
+/// Path to the shared update-prefs file, mirroring the web_server.rs
+/// definition. Owned by the tray when in the desktop-app process, by
+/// the standalone daemon otherwise — single writer per host, so we
+/// don't need a lock beyond the atomic-rename pattern below.
+fn update_prefs_file_path() -> Option<std::path::PathBuf> {
+    if let Some(dir) = dirs::config_dir() {
+        return Some(dir.join("tytus").join("update.json"));
+    }
+    std::env::var_os("HOME").map(|h| {
+        std::path::PathBuf::from(h)
+            .join(".config")
+            .join("tytus")
+            .join("update.json")
+    })
+}
+
+/// Read the last-known update state out of `update.json`. Returns
+/// `(latest_version, latest_release_tag)` if the file exists and parses;
+/// `None` otherwise. The web_server's `UpdatePrefs` writer keeps the
+/// shape stable: `{ "latest_version": "...", "latest_release_tag": "..." }`
+/// plus other fields we don't care about for the menu UX.
+fn read_cached_update_prefs() -> Option<(String, Option<String>)> {
+    let path = update_prefs_file_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let body: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let version = body
+        .get("latest_version")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?
+        .to_string();
+    let tag = body
+        .get("latest_release_tag")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|s| s.to_string());
+    Some((version, tag))
+}
+
+/// Write `(latest_version, latest_release_tag)` back to the cache file.
+/// Preserves the rest of the JSON shape by merging into whatever's there.
+fn write_cached_update_prefs(version: &str, release_tag: Option<&str>) {
+    let Some(path) = update_prefs_file_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut body: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let serde_json::Value::Object(ref mut map) = body {
+        map.insert(
+            "latest_version".to_string(),
+            serde_json::Value::String(version.to_string()),
+        );
+        map.insert(
+            "latest_release_tag".to_string(),
+            release_tag
+                .map(|t| serde_json::Value::String(t.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        map.insert(
+            "last_checked_at".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            )),
+        );
+    }
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".to_string()),
+    );
+}
+
+/// Background task: every 6h (`TYTUS_UPDATE_AUTO_CHECK_INTERVAL_SECS`)
+/// fetch the catalog, store the result in `update.json`, and trigger
+/// a menu rebuild so the ⬆ row appears (or disappears) without waiting
+/// for the user to re-open the tray. On launch, the first check fires
+/// after a 30s warm-up — gives the rest of the tray (gateway probe,
+/// daemon connection) time to settle so we don't compete for I/O.
+///
+/// Why a separate thread rather than piggy-backing on the 1.5s state
+/// poller: the catalog fetch is a real network call (~200ms-2s) and
+/// shouldn't block the menu-rebuild cadence. 6h is the same interval
+/// the in-process HTTP handlers use, so a TytusOS-triggered force
+/// refresh and a tray-driven background refresh converge on the same
+/// `update.json`.
+fn spawn_update_check_loop(refresh: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>) {
+    std::thread::spawn(move || {
+        // Warm-up: don't hit the network in the first 30s.
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        loop {
+            match fetch_latest_tytus_version() {
+                Ok((version, tag)) => {
+                    write_cached_update_prefs(&version, tag.as_deref());
+                    // Kick the main poll loop so the new value is
+                    // reflected in TrayState within ~1s.
+                    let (lock, cvar) = &*refresh;
+                    if let Ok(mut g) = lock.lock() {
+                        *g = true;
+                        cvar.notify_one();
+                    }
+                }
+                Err(_) => {
+                    // Silent: a transient network error shouldn't spam
+                    // the user. The notification only fires on the
+                    // detection edge, which can't happen on a failed
+                    // fetch. Daemon log captures the real error via the
+                    // existing /api/update/status path when the user
+                    // forces a manual check.
+                }
+            }
+            // 6 hours between background checks. Force checks via the
+            // existing "check_updates" menu item bypass this cadence.
+            std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
+        }
+    });
 }
 
 fn fetch_latest_tytus_version() -> Result<(String, Option<String>), String> {

@@ -2,7 +2,7 @@
 
 > Private AI pods, TytusOS desktop, and a stable OpenAI-compatible gateway from one local CLI.
 
-Current public beta: **v0.7.7** (2026-05-25).
+Current public beta: **v0.7.8** (2026-05-25).
 
 ## Install
 
