@@ -42,6 +42,15 @@ impl TytusClient {
             .header("Accept", "application/json")
     }
 
+    pub(crate) fn patch(&self, path: &str) -> reqwest::RequestBuilder {
+        self.http
+            .patch(&format!("{}{}", self.base_url, path))
+            .header("X-Agent-Secret-Token", &self.secret_token)
+            .header("X-Agent-User-Id", &self.agent_user_id)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+    }
+
     /// Send a GET with retry logic from the shared HttpClient.
     pub(crate) async fn get_with_retry(
         &self,

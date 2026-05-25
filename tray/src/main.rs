@@ -168,18 +168,14 @@ fn observe_keychain_health(current: bool) {
 fn observe_update_available(available: bool, latest: Option<&str>) {
     let cell = LAST_UPDATE_AVAILABLE.get_or_init(|| Arc::new(std::sync::Mutex::new(None)));
     let mut prev = cell.lock().unwrap();
-    let (was_available, was_version) = prev
-        .clone()
-        .unwrap_or((false, None));
+    let (was_available, was_version) = prev.clone().unwrap_or((false, None));
     let now_version = latest.map(|s| s.to_string());
     *prev = Some((available, now_version.clone()));
     drop(prev);
 
     let new_detection = available && !was_available;
-    let newer_version = available
-        && was_available
-        && now_version.is_some()
-        && now_version != was_version;
+    let newer_version =
+        available && was_available && now_version.is_some() && now_version != was_version;
     if !new_detection && !newer_version {
         return;
     }
@@ -1092,16 +1088,18 @@ fn build_menu(state: &TrayState) -> Menu {
     // observe_update_available() fires a one-shot macOS notification on
     // the false→true transition AND when a newer version supersedes the
     // one the user has been ignoring.
-    observe_update_available(
-        state.update_available,
-        state.latest_version.as_deref(),
-    );
+    observe_update_available(state.update_available, state.latest_version.as_deref());
     if state.update_available {
         let label = match state.latest_version.as_deref() {
             Some(v) => format!("⬆  Update available — v{} (Install & Restart)", v),
             None => "⬆  Update available (Install & Restart)".to_string(),
         };
-        let _ = menu.append(&MenuItem::with_id("install_update_banner", label, true, None));
+        let _ = menu.append(&MenuItem::with_id(
+            "install_update_banner",
+            label,
+            true,
+            None,
+        ));
     }
 
     let _ = menu.append(&PredefinedMenuItem::separator());

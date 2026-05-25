@@ -4,7 +4,7 @@
 
 ## What You Get
 
-When you subscribe to Tytus, you get your own **private AI pod** — an isolated server with an AI gateway that speaks the OpenAI API format. Your conversations never touch Traylinx Cloud. Everything flows directly between your laptop and your pod through an encrypted WireGuard tunnel.
+When you subscribe to Tytus, you get your own **private AI pod** — an isolated server with an AI gateway that speaks the OpenAI API format. SDK traffic through the private gateway flows between your laptop and your pod over the encrypted WireGuard tunnel. TytusOS chat uses the configured Cortex profile: cloud by default, or local Cortex when you opt in.
 
 After setup, you get two values that **never change**:
 
@@ -29,9 +29,9 @@ Pick one file for your computer:
 
 | Platform | What to download | What to do |
 |---|---|---|
-| macOS Apple Silicon | `Tytus-0.7.0-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` | Open the pkg. If macOS blocks it, Control-click the file and choose **Open**. |
-| macOS Intel | `Tytus-0.7.0-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` | Open the pkg. If macOS blocks it, Control-click the file and choose **Open**. |
-| Ubuntu/Debian x86_64 | `Tytus-0.7.0-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb` | Open with your software installer or run `sudo apt install ./Tytus-0.7.0-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb`. |
+| macOS Apple Silicon | `Tytus-0.7.8-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` | Open the pkg. If macOS blocks it, Control-click the file and choose **Open**. |
+| macOS Intel | `Tytus-0.7.8-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` | Open the pkg. If macOS blocks it, Control-click the file and choose **Open**. |
+| Ubuntu/Debian x86_64 | `Tytus-0.7.8-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb` | Open with your software installer or run `sudo apt install ./Tytus-0.7.8-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb`. |
 | Windows x86_64 | `powershell -c "irm https://get.traylinx.com/install.ps1 | iex"` | One-line PowerShell installer. Direct zip remains a fallback; MSI and driver packaging are not GA yet. |
 
 This is a **public beta / technical preview**, not production GA. The macOS pkg and Linux deb are unsigned, so OS trust warnings are expected.
@@ -64,7 +64,7 @@ cargo install --path cli --bin tytus --bin tytus-mcp
 
 ## Platform notes
 
-| Platform | v0.7.0 status |
+| Platform | v0.7.8 status |
 |---|---|
 | macOS | Public beta unsigned pkg for Apple Silicon and Intel. Full CLI + tray + TytusOS path. |
 | Linux | Public beta unsigned deb for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, and desktop entries. |

@@ -34,7 +34,9 @@ ORDER=(
     "files.md"
     "atomek.md"
     "settings.md"
+    "local-cortex.md"
     "apps-catalog.md"
+    "channels.md"
     "troubleshooting.md"
     "about.md"
 )

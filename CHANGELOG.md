@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.7.9 — 2026-05-25 — docs skills, pod naming, and local dev polish
+
+### Added
+
+- Tytus documentation is now exposed as first-class agentic-app skills: `tytus.docs.cli-reference`, `tytus.docs.os-manual`, and `tytus.docs.agentic-app-skills`.
+- Local TytusOS apps can discover and load bundled documentation through the existing `host.skills.*` and `/api/skills` surfaces instead of relying on external docs pages.
+- Pod rename plumbing in the tray and pod client so TytusOS can keep user-facing names aligned with Traylinx account state.
+- Local dogfood helpers: `scripts/dev.sh` for HMR sidecar mode and `scripts/dev-rebuild.sh` for hot-swapping release binaries during Rust development.
+
+### Changed
+
+- Regenerated the bundled TytusOS user manual and expanded launch-day docs for install, troubleshooting, Cortex, channels, resources, and agent workflows.
+- Tray web server can bind to an alternate `TYTUS_TRAY_PORT`, allowing local Vite on `localhost:4242` while the tray sidecar serves API traffic on a separate port.
+
+### Fixed
+
+- Pod proxy now prefers the WireGuard/private endpoint when available before falling back to the public pod URL.
+- Update banner state tracking is formatted and edge-triggered cleanly after local dogfood fixes.
+
 ## v0.7.8 — 2026-05-25 — Docker-Desktop-style update-available banner
 
 ### Added

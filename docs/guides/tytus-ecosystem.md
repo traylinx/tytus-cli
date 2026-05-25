@@ -1,6 +1,6 @@
 # Tytus ecosystem guide
 
-Last updated: 2026-05-22. Applies to public beta `tytus` v0.7.0.
+Last updated: 2026-05-25. Applies to public beta `tytus` v0.7.8.
 
 Tytus is three pieces that should feel like one product:
 
@@ -10,7 +10,7 @@ Tytus is three pieces that should feel like one product:
 
 ## Current release status
 
-| Surface | Status in v0.7.0 |
+| Surface | Status in v0.7.8 |
 |---|---|
 | macOS | Unsigned public beta `.pkg` for Apple Silicon and Intel. Full CLI + tray + TytusOS path. Gatekeeper warning expected; Control-click → Open. |
 | Linux | Unsigned public beta `.deb` for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, desktop entry, and systemd user service. |
@@ -29,8 +29,8 @@ https://get.traylinx.com/
 
 Download the matching unsigned `.pkg`:
 
-- Apple Silicon: `Tytus-0.7.0-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg`
-- Intel: `Tytus-0.7.0-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg`
+- Apple Silicon: `Tytus-0.7.8-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg`
+- Intel: `Tytus-0.7.8-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg`
 
 Open the pkg. If Gatekeeper blocks normal double-click, Control-click the pkg and choose **Open**. After install, open **Tytus** and follow the setup wizard.
 
@@ -39,7 +39,7 @@ Open the pkg. If Gatekeeper blocks normal double-click, Control-click the pkg an
 Download the unsigned `.deb`:
 
 ```bash
-sudo apt install ./Tytus-0.7.0-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
+sudo apt install ./Tytus-0.7.8-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
 ```
 
 Then open Tytus from the app launcher or run:
@@ -94,7 +94,7 @@ Core apps:
 |---|---|
 | Pod Inspector | See all pods, install agents, open agent UI, inspect readiness, restart, doctor, logs, env, revoke/uninstall with confirmation. |
 | Files | Browse `~/Tytus`, shared folders, pod workspaces, inbox, downloads, and safe root-anchored sources. |
-| Channels | Configure Telegram/Discord/Slack/LINE-style pod channels without exposing tokens in URLs. |
+| Channels | Configure supported pod channels without exposing tokens in URLs. Telegram, Discord bot, and Slack Socket Mode are current OpenClaw-backed flows; other messengers are manual/custom or planned unless the UI says otherwise. |
 | Terminal | Real host-backed shell with Tytus Home as default cwd. Use for `tytus`, `claude`, `opencode`, project commands. |
 | Atomek | Local file workbench with Monaco editor, chat context, artifacts, global AIL routing, embedded docs/skills, Resource Fabric cockpit, and app skills. |
 | Settings | Account, plan, daemon, sharing, background, appearance, dock, languages, notifications, privacy, about. |

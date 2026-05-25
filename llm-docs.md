@@ -53,6 +53,38 @@ Use `tytus os-docs` for the bundled TytusOS manual. Key facts:
 - Terminal is host-backed and defaults to Tytus Home.
 - Session expiry is fixed by `tytus login`; pods stay online. Never revoke pods to refresh a session.
 
+### 2c. Documentation as skills for agentic apps
+
+The local tray daemon exposes Tytus documentation as first-class skills so
+Atomek and future agentic apps can load product context instead of relying on
+stale model memory.
+
+Available through the host API:
+
+- `host.skills.list()`
+- `host.skills.get(id)`
+- `host.skills.resolve({ prompt })`
+
+Same-origin HTTP mirrors:
+
+- `GET /api/skills`
+- `GET /api/skills/{id}`
+- `POST /api/skills/resolve`
+- `GET /api/resources` also includes each skill as `kind: "app-skill"` so
+  Resource Fabric UIs can attach docs to a mission.
+
+Built-in documentation skill ids:
+
+| Skill id | Body |
+|---|---|
+| `tytus.docs.cli-reference` | Bundled `tytus llm-docs` reference for CLI, tray, MCP, gateway, Cortex, install, update, and troubleshooting |
+| `tytus.docs.os-manual` | Bundled `tytus os-docs` user manual for TytusOS desktop, Pod Inspector, Chat, Files, Channels, Settings, shared folders, and app workflows |
+| `tytus.docs.agentic-app-skills` | Short guide explaining how apps should resolve and attach Tytus docs/skills |
+
+Agentic apps should resolve docs from the user's prompt, fetch the selected
+skill body, and include it in the local app chat context before answering
+Tytus product questions.
+
 ## 3. Plans and unit budgets
 
 | Plan | Units |
@@ -490,7 +522,7 @@ tytus llm-docs                     Print THIS document.
 | `--json` | — | Machine-readable JSON output on all commands |
 | `--headless` | `TYTUS_HEADLESS=1` | Force non-interactive mode. Disables browser device-auth, logs diagnostics to `/tmp/tytus/autostart.log`. Use in LaunchAgents, cron, CI. |
 
-### 6b. Local Cortex (opt-in, v0.7.0+)
+### 6b. Local Cortex (opt-in, current public beta)
 
 By default, chat with a pod routes through the cloud Cortex on Strato. Users
 who want chat memory to stay on their Mac can run Cortex locally instead.
@@ -534,6 +566,94 @@ Mixing them is a 401 trap.
   user has not started Docker Desktop. Tell them, don't retry blindly.
 - Cortex has no public memory-write endpoint. Memories are populated
   implicitly via chat. Do not promise users an explicit "save fact" verb.
+
+
+## Launch user-manual quick answers
+
+Use these answers when a user asks in chat, TytusOS Help, or an AI CLI how to use Tytus.
+
+### Install
+
+macOS/Linux:
+
+```bash
+curl -fsSL https://get.traylinx.com/install.sh | bash
+```
+
+Windows:
+
+```powershell
+powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
+```
+
+Homebrew:
+
+```bash
+brew install traylinx/tap/tytus
+```
+
+### First run
+
+```bash
+tytus setup
+tytus login
+tytus connect
+tytus test
+tytus os
+```
+
+### Stable SDK config
+
+```bash
+eval "$(tytus env --export)"
+# OPENAI_BASE_URL=http://10.42.42.1:18080/v1
+# OPENAI_API_KEY=sk-tytus-user-<32hex>
+```
+
+Prefer the stable user key and gateway. Do not ask users to paste raw per-pod keys unless debugging.
+
+### Pods and units
+
+- Included gateway/no-agent pod: 0 units.
+- OpenClaw: 1 unit.
+- Hermes: 2 units.
+- A reserved/free pod is not broken; it is available capacity.
+- Custom names come from `/pod/status.display_name`. If names differ between web, tray, and TytusOS, refresh state before changing anything.
+
+### Channels
+
+Current OpenClaw-backed channel flows: Telegram, Discord bot, Slack Socket Mode. Other messengers may require manual/custom bridge work or future support. Do not claim broad native Discord/Slack/Hermes channel automation unless the current UI/release proves it.
+
+### Local Cortex
+
+Cloud Cortex is default. Local Cortex is opt-in via `tytus cortex up` and stores memory in local Docker Postgres/Redis. Before recommending it publicly, verify the GHCR image is public:
+
+```bash
+docker manifest inspect ghcr.io/traylinx/tytus-cortex:2026-05-17 >/dev/null
+```
+
+### Updates
+
+If the tray shows update available, use **Check for Updates** / **Update Tytus** to start the explicit update flow (not silent auto-install), or:
+
+```bash
+tytus update
+tytus --version
+tytus doctor
+```
+
+If old builds lack `tytus update`, reinstall from `https://get.traylinx.com/`.
+
+### Troubleshooting order
+
+1. `tytus status --json`
+2. `tytus doctor`
+3. `tytus test`
+4. TytusOS Settings -> Daemon
+5. Pod Inspector readiness
+6. Browser console only after daemon/pod state is known
+
+Never fix missing pods by deleting pods first. Never fix session expiry by revoking capacity.
 
 ## 7. MCP tools (when the MCP server is wired up)
 

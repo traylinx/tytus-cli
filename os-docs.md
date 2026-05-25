@@ -25,17 +25,35 @@ TytusOS is the desktop for your private AI pods. It runs in a browser tab or ins
 Fresh machine flow:
 
 1. Install `tytus` for your OS.
-2. Start the tray daemon.
+2. Start the tray daemon/Tytus app.
 3. Sign in once from the tray or TytusOS login screen.
-4. Allocate a pod or use the included All LLM Gateway.
-5. Use Files, Channels, Pod Inspector, Terminal, and apps from TytusOS.
+4. Connect the WireGuard tunnel.
+5. Allocate or reuse pods, then use the included All LLM Gateway.
+6. Use Files, Channels, Pod Inspector, Terminal, and apps from TytusOS.
 
-Typical commands during development/support:
+Install commands:
+
+```bash
+# macOS / Linux
+curl -fsSL https://get.traylinx.com/install.sh | bash
+
+# Homebrew
+brew install traylinx/tap/tytus
+```
+
+```powershell
+# Windows
+powershell -c "irm https://get.traylinx.com/install.ps1 | iex"
+```
+
+Typical commands after install:
 
 ```bash
 tytus setup
-tytus tray start
-tytus open
+tytus login
+tytus connect
+tytus test
+tytus os
 ```
 
 ## First screen
@@ -67,7 +85,7 @@ If you are new to the agent-team workflow, read these next: **Tytus Resource Fab
 | Launch local agents with active file context | Atomek -> Agent Team |
 | Coordinate OpenClaw, Hermes, local agents, shared folders, and apps | Atomek -> Start mission |
 | Learn workflows inside the product | Help -> Resource Fabric / Agents / Shared Folders / Use Cases, or Atomek -> Docs & Skills |
-| Configure Telegram/Discord/Slack/etc. | Channels |
+| Configure supported channels | Channels. Telegram, Discord bot, and Slack Socket Mode are the current OpenClaw-backed flows; other messengers may require manual/custom bridge work or future support. |
 | Fix expired login | Settings -> Daemon |
 | Check shared folders | Settings -> Sharing or Files -> Shared |
 | Run CLI commands | Terminal |
@@ -90,6 +108,19 @@ Default structure:
 ├── Shared/
 └── README.md
 ```
+
+## Stable SDK values
+
+After login/connect, the user-facing AIL gateway values should stay stable:
+
+```bash
+AIL_URL=http://10.42.42.1:18080/v1
+AIL_API_KEY=sk-tytus-user-<32hex>
+OPENAI_BASE_URL=http://10.42.42.1:18080/v1
+OPENAI_API_KEY=sk-tytus-user-<32hex>
+```
+
+Use Pod Inspector -> **Copy env block** or `tytus env --export`. Do not copy raw per-pod keys into user tools unless support asks for a debug check.
 
 ## What is real
 
@@ -126,7 +157,7 @@ Use it when work is bigger than one chat answer: repo repair, document productio
 | Hermes | Heavier reasoning pod family when allocated. Use for deeper planning, writing, and review. | Pod Inspector, Atomek Agent Team |
 | Local agents | Installed tools such as Claude Code, OpenCode, Codex, pi, Kimi, Gemini, Qwen, or Aider. | Terminal, Atomek local jobs |
 | App skills | Instructions and drivers for apps such as Atomek, JULI3TA, Blender, Remotion, and future local tools. | App manifests, Atomek Docs & Skills |
-| Channels | Telegram, Slack, Discord, LINE-style, and similar communication surfaces. | Channels app |
+| Channels | Supported messenger setup. Telegram, Discord bot, and Slack Socket Mode are current OpenClaw-backed flows; LINE and other messengers are beta, manual/custom, or planned unless the UI says otherwise. | Channels app |
 | AIL routes | Global model routes for remote and local AI. Apps discover these; they do not hardcode model ids. | Settings, Atomek settings, top bar |
 
 ## The core loop
@@ -184,6 +215,7 @@ The important part is not one specific model. The important part is shared conte
 
 - Apps must use the Tytus host/tray bridge for local files, pods, terminals, and model routes.
 - Browser apps must not direct-fetch pod or gateway URLs that need same-origin proxying.
+- Live Help / Ask Tytus Docs uses `/api/help/*` on the local tray bridge, which proxies to Traylinx Cortex; the browser never receives Cortex database credentials or service tokens.
 - Apps must not hardcode model names. AIL routes define available model aliases globally.
 - Local jobs must use allowlisted tools, not arbitrary shell from model text.
 - Destructive actions need explicit confirmation.
@@ -216,43 +248,15 @@ Tytus works best when agents act as a team instead of isolated chat boxes. OpenC
 
 Use the brand names **OpenClaw** and **Hermes** in user-facing docs and UI. Old internal labels should not leak into the product.
 
-## Cortex memory profile (v0.7.0+)
+## Units and pod types
 
-Every chat with OpenClaw or Hermes flows through a Cortex layer that keeps
-the agent's memory. There are two profiles:
+| Pod/agent | Units | Notes |
+|---|---:|---|
+| Included All LLM Gateway / no-agent reserved pod | 0 | Does not count against plan units. Gives the stable OpenAI-compatible gateway. |
+| OpenClaw | 1 | Code, review, tactical tasks, channel workflows. |
+| Hermes | 2 | Deeper synthesis, memory-heavy review, scheduled/long-form work when available. |
 
-- **Cloud Cortex** (default). Memory lives on Strato. Routes through
-  `tytus.traylinx.com`. Works out of the box, no extra setup.
-- **Local Cortex** (opt-in). Memory lives on the user's Mac. Routes
-  through `127.0.0.1:8098`. Requires Docker Desktop + one `tytus cortex
-  up` step.
-
-For end users, the picker lives in **Settings → AI**. For AI agents
-driving TytusOS, the wire is:
-
-- `GET /api/cortex/status` — read profile + reachability.
-- `POST /api/cortex/profile` with `{profile:"cloud"|"local"}` — flip.
-- `POST /api/cortex/memory/search` — semantic recall (local profile only).
-
-Apps that consume the Cortex surface go through the Host API:
-
-- `host.ai.cortexProfile()` — `{profile, available, port?, cortexVersion?}`.
-- `host.ai.cortexSearch({query, limit?, appId?, minSimilarity?})` —
-  returns `CortexMemoryHit[]` (empty array on cloud or when unreachable —
-  apps don't need to branch on errors).
-
-Chat events now include a leading `{type:'profile', profile, cortexVersion?}`
-frame so the UI can label "Cloud Cortex" vs "Local Cortex" beside each
-assistant response.
-
-**Memory is NOT writable through an explicit verb.** Cortex consolidates
-memories from chats; there is no `cortexRemember()` API. Atomek's existing
-"Remember" button writes to a separate workbench-scoped store and is
-unchanged.
-
-See `tytus cortex --help` and the user-facing manual page
-`services/tytus-os/docs/user-manual/local-cortex.md` for install/operate
-details.
+Tytus may show a **reserved/free slot** as `No agent`. That is capacity, not a broken pod. Starting an agent reuses the reserved pod when possible. Display names like `Claus` or `Hermie` come from `/pod/status.display_name` and should appear consistently in Traylinx, TytusOS, and the tray.
 
 ## Install and check agents
 
@@ -296,7 +300,7 @@ The mission folder is the shared memory for this work. Every agent should leave 
 | Atomek Agent Team | choose resources, create missions, run local jobs, ask pods, inspect transcripts |
 | Terminal | supervised shell, project commands, manual local-agent CLI runs |
 | Files | browse Tytus Home, Shared, mission folders, pod workspaces |
-| Channels | connect agents to Telegram/Slack/Discord/etc. |
+| Channels | connect OpenClaw to supported messenger flows; Telegram, Discord bot, and Slack Socket Mode are current. Other messengers may need manual/custom bridge work or future support. |
 
 Atomek should not replace Claude Code, OpenCode, Codex, or pi. It should orchestrate them with files, context, and approval gates.
 
@@ -1121,7 +1125,17 @@ Built-in guides cover:
 - practical use cases
 - agentic app skills
 
-These docs are bundled with the Atomek app so the user can ask about Tytus workflows directly inside TytusOS, even before opening external documentation.
+These docs are bundled as the offline fallback. When the local Tytus help bridge is reachable and live docs are enabled, Atomek and Help can ask the shared Traylinx Cortex documentation database for current TytusOS, OpenClaw, Hermes, JULI3TA, shared-folder, and install guidance without duplicating embeddings locally.
+
+The tray daemon also exposes documentation as skills so agentic apps can attach the right manual automatically:
+
+| Skill id | Use it for |
+|---|---|
+| `tytus.docs.cli-reference` | CLI, tray, MCP, gateway, Cortex, install, update, and troubleshooting questions. |
+| `tytus.docs.os-manual` | TytusOS desktop, Pod Inspector, Chat, Files, Channels, Settings, shared folders, and app workflows. |
+| `tytus.docs.agentic-app-skills` | How an app should call `host.skills.*`, resolve docs, and attach manuals to mission context. |
+
+Apps can call `host.skills.resolve({ prompt })`, fetch the selected markdown with `host.skills.get(id)`, and add that body to the local chat or mission prompt. The same summaries appear in Resource Fabric as `app-skill` resources.
 
 ## Ask pod
 
@@ -1178,6 +1192,7 @@ Examples:
 | Local terminal open | Open the TytusOS terminal with context. |
 | JULI3TA create song | Hand off a music-generation task to JULI3TA where supported. |
 | Blender MCP create scene | Use a Blender MCP/socket bridge when the Blender skill and local server are installed. |
+| Tytus documentation skills | Load the bundled CLI reference, OS manual, or docs-as-skills guide into an agentic app. |
 
 Do not show fake support. If a skill or app driver is not installed, show it as unavailable with the missing dependency.
 
@@ -1185,7 +1200,7 @@ Do not show fake support. If a skill or app driver is not installed, show it as 
 
 | Problem | Fix |
 |---|---|
-| Old UI or duplicate Agent Team icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.22` or newer. |
+| Old UI or duplicate Agent Team icons | Hard-refresh TytusOS. Confirm Atomek is loaded from `tytus-app-atomek@v0.4.23` or newer. |
 | Files are listed but editor is blank | Reopen the file, then hard-refresh. If still broken, report the file type and console error. |
 | Folder does not expand/collapse | You are likely on an older bundle. Refresh and check the Atomek version. |
 | Chat answer appears only after completion | Streaming path is degraded. Check browser console and host `/v1/chat/completions` proxy errors. |
@@ -1220,6 +1235,7 @@ Settings is split into **Tytus** panels and **System** panels. Production docs s
 | Pods | Allocated pods, API/UI URLs, keys, status, allocate action |
 | Agents | Install OpenClaw/Hermes-style agents into pods and follow install progress |
 | Daemon | Local daemon health, session expiry, sign-in recovery, lifecycle buttons, autostart toggles |
+| AI | Cortex memory profile (Cloud / Local), local Cortex status, install guidance. See [Local Cortex](./local-cortex.md). |
 | Sharing | Garagetytus/shared-folder bindings, diagnostics, defaults, cache/open-folder actions |
 
 ## System panels
@@ -1265,6 +1281,140 @@ About should show the installed TytusOS/daemon version and update state when ava
 Use shared semantic tokens for foreground/background/border/accent. Never hard-code black icons or text into product UI; it breaks dark mode. New components must be checked in both light and dark mode before shipping.
 
 
+<!-- ==== local-cortex.md ==== -->
+
+# Local Cortex
+
+By default, chat with your pod routes through Tytus's cloud Cortex on Strato. That works out of the box and requires no extra software. If you want chat **memory** and the Cortex database/cache to stay on your Mac, you can run Cortex locally instead.
+
+Local Cortex is opt-in. Cloud stays the default for everyone.
+
+## What runs where
+
+| Profile | Where chat goes | Where memory lives |
+|---|---|---|
+| **Cloud** (default) | `tytus.traylinx.com` → Strato Cortex → your pod | Strato Postgres |
+| **Local** (opt-in) | `127.0.0.1:8098` → local Cortex → your pod | Your Mac's Docker volumes |
+
+In both profiles, the **agent** (OpenClaw or Hermes) runs in your pod on Strato. Local Cortex only moves the "memory and routing" layer to your machine. Running agents locally is a separate, future feature.
+
+## Requirements
+
+- macOS or Linux. Windows local Cortex is not yet supported.
+- **Docker Desktop installed and running.** Tytus does not bundle a Docker daemon; you bring your own. Install: https://www.docker.com/products/docker-desktop
+- Roughly 4 GB free disk space for the initial image pulls (Postgres, Redis, Cortex).
+- Roughly 1.2 GB of RAM in use when the stack is running.
+
+## Switching to local
+
+1. Open **Settings → AI**.
+2. Pick **Local Cortex (opt-in)**. TytusOS flips the routing flag immediately, but chat will fall back to cloud until the stack is actually running.
+3. Open a terminal and run:
+
+   ```bash
+   tytus cortex up
+   ```
+
+   First run pulls images (~30–90 seconds on a typical connection). The CLI prints progress as it goes. When it returns, the status panel in Settings should flip to **Active**.
+
+4. (Optional) verify with:
+
+   ```bash
+   tytus cortex test
+   ```
+
+   The CLI sends a probe message to your local Cortex and prints the round-trip latency.
+
+That's it. From now on, the Cortex memory/routing layer runs locally. The selected agent still runs in your remote pod, and model calls may still go to the configured AIL/upstream provider. The assistant message in Atomek shows a **"Local Cortex"** chip beside the response.
+
+## Switching back to cloud
+
+1. Open **Settings → AI** and pick **Cloud Cortex**.
+2. If you also want to stop the local Docker containers, run:
+
+   ```bash
+   tytus cortex down
+   ```
+
+   Your Postgres volume is preserved so you can switch back later without losing memory. To wipe memory too, add `--purge`:
+
+   ```bash
+   tytus cortex down --purge
+   ```
+
+## The `tytus cortex` commands
+
+| Command | What it does |
+|---|---|
+| `tytus cortex up` | Install + start Postgres, Redis, Cortex on `127.0.0.1:8098`. Idempotent. |
+| `tytus cortex down` | Stop the containers. Data volumes preserved. |
+| `tytus cortex down --purge` | Stop and wipe data volumes. **Destructive.** |
+| `tytus cortex status` | Show profile, container state, health, version. |
+| `tytus cortex test` | Send a probe message. Reports round-trip latency. |
+| `tytus cortex reset --yes` | Stop + purge volumes + clear local Cortex state. Returns you to factory. |
+| `tytus cortex token rotate` | Mint a new per-user token. Ends any in-flight chats. |
+| `tytus cortex token show` | Show whether a token is present (never prints the token body). |
+| `tytus cortex logs [--tail N] [--follow]` | Tail Cortex container logs. |
+| `tytus cortex upgrade` | Pull the latest pinned image + run database migrations. |
+| `tytus cortex version` | Show the pinned image tag this CLI release bundles. |
+
+All commands accept `--json` for AI-CLI consumption.
+
+## Troubleshooting
+
+### "Docker CLI not found"
+
+Install Docker Desktop and start it before running `tytus cortex up`. The CLI shells out to `docker version` first; if that fails the install aborts with a hint.
+
+### "Cortex did not become healthy within 90s"
+
+Run `tytus cortex logs` to see what the Cortex API container is complaining about. Most common causes:
+
+- Postgres took longer than usual to initialize on first run. Try `tytus cortex up` again — it's idempotent.
+- The host's SwitchAILocal gateway is not reachable. Local Cortex calls it for chat and embeddings via `host.docker.internal:18080`. Verify your SwitchAILocal install is running.
+- Port 8098 collides with something else on your machine. Pick a different port: `tytus cortex up --port 9098`.
+
+### "no ctx_* token — run `tytus cortex token rotate`"
+
+The user token mint failed (or was never attempted, e.g. you ran `down` then `up` and the mint step raced). Just rotate:
+
+```bash
+tytus cortex token rotate
+```
+
+### Chat hangs after switching to local
+
+Two things to check, in order:
+
+1. `tytus cortex status` — is the stack running and healthy?
+2. `tytus cortex test "ping"` — does Cortex reply?
+
+If step 2 works but Atomek/Chat still hangs, the tray daemon may need a restart to re-read `state.json`. Restart Tytus from the menu bar.
+
+### "Memory search requires profile=local. Switch in Settings → AI."
+
+This appears in TytusOS apps that try to call `host.ai.cortexSearch()` while the user is on cloud. Local Cortex's memory store is private to the user's machine — there's no cloud equivalent. Either switch to local, or accept that recall is unavailable on the cloud profile.
+
+## What's NOT supported in v1
+
+- **Running pods locally.** Agents stay in your remote Strato pod. The `chat_target=agent` path through local Cortex is intentionally disabled (DAM is not running on your Mac).
+- **Cortex-mediated direct memory writes.** Local Cortex consolidates memories from chats automatically; there is no `host.ai.cortexRemember()` API today. If you want explicit "save this fact" UX, use Atomek's existing **Remember** button — that writes to a separate, workbench-scoped memory store.
+- **Migrating cloud sessions to local.** The two profiles maintain separate memories. Switching does not move data either way.
+- **Multi-user local Cortex.** One Mac, one user.
+
+## Privacy posture
+
+- Tokens live in `~/Library/Application Support/tytus/state.json` (mode 0600, user-only).
+- Postgres + Redis volumes are Docker-managed, owned by your user account.
+- The local Cortex API binds to `127.0.0.1` only — never reachable from other machines on the network.
+- Tray daemon's `/api/cortex/*` endpoints enforce same-origin checks; only TytusOS itself can call them.
+- Provider credentials may still be used for model inference through the configured AIL/upstream route. What stays local in Local Cortex mode is the Cortex API state, memory database/cache, and Docker volumes — not necessarily every model inference request.
+
+## Architecture
+
+For the implementation details, see the sprint pack at `services/tytus-os/development/sprints/2026-05-21-chat-with-pods-local-cortex-parity/` (developer-facing, not user docs).
+
+
 <!-- ==== apps-catalog.md ==== -->
 
 # Apps Catalog
@@ -1304,6 +1454,14 @@ Examples: games, ASCII Art, Matrix Rain, local notes/todos/calculator, API Teste
 
 Some apps publish skills that Atomek and other agent surfaces can attach dynamically. A skill may describe how to inspect a project, generate a patch preview, launch a local tool, drive a media app, or connect to an external app bridge such as Blender MCP.
 
+Tytus itself publishes documentation skills through the tray host API:
+
+- `tytus.docs.cli-reference` — current bundled CLI/tray/MCP/Cortex reference
+- `tytus.docs.os-manual` — current bundled TytusOS user manual
+- `tytus.docs.agentic-app-skills` — how agentic apps should discover and attach documentation skills
+
+Agentic apps should use `host.skills.resolve({ prompt })` before answering Tytus product questions, then load the chosen markdown with `host.skills.get(id)`. The same skills are listed in Resource Fabric as `app-skill` resources.
+
 Rules for production skills:
 
 - declare the dependency honestly
@@ -1325,9 +1483,113 @@ If an app appears in the production launcher/dock by default, its manual entry m
 If the answer is “nothing real”, keep the app hidden behind the demo-app toggle.
 
 
+## Remote app loading failures
+
+Atomek and JULI3TA are versioned Tytus apps. If an app window says it cannot load because a module was served as `text/plain`, the browser rejected a raw GitHub module URL. This is a delivery/config issue, not a user data issue.
+
+User recovery:
+
+1. Refresh TytusOS.
+2. Use **Settings -> Check for updates** / tray **Update Tytus** when available.
+3. Reopen the app.
+4. If it still fails, send support the app name, version, and the exact console line.
+
+Support should verify the app manifest points to a JavaScript module endpoint with the right MIME type, preferably a pinned CDN/release asset such as jsDelivr or a bundled dist URL, not a raw GitHub URL served as `text/plain`. Current launch catalog baseline: Atomek `v0.4.29`, JULI3TA `juli3ta-0.3.21`.
+
+
+<!-- ==== channels.md ==== -->
+
+# Channels
+
+Channels connect a Tytus pod to external messengers. They are per-pod, token-safe, and managed from TytusOS or the tray.
+
+## What works today
+
+| Channel | Current status | Best for |
+|---|---|---|
+| Telegram | Native OpenClaw flow | Simple bot chat with one selected pod. |
+| Discord bot | Native OpenClaw-backed bot flow when you provide Discord app credentials | Team-room or server workflows where the bot relays to the selected pod. |
+| Slack Socket Mode | Native OpenClaw-backed flow when you provide Slack app credentials | Workspace chat without exposing public inbound webhooks. |
+| LINE | Listed in setup UI, but treat as beta/manual until support confirms the target flow. | Regional messenger experiments. |
+| WhatsApp / Signal / iMessage / Matrix and others | Not one-click native in launch docs. Use a custom bridge or ask the agent for a guided setup. | Advanced/custom deployments. |
+
+Do not document broad “20+ messengers” as automatic native support. If a channel requires the user to create an external app, paste tokens, or run a custom bridge, say so clearly.
+
+A "native" row here means Tytus exposes a setup flow for that transport. It does not mean every Discord/Slack/Telegram server topology is automatically provisioned, and it does not guarantee message delivery while the selected pod, Cortex, or external messenger API is unavailable.
+
+## Add a channel
+
+1. Open **Channels** in TytusOS or tray **Controls -> Show all pods -> <pod> -> Channels**.
+2. Select the pod.
+3. Pick the channel type.
+4. Paste the token/credentials from the external service.
+5. Save.
+6. Send a test message.
+
+Tokens never belong in URLs, screenshots, shared folders, or support tickets.
+
+## Agent support
+
+OpenClaw is the launch target for channel workflows. Hermes can be allocated and chatted with, but do not claim Hermes-native Discord/Slack/Telegram channel automation unless a specific release documents it.
+
+## Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| Channel missing in tray | Refresh TytusOS/tray; confirm the pod appears in `/pod/status`. |
+| Token rejected | Recreate token in Telegram/Discord/Slack and paste again; do not reuse leaked tokens. |
+| Message reaches bot but no reply | Check pod readiness and Cortex state. Running is not always chat-ready. |
+| Wrong pod replies | Open Channels and verify the selected target pod. |
+| Need Discord team/swarm setup | Use Discord as a manual/team-room bridge unless native setup is explicitly enabled in the UI. Keep approval gates human-controlled. |
+
+
 <!-- ==== troubleshooting.md ==== -->
 
 # Troubleshooting
+
+## Pods missing or count differs between Traylinx and TytusOS
+
+Do not delete pods to fix this. First confirm the account and daemon state.
+
+1. Confirm the tray is signed into the same Traylinx account shown in the web app.
+2. Click the TytusOS refresh icon or run `tytus status`.
+3. Check `/pod/status` through the daemon: it should include `has_plan`, `tier_name`, `max_units`, `units_used`, `current_pods`, and `pods[]`.
+4. If a pod appears as `No agent`, it is a reserved/free slot unless support confirms otherwise.
+5. If custom names are missing, refresh after `/pod/status` returns `display_name` for every active agent.
+6. If the tray says daemon offline while TytusOS loads, restart Tytus from the tray menu, then reconnect the tunnel.
+
+## Tytus Cortex is warming up or did not return a response
+
+A pod can be running before its chat brain is ready. Wait 30-90 seconds, then refresh pod status. If it persists:
+
+```bash
+tytus status
+tytus doctor
+tytus test
+```
+
+Use **Visit/Open** to check the direct agent UI only as a diagnostic. Do not treat a successful browser page as full Cortex readiness.
+
+## Remote app fails to load: MIME type `text/plain`
+
+The app bundle URL is being served with the wrong content type. Browser modules require JavaScript MIME.
+
+User fix: update Tytus, refresh TytusOS, reopen the app.
+
+Support fix: verify the app catalog manifest uses a pinned release/CDN URL for `dist/index.js` and not a raw GitHub module URL that returns `text/plain`.
+
+## Update Tytus
+
+When the tray shows an update-available row, treat it as the signal that a newer Tytus exists. Choose **Settings -> Check for Updates** or **Update Tytus** to start the update flow; it is not a silent auto-installer. CLI fallback:
+
+```bash
+tytus update
+tytus --version
+tytus doctor
+```
+
+If the command is unavailable in an older build, reinstall from `https://get.traylinx.com/` and then run `tytus login && tytus connect && tytus test`.
+
 
 ## TytusOS says Session expired but the tray says Connected
 
@@ -1363,6 +1625,18 @@ Fix for contributors: route browser-side gateway probes through the daemon or sa
 
 That is a UI bug unless the user explicitly opened a diagnostic log. Missing `Inbox` or `Downloads` should show a friendly empty state with a create/refresh action.
 
+## FS chip shown in the top bar ("FS degraded" / "FS offline")
+
+The top bar shows a yellow or red **FS** chip when the local tray daemon has not been able to serve the host filesystem API for one or more apps. Hover the chip for the last error, fallback ops count, and time since the last probe.
+
+What to do:
+
+1. Open **Settings -> Daemon** (click the chip to jump there).
+2. If the daemon process is not running, start the tray and wait for the chip to clear.
+3. If the daemon is running but the chip stays yellow/red, check `/tmp/tytus/daemon.log`, then run `tytus doctor`.
+
+The chip is hidden when host.fs is healthy. It exists so apps that write into `~/Tytus`, `~/Documents`, `~/Downloads`, `~/Music`, or `~/Pictures` no longer fail silently when the daemon goes away mid-session.
+
 ## Terminal output duplicates or breaks after resizing
 
 The terminal must notify the PTY backend of row/column changes and clear/reflow correctly. If output duplicates after resize, test with `stty size`, resize again, and inspect terminal resize events.
@@ -1386,7 +1660,7 @@ Fix:
 1. Hard-refresh TytusOS.
 2. Reopen Atomek.
 3. Reopen the file from Explorer.
-4. Confirm Atomek loads `tytus-app-atomek@v0.4.22` or newer.
+4. Confirm Atomek loads `tytus-app-atomek@v0.4.23` or newer.
 5. If still broken, include the file extension and browser console error in the bug report.
 
 ## Atomek folder rows do not expand or collapse
@@ -1395,7 +1669,7 @@ Use the folder chevron or click the folder row. If nothing changes, you are like
 
 ## Atomek shows duplicate Agent Team and stale App Skills icons
 
-That was an old app bundle. The current surface has one **Agent Team** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.22` or newer.
+That was an old app bundle. The current surface has one **Agent Team** activity. Hard-refresh TytusOS and confirm the app comes from `tytus-app-atomek@v0.4.23` or newer.
 
 ## Atomek local tools are missing
 

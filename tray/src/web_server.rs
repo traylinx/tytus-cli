@@ -70,6 +70,8 @@ const TYTUS_UPDATE_RELEASES_BASE_URL: &str = "https://github.com/traylinx/tytus-
 const TYTUS_UPDATE_AUTO_CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
 const AGENT_CHAT_STREAM_TIMEOUT: Duration = Duration::from_secs(600);
 const AGENT_CHAT_DIRECT_TIMEOUT: Duration = Duration::from_secs(150);
+const TYTUS_LLM_DOCS: &str = include_str!("../../llm-docs.md");
+const TYTUS_OS_DOCS: &str = include_str!("../../os-docs.md");
 #[cfg(test)]
 const TYTUS_OS_IMPORTMAP_CSP_HASH: &str = "'sha256-OK78PKsLa0Df2vCibHGi9M30N5fPqXJcA3myYC8ofCU='";
 const TYTUS_OS_CONTENT_SECURITY_POLICY: &str = concat!(
@@ -1876,19 +1878,18 @@ fn handle_mission_runs(request: Request, query: &str) {
         );
         return;
     }
-    if !root.is_dir() {
-        respond_json(
-            request,
-            404,
-            &serde_json::json!({ "error": "mission_not_found" }),
-        );
-        return;
-    }
-    respond_json(
-        request,
-        200,
-        &serde_json::json!({ "runs": read_mission_runs(&root) }),
-    );
+    // Missing-but-allowed mission folder == empty runs list. The folder
+    // is gone (user deleted it) or never existed (stale localStorage on
+    // the workbench side). Returning 404 made every caller bolt on its
+    // own error handling and surfaced as scary red console errors.
+    // 403 above is still the right response for paths outside the
+    // allowed Missions root.
+    let runs = if root.is_dir() {
+        read_mission_runs(&root)
+    } else {
+        Vec::new()
+    };
+    respond_json(request, 200, &serde_json::json!({ "runs": runs }));
 }
 
 fn handle_mission_create(mut request: Request) {
@@ -2136,6 +2137,63 @@ fn tytus_skill_summaries() -> Vec<serde_json::Value> {
             &["music", "song", "track", "juli3ta"],
         ),
         skill_summary(
+            "tytus.docs.cli-reference",
+            "Use Tytus CLI reference",
+            "Load the bundled Tytus CLI, tray, MCP, gateway, Cortex, install, and troubleshooting reference for agent answers.",
+            "host-api",
+            "system",
+            "available",
+            None,
+            &[
+                "tytus",
+                "cli",
+                "install",
+                "login",
+                "mcp",
+                "gateway",
+                "cortex",
+                "doctor",
+                "troubleshooting",
+            ],
+        ),
+        skill_summary(
+            "tytus.docs.os-manual",
+            "Use TytusOS user manual",
+            "Load the bundled TytusOS manual covering pods, Chat, Files, Channels, Settings, Pod Inspector, shared folders, and app workflows.",
+            "host-api",
+            "system",
+            "available",
+            None,
+            &[
+                "tytusos",
+                "desktop",
+                "pod inspector",
+                "files",
+                "channels",
+                "shared folders",
+                "agentic apps",
+                "user manual",
+            ],
+        ),
+        skill_summary(
+            "tytus.docs.agentic-app-skills",
+            "Add Tytus docs to agentic apps",
+            "Explain how Tytus apps expose documentation and skills through host.skills, /api/skills, manifests, and Resource Fabric.",
+            "host-api",
+            "system",
+            "available",
+            None,
+            &[
+                "skills",
+                "agentic app",
+                "docs",
+                "documentation",
+                "resource fabric",
+                "host.skills",
+                "manifest",
+            ],
+        ),
+        skill_summary(
             "blender-mcp.create-scene",
             "Drive Blender via MCP",
             "Use the installed Blender MCP skill when Blender and the MCP bridge are configured.",
@@ -2271,6 +2329,35 @@ fn skill_body_for(id: &str) -> Option<String> {
                 "- Treat JULI3TA as a separate app; do not modify it from Atomek.",
                 "- Route user music intent through Tytus app/window context and host-backed endpoints.",
                 "- Avoid direct browser fetches to pod/tunnel origins; use the same-origin host bridge.",
+            ]
+            .join("\n"),
+        ),
+        "tytus.docs.cli-reference" => Some(TYTUS_LLM_DOCS.to_string()),
+        "tytus.docs.os-manual" => Some(TYTUS_OS_DOCS.to_string()),
+        "tytus.docs.agentic-app-skills" => Some(
+            [
+                "# Tytus Documentation Skills for Agentic Apps",
+                "",
+                "Use this skill when an agentic Tytus app needs current product context before answering or acting.",
+                "",
+                "## What exists locally",
+                "- `host.skills.list()` lists all local app skills and system documentation skills exposed by the tray daemon.",
+                "- `host.skills.get(id)` returns the selected skill body as markdown.",
+                "- `host.skills.resolve({ prompt })` maps user intent to relevant skills.",
+                "- Same-origin HTTP mirrors exist at `GET /api/skills`, `GET /api/skills/{id}`, and `POST /api/skills/resolve`.",
+                "- The same skill summaries also appear in `GET /api/resources` as `kind: \"app-skill\"` resources so Resource Fabric UIs can attach them to a mission.",
+                "",
+                "## Built-in documentation skills",
+                "- `tytus.docs.cli-reference` loads the bundled `tytus llm-docs` reference: CLI, tray, MCP, gateway, Cortex, install, update, and troubleshooting.",
+                "- `tytus.docs.os-manual` loads the bundled `tytus os-docs` manual: TytusOS desktop, Pod Inspector, Chat, Files, Channels, Settings, shared folders, and app workflows.",
+                "- `tytus.docs.agentic-app-skills` explains this docs-as-skills mechanism.",
+                "",
+                "## How agentic apps should use it",
+                "1. Resolve skills from the user prompt before answering product questions.",
+                "2. Fetch the selected skill body and include it in the local app chat context.",
+                "3. Prefer bundled docs over stale model memory.",
+                "4. Never invent unavailable native integrations; if docs say a bridge is manual or future work, say that.",
+                "5. For user-visible product changes, update `tytus-os/docs/user-manual/*`, regenerate `tytus-cli/os-docs.md`, and keep this skill mechanism in sync.",
             ]
             .join("\n"),
         ),
@@ -3098,7 +3185,17 @@ pub fn start() -> Option<u16> {
     daemon_started_at();
     music_ytdlp_setup::start_background_install();
 
-    let bind_addr = format!("{}:{}", TYTUS_OS_HOST, TYTUS_OS_PORT);
+    // Dev override: `TYTUS_TRAY_PORT=4343` makes the tray bind to a
+    // sidecar port so a Vite dev server can own the canonical 4242
+    // origin and proxy `/api/*` here via the tray-web.port file. The
+    // default (env unset or unparseable) stays at the fixed 4242 so
+    // production installs and packaged builds are unaffected.
+    let port = std::env::var("TYTUS_TRAY_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .filter(|&p| p > 0)
+        .unwrap_or(TYTUS_OS_PORT);
+    let bind_addr = format!("{}:{}", TYTUS_OS_HOST, port);
     let server = match Server::http(&bind_addr) {
         Ok(s) => s,
         Err(e) => {
@@ -3109,7 +3206,14 @@ pub fn start() -> Option<u16> {
             return None;
         }
     };
-    let port = TYTUS_OS_PORT;
+    if port != TYTUS_OS_PORT {
+        eprintln!(
+            "[tray-web] dev override: bound on :{} (TYTUS_TRAY_PORT). \
+             Front-end should run on http://localhost:{}/ and proxy \
+             /api/* to this port via /tmp/tytus/tray-web.port.",
+            port, TYTUS_OS_PORT
+        );
+    }
 
     // Persist the fixed port so legacy consumers and diagnostics can read it.
     if let Some(path) = port_file() {
@@ -4111,6 +4215,13 @@ fn handle(request: Request, registry: Registry) {
         // after an install failure calls this to reset before retry.
         (Method::Post, "/api/pod/revoke") => {
             handle_pod_revoke(request, &query);
+        }
+        // Rename a pod (set or clear display_name). Body:
+        // `{ pod_id, display_name }`. Calls Provider's PATCH directly —
+        // no CLI subprocess. State.json is refreshed in-place so the
+        // next /api/state poll sees the new label.
+        (Method::Post, "/api/pod/rename") => {
+            handle_pod_rename(request);
         }
         // Phase B: per-pod streamed action. Body is { "action": "doctor"
         // | "restart" | "revoke" | "uninstall" | "stop-forwarder" }.
@@ -7017,7 +7128,16 @@ fn handle_pod_proxy(mut request: Request, pod_id: String, proxy_path: String) {
         );
         return;
     };
-    let Some(public_url) = slot.public_url.as_ref().filter(|s| !s.is_empty()) else {
+    // Prefer the WG-tunneled stable endpoint (e.g. `http://10.42.42.1:18080`)
+    // over the public HTTPS URL when both are available. The public URL goes
+    // through Traylinx's edge → droplet nginx and can 502 if the user's
+    // route is stale; the stable endpoint is the same droplet, one hop
+    // inside the tunnel, and is what `tytus env` advertises as canonical.
+    let upstream_base = if !slot.endpoint.is_empty() {
+        slot.endpoint.as_str()
+    } else if let Some(pu) = slot.public_url.as_ref().filter(|s| !s.is_empty()) {
+        pu.as_str()
+    } else {
         respond_json(
             request,
             503,
@@ -7071,7 +7191,7 @@ fn handle_pod_proxy(mut request: Request, pod_id: String, proxy_path: String) {
         }
     };
     let mut upstream = client
-        .request(req_method, join_proxy_url(public_url, &proxy_path))
+        .request(req_method, join_proxy_url(upstream_base, &proxy_path))
         .bearer_auth(&slot.user_key);
     for h in request.headers() {
         let name = h.field.as_str().as_str().to_ascii_lowercase();
@@ -7741,6 +7861,168 @@ fn handle_pod_revoke(request: Request, query: &str) {
                 "error": format!("failed to spawn: {}", e)
             }),
         ),
+    }
+}
+
+/// Rename a pod's user-facing display name.
+///
+/// Body: `{ "pod_id": "NN", "display_name": "<name>" | null }`. Provider validates
+/// 1..=48 chars, trimmed, no control chars. Pass `null` (or empty) to clear.
+///
+/// Calls Provider's `PATCH /pod/{podId}/name` directly with the daemon's stored
+/// secret_key/agent_user_id pair — no CLI subprocess. On success, refreshes the
+/// pods slice of state.json so the next `/api/state` poll reflects the new name
+/// without waiting for the periodic sync cycle.
+fn handle_pod_rename(mut request: Request) {
+    let mut body = String::new();
+    if request.as_reader().read_to_string(&mut body).is_err() {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"read_body_failed"}),
+        );
+        return;
+    }
+    let parsed: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            respond_json(request, 400, &serde_json::json!({"error":"invalid_json"}));
+            return;
+        }
+    };
+
+    let pod_id = match parsed.get("pod_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() && s.len() <= 3 && s.chars().all(|c| c.is_ascii_digit()) => {
+            s.to_string()
+        }
+        _ => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":"invalid_pod_id","message":"pod_id must be 1-3 ASCII digits"}),
+            );
+            return;
+        }
+    };
+
+    // route_id (optional) — used to disambiguate when multiple pods share
+    // the same pod_id (e.g. OpenClaw + Hermes both allocated as pod 01 on
+    // different droplets). Provider's findPod prefers route_id when set.
+    // Validates as alphanumeric to match Provider's validateRouteId shape.
+    let route_id: Option<String> = parsed
+        .get("route_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            s.len() <= 64
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+        .map(|s| s.to_string());
+
+    // null OR string. Empty string treated as clear (= null). Provider does
+    // the strict validation; this is just shape-checking.
+    let display_name: Option<String> = match parsed.get("display_name") {
+        Some(serde_json::Value::Null) | None => None,
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        _ => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":"invalid_display_name","message":"display_name must be a string or null"}),
+            );
+            return;
+        }
+    };
+
+    let (secret, auid) = match read_provider_auth() {
+        Ok(c) => c,
+        Err(e) => {
+            respond_json(
+                request,
+                401,
+                &serde_json::json!({"error":"auth_required","message":e}),
+            );
+            return;
+        }
+    };
+
+    let http = atomek_core::HttpClient::new();
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => {
+            respond_json(request, 500, &serde_json::json!({"error":"runtime_failed"}));
+            return;
+        }
+    };
+
+    let result = rt.block_on(async {
+        let client = atomek_pods::TytusClient::new(&http, &secret, &auid);
+        atomek_pods::rename_pod(
+            &client,
+            &pod_id,
+            route_id.as_deref(),
+            display_name.as_deref(),
+        )
+        .await
+    });
+
+    match result {
+        Ok(_) => {
+            // Best-effort refresh of state.json so next /api/state poll
+            // reflects the new name. Failure to refresh is non-fatal —
+            // the natural sync cycle will catch up.
+            rt.block_on(async {
+                let client = atomek_pods::TytusClient::new(&http, &secret, &auid);
+                if let Ok(status) = atomek_pods::get_pod_status(&client).await {
+                    if let Some(path) = state_json_path() {
+                        if let Ok(raw) = std::fs::read_to_string(&path) {
+                            if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) {
+                                merge_pod_status(&mut root, status.pods);
+                                if let Ok(data) = serde_json::to_string_pretty(&root) {
+                                    let _ = std::fs::write(&path, data);
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        let _ = std::fs::set_permissions(
+                                            &path,
+                                            std::fs::Permissions::from_mode(0o600),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            respond_json(
+                request,
+                200,
+                &serde_json::json!({"ok":true,"pod_id":pod_id,"route_id":route_id,"display_name":display_name}),
+            );
+        }
+        Err(e) => {
+            let (status, code) = match &e {
+                atomek_core::AtomekError::ApiStatus { status, .. } => (*status, "provider_error"),
+                _ => (500, "rename_failed"),
+            };
+            respond_json(
+                request,
+                status,
+                &serde_json::json!({"error":code,"message":e.to_string()}),
+            );
+        }
     }
 }
 
@@ -12231,6 +12513,41 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn tytus_documentation_is_exposed_as_first_class_skills() {
+        let skills = tytus_skill_summaries();
+        for id in [
+            "tytus.docs.cli-reference",
+            "tytus.docs.os-manual",
+            "tytus.docs.agentic-app-skills",
+        ] {
+            let skill = skills
+                .iter()
+                .find(|skill| skill.get("id").and_then(|v| v.as_str()) == Some(id))
+                .unwrap_or_else(|| panic!("{id} missing from /api/skills source list"));
+            assert_eq!(skill["status"], serde_json::json!("available"));
+            assert_eq!(skill["driver"], serde_json::json!("host-api"));
+            assert_eq!(skill["source"], serde_json::json!("system"));
+        }
+
+        let cli_body = skill_body_for("tytus.docs.cli-reference").expect("CLI docs body");
+        assert!(
+            cli_body.contains("tytus llm-docs"),
+            "CLI skill must carry the bundled LLM-facing reference",
+        );
+        let os_body = skill_body_for("tytus.docs.os-manual").expect("OS docs body");
+        assert!(
+            os_body.contains("TytusOS"),
+            "OS skill must carry the bundled TytusOS manual",
+        );
+        let app_skill_body =
+            skill_body_for("tytus.docs.agentic-app-skills").expect("agentic docs skill body");
+        assert!(
+            app_skill_body.contains("host.skills.resolve"),
+            "agentic-app docs skill must tell apps how to resolve documentation skills",
+        );
     }
 
     #[test]

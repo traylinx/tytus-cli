@@ -47,22 +47,21 @@ Mixing them returns 401. See risk register R14 + sprint 04-API-CONTRACTS.md §6.
 
 ## Cross-repo dependency
 
-The bundled compose uses `image: ghcr.io/traylinx/tytus-cortex:<tag>`. That
-image must be published by the `tytus-cortex` repo before this command
-works for end users. Today the Cortex repo only ships a Dockerfile and
-production droplets build it on-droplet via `bootstrap/11-install-tytus-cortex.sh`.
+The bundled compose uses `image: ghcr.io/traylinx/tytus-cortex:<tag>`. The CLI currently pins `ghcr.io/traylinx/tytus-cortex:2026-05-17`.
 
-**TODO:** Cortex CI to publish `ghcr.io/traylinx/tytus-cortex:<release-tag>`
-images. Tracked as Q18 in `06-OPEN-QUESTIONS.md`.
-
-For local dev today, override with:
+Launch rule: before telling users that `tytus cortex up` is ready, verify the GHCR package is public from a clean machine:
 
 ```bash
-# Build the image locally from the Cortex repo:
+docker manifest inspect ghcr.io/traylinx/tytus-cortex:2026-05-17 >/dev/null
+```
+
+If that fails with `manifest unknown` or `unauthorized`, the docs must say local Cortex is temporarily unavailable and support must fix GHCR package visibility.
+
+For local dev override:
+
+```bash
 cd services/tytus-cortex
 docker build -t ghcr.io/traylinx/tytus-cortex:2026-05-17 .
-
-# Then tytus cortex up will find it in your local Docker registry.
 ```
 
 ## Resource footprint

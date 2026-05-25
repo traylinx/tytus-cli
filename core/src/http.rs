@@ -36,6 +36,10 @@ impl HttpClient {
         self.inner.post(url)
     }
 
+    pub fn patch(&self, url: &str) -> reqwest::RequestBuilder {
+        self.inner.patch(url)
+    }
+
     /// Send a request with automatic retry on retryable errors.
     /// Respects Retry-After header (RFC 7231).
     pub async fn send_with_retry(
