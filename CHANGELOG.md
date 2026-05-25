@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.7.10 — 2026-05-25 — fresh public beta republish
+
+### Changed
+
+- Fresh public beta cut from the fully merged Tytus CLI mainline after the documentation-skill, pod-rename, local-app reload, and catalog publication work landed.
+- Release assets embed `tytus-os` `v1.0.51-docs-skills` and keep the install surface ready for a clean uninstall/reinstall dogfood pass.
+
+### Verified
+
+- Re-ran release checks before tag creation: Rust formatting/tests, web installer reference checks, shell syntax check, JSON catalog validation, and branch sync checks.
+
 ## v0.7.9 — 2026-05-25 — docs skills, pod naming, and local dev polish
 
 ### Added

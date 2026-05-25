@@ -37,10 +37,10 @@ Do not use this as a GA security model. Signed/notarized pkg is still the produc
 
 **What happened:** The public beta deb is intentionally unsigned while package/repository signing is deferred.
 
-**Fix:** Only install the deb from the official beta page or GitHub release, verify it matches `v0.7.9`, then install:
+**Fix:** Only install the deb from the official beta page or GitHub release, verify it matches `v0.7.10`, then install:
 
 ```bash
-sudo apt install ./Tytus-0.7.9-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
+sudo apt install ./Tytus-0.7.10-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
 ```
 
 Open Tytus from the launcher or run `tytus-tray`, then follow the setup wizard.
