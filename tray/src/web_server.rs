@@ -1521,12 +1521,31 @@ fn handle_resources(request: Request) {
     for agent in snap.agents {
         let ready = matches!(agent.status, AgentStatus::Ready);
         let agent_internal_type = agent.agent_type.clone();
-        let agent_display_name = resource_agent_display_name(&agent_internal_type);
+        let agent_brand = resource_agent_display_name(&agent_internal_type);
         let agent_family = resource_agent_family(&agent_internal_type);
+        // Prefer the user-set display label (e.g. "Lisa") over the generic
+        // brand ("OpenClaw"). Atomek's chatTargets builder reads
+        // metadata.displayName for the dropdown row, so this name flows
+        // straight into the picker. Falls back to the generic brand when
+        // the user hasn't renamed yet so the row is never empty.
+        let user_label = if agent.display_label.trim().is_empty() {
+            agent_brand.to_string()
+        } else {
+            agent.display_label.clone()
+        };
+        // Resource id must be unique across pods that share pod_id.
+        // Multiple pods can collide on pod_id="01" across droplets — the
+        // route_id is the actual stable identifier. Append it when known.
+        let resource_id = match agent.route_id.as_deref() {
+            Some(rid) if !rid.is_empty() => {
+                format!("{}.{}", resource_agent_id(agent_family, &agent.pod_id), rid)
+            }
+            _ => resource_agent_id(agent_family, &agent.pod_id),
+        };
         resources.push(serde_json::json!({
-            "id": resource_agent_id(agent_family, &agent.pod_id),
+            "id": resource_id,
             "kind": "pod-agent",
-            "label": format!("{} agent pod {}", agent_display_name, agent.pod_id),
+            "label": format!("{} · {} agent · pod {}", user_label, agent_brand, agent.pod_id),
             "status": if ready { "ready" } else { "degraded" },
             "reason": if ready { serde_json::Value::Null } else { serde_json::Value::String(agent_status_label(agent.status).to_string()) },
             "capabilities": ["text-gen", "code-review", "web-fetch"],
@@ -1536,9 +1555,10 @@ fn handle_resources(request: Request) {
             "cost": resource_cost("tytus-units", if agent.units > 1 { "mid" } else { "low" }),
             "metadata": {
                 "podId": agent.pod_id,
+                "routeId": agent.route_id,
                 "agentType": agent_family,
-                "displayName": agent_display_name.clone(),
-                "brand": agent_display_name,
+                "displayName": user_label,
+                "brand": agent_brand,
                 "agentFamily": agent_family,
                 "units": agent.units,
                 "publicUrl": agent.public_url,
@@ -6475,14 +6495,11 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
     };
     let cli_pod_id = slot.pod_id.clone();
     let effective_route_id = route_id.clone().or_else(|| slot.route_id.clone());
-    if matches!(slot.status, AgentStatus::Stopped) {
-        respond_json(
-            request,
-            424,
-            &serde_json::json!({ "error": "agent_not_running", "message": "Agent is not running" }),
-        );
-        return;
-    }
+    // No local Stopped early-out here: Cortex is precisely the
+    // fallback for a not-yet-ready agent. Provider/Cortex serves a
+    // warming-up chat experience even when the agent's /v1/models
+    // 502s locally; refusing to forward defeats the entire purpose.
+    // Status is still surfaced as a UI badge — just not as a gate.
     let Some(message) = normalize_chat_message(&body.message) else {
         respond_json(
             request,
@@ -6997,14 +7014,11 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
         );
         return;
     };
-    if matches!(slot.status, AgentStatus::Stopped) {
-        respond_json(
-            request,
-            424,
-            &serde_json::json!({ "error": "agent_not_running", "message": "Agent is not running" }),
-        );
-        return;
-    }
+    // No Stopped early-out: trust Provider as the source of truth on
+    // agent reachability. The local probe of /v1/models can be stale
+    // or false-negative (e.g. an in-flight DAM restart returning 502
+    // while the agent is actually fine through the secure tunnel).
+    // Provider will return a real error if the agent is truly down.
     let agent_type = slot.agent_type.clone();
     let Some(message) = normalize_chat_message(&body.message) else {
         respond_json(
@@ -9010,6 +9024,120 @@ fn parse_garagetytus_status_line(stdout: &str) -> (Option<bool>, String) {
     (running, state)
 }
 
+const GARAGETYTUS_STABLE_ENDPOINT_HOST: &str = "10.42.42.1";
+const GARAGETYTUS_LOCAL_ENDPOINT_PORT: u16 = 3900;
+
+fn garagetytus_endpoint_url(host: &str) -> String {
+    format!(
+        "http://{}:{}",
+        host, GARAGETYTUS_LOCAL_ENDPOINT_PORT
+    )
+}
+
+fn valid_ipv4_host(s: &str) -> bool {
+    s.parse::<std::net::Ipv4Addr>().is_ok()
+}
+
+fn tunnel_peer_for_iface(iface: &str) -> Option<String> {
+    let out = Command::new("ifconfig").arg(iface).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let Some((_, after)) = line.split_once("-->") else {
+            continue;
+        };
+        let host = after.split_whitespace().next()?.trim().to_string();
+        if valid_ipv4_host(&host) {
+            return Some(host);
+        }
+    }
+    None
+}
+
+fn add_garagetytus_candidate_host(
+    hosts: &mut Vec<String>,
+    seen: &mut std::collections::BTreeSet<String>,
+    host: String,
+) {
+    if valid_ipv4_host(&host) && seen.insert(host.clone()) {
+        hosts.push(host);
+    }
+}
+
+fn garagetytus_candidate_endpoint_hosts() -> Vec<String> {
+    let mut hosts = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    // Prefer the actual WireGuard peer for active Tytus tunnels. On real
+    // installs this may be 10.18.x.1 / 10.19.x.1 instead of the historical
+    // stable alias. Binding through the wrong endpoint makes rclone fail even
+    // when the tunnel is healthy.
+    if let Ok(entries) = std::fs::read_dir("/tmp/tytus") {
+        let mut iface_files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.starts_with("tunnel-") && s.ends_with(".iface"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        iface_files.sort();
+        iface_files.reverse();
+        for path in iface_files {
+            if let Ok(iface) = std::fs::read_to_string(&path) {
+                if let Some(peer) = tunnel_peer_for_iface(iface.trim()) {
+                    add_garagetytus_candidate_host(&mut hosts, &mut seen, peer);
+                }
+            }
+        }
+    }
+
+    // Defensive fallback: parse all live utun peer addresses. This catches
+    // tunnels started by older launch scripts that did not write .iface files.
+    if let Ok(out) = Command::new("ifconfig").output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let Some((_, after)) = line.split_once("-->") else {
+                continue;
+            };
+            if let Some(host) = after.split_whitespace().next() {
+                add_garagetytus_candidate_host(&mut hosts, &mut seen, host.trim().to_string());
+            }
+        }
+    }
+
+    add_garagetytus_candidate_host(
+        &mut hosts,
+        &mut seen,
+        GARAGETYTUS_STABLE_ENDPOINT_HOST.to_string(),
+    );
+    hosts
+}
+
+fn garagetytus_endpoint_reachable(host: &str, timeout: Duration) -> bool {
+    use std::net::TcpStream;
+
+    let Ok(addr) = format!("{}:{}", host, GARAGETYTUS_LOCAL_ENDPOINT_PORT).parse() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, timeout).is_ok()
+}
+
+fn garagetytus_local_endpoint_probe(timeout: Duration) -> (String, bool) {
+    let candidates = garagetytus_candidate_endpoint_hosts();
+    let fallback = candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| GARAGETYTUS_STABLE_ENDPOINT_HOST.to_string());
+    for host in candidates {
+        if garagetytus_endpoint_reachable(&host, timeout) {
+            return (garagetytus_endpoint_url(&host), true);
+        }
+    }
+    (garagetytus_endpoint_url(&fallback), false)
+}
+
 fn garagetytus_cache_path() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
@@ -9024,6 +9152,14 @@ fn garagetytus_cache_path() -> Option<PathBuf> {
 fn handle_garagetytus_status(request: Request) {
     let binary = resolve_garagetytus_binary_path();
     let mut warnings: Vec<String> = Vec::new();
+    let (garage_endpoint, garage_endpoint_reachable) =
+        garagetytus_local_endpoint_probe(Duration::from_millis(650));
+    if !garage_endpoint_reachable {
+        warnings.push(format!(
+            "Tytus tunnel is not reaching Garage at {}. Connect the tunnel before binding or syncing shared folders.",
+            garage_endpoint
+        ));
+    }
 
     let (running, state, status_text) = if let Some(bin) = &binary {
         match Command::new(bin).arg("status").output() {
@@ -9103,6 +9239,8 @@ fn handle_garagetytus_status(request: Request) {
             "status_text": status_text,
             "version": version,
             "port": 3900,
+            "garage_endpoint": garage_endpoint,
+            "garage_endpoint_reachable": garage_endpoint_reachable,
             "binary_path": binary.map(|p| p.to_string_lossy().to_string()),
             "cache_path": cache_path.map(|p| p.to_string_lossy().to_string()),
             "cache_exists": cache_exists,
@@ -10181,6 +10319,30 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
         }
     }
 
+    // The Mac-side rclone remote points at Garage through the active local
+    // WireGuard peer. Prefer the live tunnel gateway (for example 10.18.x.1)
+    // and fall back to the historical stable alias. If the tunnel is
+    // stale/offline, `garagetytus-folder-bind` reaches phase 4 and fails with
+    // an opaque bisync/connect-refused log. Fail fast here so the UI can tell
+    // the user exactly what to fix before mutating local state.
+    let (garage_endpoint, garage_endpoint_reachable) =
+        garagetytus_local_endpoint_probe(Duration::from_millis(900));
+    if !garage_endpoint_reachable {
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "error": format!(
+                    "Shared folders need the Tytus tunnel. Garage is not reachable at {}. Connect the tunnel, then retry.",
+                    garage_endpoint
+                ),
+                "code": "shared_folders.garage_endpoint_unreachable",
+                "garage_endpoint": garage_endpoint,
+            }),
+        );
+        return;
+    }
+
     // Build argv: <local> <bucket> [--to N]... [--auto-sync]
     let mut args: Vec<String> = vec![body.local_path.clone(), body.bucket.clone()];
     for p in &body.pods {
@@ -10193,7 +10355,20 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
 
     let bin = resolve_garagetytus_helper("garagetytus-folder-bind");
     let (job_id, job) = registry.create();
-    spawn_external_command(job, bin, args);
+    spawn_external_command_with_options(
+        job,
+        bin,
+        args,
+        None,
+        vec![
+            ("GARAGETYTUS_ENDPOINT".to_string(), garage_endpoint.clone()),
+            (
+                "GARAGETYTUS_EXTERNAL_ENDPOINT".to_string(),
+                garage_endpoint.clone(),
+            ),
+        ],
+        None,
+    );
     respond_json(
         request,
         202,
@@ -10201,6 +10376,7 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
             "job_id": job_id,
             "bucket": body.bucket,
             "local_path": body.local_path,
+            "garage_endpoint": garage_endpoint,
         }),
     );
 }

@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.7.11 — 2026-05-26 — shared folders and CDN app release
+
+### Fixed
+
+- Tray shared-folder binding now discovers the active WireGuard Garage endpoint instead of assuming `10.42.42.1:3900`, then passes that endpoint into `garagetytus-folder-bind`.
+- `garagetytus-folder-bind` now rewrites reused rclone remotes to the active Garage endpoint, avoiding stale endpoint failures during auto-sync and bind retries.
+- Pod resources are route-aware, so multiple allocated pods that all report `pod_id=01` no longer collapse into one local TytusOS/Atomek target.
+- Pod chat keeps trying the direct Cortex/agent path even when a local probe is stale, removing false "not ready" blocks.
+- Embedded TytusOS catalog pins Atomek `v0.4.30` and JULI3TA `0.3.22` through jsDelivr module URLs, avoiding raw GitHub `text/plain` dynamic-import failures.
+
+### Release contents
+
+- Embeds `tytus-os` `v1.0.52-shared-folders`.
+- Builds macOS, Windows, and Linux release assets through the standard release workflow.
+
+### Verified
+
+- `cargo check -p tytus-tray`
+- TytusOS `npm run typecheck`, targeted app tests, and production build.
+- Atomek/JULI3TA builds and release manifest checks.
+- Garagetytus folder-bind shell syntax check.
+
 ## v0.7.10 — 2026-05-25 — fresh public beta republish
 
 ### Changed
