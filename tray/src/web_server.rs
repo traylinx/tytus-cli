@@ -7774,20 +7774,48 @@ fn handle_pod_open(request: Request, query: &str) {
         return;
     }
     let snap = compute_state_snapshot();
-    // Prefer the browser-auth UI URL (public edge + gateway_token) — loads
-    // at LB speed. Fall back to the public api_url so the click still does
-    // *something* useful (opens the /v1 route in a browser, which shows a
-    // 401 at worst). Never fall back to a localhost tunnel URL from the
-    // wizard — user can always use the tray's "Open in Browser" for that.
-    let url = snap
+    let Some(agent) = snap
         .agents
         .iter()
         .find(|a| agent_matches_selector(a, &selector))
-        .and_then(|a| a.ui_url.clone().or_else(|| a.public_url.clone()));
-    match url {
+    else {
+        respond_json(
+            request,
+            503,
+            &serde_json::json!({
+                "error":"no public URL yet — try again after the pod finishes provisioning"
+            }),
+        );
+        return;
+    };
+    // 1) Prefer the cached tokenized UI URL (public edge + gateway_token)
+    //    when the daemon already has one — fastest path, no Provider hop.
+    if let Some(u) = agent.ui_url.clone() {
+        open_url(&u);
+        respond_json(request, 200, &serde_json::json!({"ok": true, "url": u}));
+        return;
+    }
+    // 2) Otherwise, ask Provider for a fresh tokenized UI URL. This
+    //    handles the common case where state.json's pod_api_key is null
+    //    (older pods, or pods whose key fetch failed at allocation). The
+    //    /pod/agent/ui-url endpoint round-trips to DAM, derives the
+    //    gateway token, and returns the assembled `${publicUrl}/?token=…`
+    //    string ready to open. Synchronous because the click expects an
+    //    immediate "did the tab open" response.
+    let provider_url = fetch_ui_url_from_provider(&agent.pod_id, agent.route_id.as_deref());
+    if let Some(u) = provider_url.as_ref() {
+        open_url(u);
+        respond_json(request, 200, &serde_json::json!({"ok": true, "url": u}));
+        return;
+    }
+    // 3) Last resort — bare public URL. The agent gateway will 401 the
+    //    request without `?token=` in the query, but at least the user
+    //    sees a real Chrome error instead of nothing, and the browser
+    //    address bar gives them the URL to copy if they need to debug.
+    match agent.public_url.clone() {
         Some(u) => {
             open_url(&u);
-            respond_json(request, 200, &serde_json::json!({"ok": true, "url": u}));
+            respond_json(request, 200, &serde_json::json!({"ok": true, "url": u, "warning": "no_token"}));
         }
         None => {
             respond_json(
@@ -7799,6 +7827,45 @@ fn handle_pod_open(request: Request, query: &str) {
             );
         }
     }
+}
+
+/// Ask Provider for a tokenized agent UI URL for the given pod. Provider
+/// owns the round-trip to DAM that yields the gateway token + the public
+/// edge URL, so callers don't need the per-pod api_key locally. Returns
+/// the fully-formed `${publicUrl}/?token=…` string on success.
+fn fetch_ui_url_from_provider(pod_id: &str, route_id: Option<&str>) -> Option<String> {
+    let (secret, auid) = read_provider_auth().ok()?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    rt.block_on(async {
+        let http = atomek_core::HttpClient::new();
+        // pod_id is digits, route_id is [a-z0-9]+ by validator — both are
+        // already URL-safe, so format them in directly without encoding.
+        let mut url = format!(
+            "{}/pod/agent/ui-url?pod_id={}",
+            TYTUS_PROVIDER_URL, pod_id
+        );
+        if let Some(rid) = route_id.filter(|r| !r.is_empty()) {
+            url.push_str(&format!("&route_id={}", rid));
+        }
+        let resp = http
+            .get(&url)
+            .header("X-Agent-Secret-Token", &secret)
+            .header("X-Agent-User-Id", &auid)
+            .timeout(Duration::from_secs(8))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body: serde_json::Value = resp.json().await.ok()?;
+        body.get("ui_url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    })
 }
 
 fn handle_pod_restart(request: Request, query: &str) {

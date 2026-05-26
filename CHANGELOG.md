@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.7.12 — 2026-05-27 — tokenized pod-open fallback
+
+- Tray: make pod `Open` action ask the Provider for a fresh tokenized agent UI URL when the cached URL is missing.
+- Falls back to bare public URL only after tokenized URL lookup fails, so existing pods with missing local keys still open correctly.
+- Keeps changes local to Tytus CLI/tray; no public API, K8s, or Traylinx web backend changes.
+
 ## v0.7.11 — 2026-05-26 — shared folders and CDN app release
 
 ### Fixed
