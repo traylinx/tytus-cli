@@ -1,6 +1,6 @@
 # Public Beta Install Guide
 
-> For `v0.7.10` (live public beta as of 2026-05-25). This is a technical preview, not production GA.
+> For `v0.7.11` (live public beta as of 2026-05-27). This is a technical preview, not production GA.
 
 ## Start here
 
@@ -18,8 +18,8 @@ Choose the right pkg:
 
 | Mac | File |
 |---|---|
-| Apple Silicon / M1/M2/M3/M4 | `Tytus-0.7.10-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` |
-| Intel | `Tytus-0.7.10-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` |
+| Apple Silicon / M1/M2/M3/M4 | `Tytus-0.7.11-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` |
+| Intel | `Tytus-0.7.11-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg` |
 
 Steps:
 
@@ -37,14 +37,14 @@ Expected warning: macOS may say the developer cannot be verified. That is expect
 Download:
 
 ```text
-Tytus-0.7.10-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
+Tytus-0.7.11-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
 ```
 
 Install:
 
 ```bash
 cd ~/Downloads
-sudo apt install ./Tytus-0.7.10-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
+sudo apt install ./Tytus-0.7.11-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
 ```
 
 Then open Tytus from the app launcher or run:
