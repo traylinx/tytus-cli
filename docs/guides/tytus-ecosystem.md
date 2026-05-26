@@ -1,6 +1,6 @@
 # Tytus ecosystem guide
 
-Last updated: 2026-05-27. Applies to public beta `tytus` v0.7.11.
+Last updated: 2026-05-27. Applies to public beta `tytus` v0.7.12.
 
 Tytus is three pieces that should feel like one product:
 
@@ -10,7 +10,7 @@ Tytus is three pieces that should feel like one product:
 
 ## Current release status
 
-| Surface | Status in v0.7.11 |
+| Surface | Status in v0.7.12 |
 |---|---|
 | macOS | Unsigned public beta `.pkg` for Apple Silicon and Intel. Full CLI + tray + TytusOS path. Gatekeeper warning expected; Control-click → Open. |
 | Linux | Unsigned public beta `.deb` for Ubuntu/Debian x86_64. CLI, daemon, tunnel, MCP, TytusOS browser path, desktop entry, and systemd user service. |
@@ -29,8 +29,8 @@ https://get.traylinx.com/
 
 Download the matching unsigned `.pkg`:
 
-- Apple Silicon: `Tytus-0.7.11-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg`
-- Intel: `Tytus-0.7.11-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg`
+- Apple Silicon: `Tytus-0.7.12-aarch64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg`
+- Intel: `Tytus-0.7.12-x86_64-apple-darwin-unsigned-PUBLIC-BETA-UNSIGNED.pkg`
 
 Open the pkg. If Gatekeeper blocks normal double-click, Control-click the pkg and choose **Open**. After install, open **Tytus** and follow the setup wizard.
 
@@ -39,7 +39,7 @@ Open the pkg. If Gatekeeper blocks normal double-click, Control-click the pkg an
 Download the unsigned `.deb`:
 
 ```bash
-sudo apt install ./Tytus-0.7.11-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
+sudo apt install ./Tytus-0.7.12-x86_64-unknown-linux-gnu-unsigned-PUBLIC-BETA-UNSIGNED.deb
 ```
 
 Then open Tytus from the app launcher or run:
