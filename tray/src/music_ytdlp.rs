@@ -552,11 +552,19 @@ pub fn stream(video_id: &str) -> Result<MusicStreamInfo, String> {
     Ok(info)
 }
 
+// Format chain: prefer audio-only m4a/webm, then any audio-only stream.
+// When YouTube's SABR-only experiment leaves only combined formats (e.g.
+// format 18), fall back to mp4/best so the user can still play the track —
+// HTML <audio> decodes the audio track from an mp4 stream fine.
+// See yt-dlp#12482 for the upstream tracking issue.
+const STREAM_FORMAT: &str =
+    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[ext=mp4]/best";
+
 fn stream_url_fast(video_id: &str) -> Result<String, String> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let stdout = run_ytdlp(&[
         "-f",
-        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+        STREAM_FORMAT,
         "--get-url",
         "--no-playlist",
         "--no-warnings",
@@ -764,7 +772,7 @@ fn stream_with_metadata(video_id: &str) -> Result<MusicStreamInfo, String> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let stdout = run_ytdlp(&[
         "-f",
-        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+        STREAM_FORMAT,
         "--dump-json",
         "--no-playlist",
         "--no-warnings",
@@ -836,6 +844,26 @@ not-json
         assert_eq!(clamp_limit(None), 20);
         assert_eq!(clamp_limit(Some(0)), 1);
         assert_eq!(clamp_limit(Some(99)), 50);
+    }
+
+    // Regression for yt-dlp#12482 (SABR-only experiment): YouTube sometimes
+    // exposes only combined audio+video formats, which broke our previous
+    // audio-only-only selector. The chain must keep audio-only preference
+    // but fall back to combined mp4/best so playback still works.
+    #[test]
+    fn stream_format_includes_combined_fallbacks() {
+        assert!(
+            STREAM_FORMAT.starts_with("bestaudio[ext=m4a]"),
+            "STREAM_FORMAT must prefer m4a audio-only: {STREAM_FORMAT}"
+        );
+        assert!(
+            STREAM_FORMAT.contains("best[ext=mp4]"),
+            "STREAM_FORMAT needs combined-mp4 fallback for SABR-only videos: {STREAM_FORMAT}"
+        );
+        assert!(
+            STREAM_FORMAT.ends_with("/best"),
+            "STREAM_FORMAT must end with universal /best fallback: {STREAM_FORMAT}"
+        );
     }
 
     #[test]

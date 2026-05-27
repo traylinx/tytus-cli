@@ -99,8 +99,8 @@ pub fn start_background_install() {
 }
 
 fn ensure_installed() -> Result<(PathBuf, String, Option<String>), String> {
-    if let Some(version) = system_ytdlp_version() {
-        return Ok((PathBuf::from("yt-dlp"), "system".to_string(), Some(version)));
+    if let Some((path, version)) = find_system_ytdlp() {
+        return Ok((path, "system".to_string(), Some(version)));
     }
 
     let path = ytdlp_binary_path();
@@ -117,8 +117,34 @@ fn ensure_installed() -> Result<(PathBuf, String, Option<String>), String> {
     Ok((path, "bundled".to_string(), version))
 }
 
-fn system_ytdlp_version() -> Option<String> {
-    let out = Command::new("yt-dlp").arg("--version").output().ok()?;
+// Probe known yt-dlp install locations. When the tray is spawned by launchd
+// PATH is `/usr/bin:/bin:/usr/sbin:/sbin` (no /usr/local/bin or homebrew),
+// so a bare `Command::new("yt-dlp")` fails even when the binary is installed.
+// We mirror the candidate list ffmpeg_path() uses in music_ytdlp.rs so the
+// behavior is consistent across launch contexts (Terminal vs LaunchAgent).
+fn find_system_ytdlp() -> Option<(PathBuf, String)> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(env_path) = std::env::var("YTDLP_PATH") {
+        if !env_path.trim().is_empty() {
+            candidates.push(PathBuf::from(env_path));
+        }
+    }
+    candidates.extend([
+        PathBuf::from("yt-dlp"),
+        PathBuf::from("/opt/homebrew/bin/yt-dlp"),
+        PathBuf::from("/usr/local/bin/yt-dlp"),
+        PathBuf::from("/usr/bin/yt-dlp"),
+    ]);
+    for candidate in candidates {
+        if let Some(version) = probe_version(&candidate) {
+            return Some((candidate, version));
+        }
+    }
+    None
+}
+
+fn probe_version(path: &PathBuf) -> Option<String> {
+    let out = Command::new(path).arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
     }
