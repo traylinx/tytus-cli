@@ -1,0 +1,172 @@
+{
+  "$schema": "https://tytus.traylinx.com/schema/app/v1.json",
+  "id": "atomek",
+  "name": "Atomek",
+  "version": "0.4.30-dev",
+  "icon": "atomek:mark",
+  "category": "Productivity",
+  "description": "Atomek — branded Tytus Resource Fabric cockpit with embedded docs/skills for OpenClaw, Hermes, shared folders, local agents, app skills, files, chat, artifacts, and approval-gated outputs.",
+  "window": {
+    "defaultSize": {
+      "width": 1200,
+      "height": 780
+    },
+    "minSize": {
+      "width": 760,
+      "height": 520
+    }
+  },
+  "permissions": [
+    "daemon.read",
+    "daemon.network",
+    "vfs.user.documents",
+    "shell.notifications",
+    "shell.dock",
+    "ai.chat",
+    "ai.memory.read",
+    "ai.memory.write",
+    "ai.artifacts"
+  ],
+  "entry": {
+    "url": "/dev-atomek/dist/index.js"
+  },
+  "contributes": {
+    "fileAssociations": [
+      {
+        "extension": ".md",
+        "mimeType": "text/markdown"
+      },
+      {
+        "extension": ".txt",
+        "mimeType": "text/plain"
+      },
+      {
+        "extension": ".json",
+        "mimeType": "application/json"
+      },
+      {
+        "extension": ".csv",
+        "mimeType": "text/csv"
+      },
+      {
+        "extension": ".ts",
+        "mimeType": "text/typescript"
+      },
+      {
+        "extension": ".tsx",
+        "mimeType": "text/typescript-jsx"
+      },
+      {
+        "extension": ".js",
+        "mimeType": "text/javascript"
+      },
+      {
+        "extension": ".css",
+        "mimeType": "text/css"
+      },
+      {
+        "extension": ".html",
+        "mimeType": "text/html"
+      }
+    ],
+    "agentSkills": [
+      {
+        "id": "atomek.inspect-project",
+        "title": "Inspect Atomek workspace",
+        "description": "Inspect open files, selected content, project index, and Cortex context safely.",
+        "driver": "host-api",
+        "skillUrl": "skills/atomek.inspect-project.md",
+        "triggers": [
+          "inspect",
+          "project",
+          "workspace",
+          "files",
+          "context"
+        ]
+      },
+      {
+        "id": "atomek.generate-patch-preview",
+        "title": "Generate Atomek patch preview",
+        "description": "Generate diff/replacement output that Atomek can convert into preview edits before applying.",
+        "driver": "host-api",
+        "skillUrl": "skills/atomek.generate-patch-preview.md",
+        "triggers": [
+          "patch",
+          "edit",
+          "preview",
+          "diff",
+          "apply"
+        ]
+      },
+      {
+        "id": "atomek.local-agent-job",
+        "title": "Run local agent job",
+        "description": "Run allowlisted local AI CLIs through Tytus tray and stream output back into Atomek.",
+        "driver": "local-job",
+        "skillUrl": "skills/atomek.local-agent-job.md",
+        "triggers": [
+          "agent",
+          "job",
+          "local",
+          "codex",
+          "claude",
+          "opencode",
+          "pi",
+          "kimi"
+        ]
+      },
+      {
+        "id": "atomek.docs-resource-fabric",
+        "title": "Explain Tytus Resource Fabric",
+        "description": "Explain how local computer, pods, shared folders, OpenClaw/Hermes, local agents, app skills, channels, and AIL routes work together.",
+        "driver": "host-api",
+        "skillUrl": "skills/atomek.docs-resource-fabric.md",
+        "triggers": [
+          "resource fabric",
+          "tytus",
+          "mission",
+          "orchestration"
+        ]
+      },
+      {
+        "id": "atomek.docs-openclaw-hermes",
+        "title": "Explain OpenClaw and Hermes",
+        "description": "Explain how OpenClaw, Hermes, and local agents cooperate through missions and shared folders.",
+        "driver": "host-api",
+        "skillUrl": "skills/atomek.docs-openclaw-hermes.md",
+        "triggers": [
+          "openclaw",
+          "hermes",
+          "agents",
+          "pods"
+        ]
+      },
+      {
+        "id": "atomek.docs-shared-folders",
+        "title": "Explain shared folders",
+        "description": "Explain shared folders, mission folders, pod inbox/outbox, Garage bindings, and file handoff rules.",
+        "driver": "host-api",
+        "skillUrl": "skills/atomek.docs-shared-folders.md",
+        "triggers": [
+          "shared folders",
+          "mission folder",
+          "handoff",
+          "files"
+        ]
+      },
+      {
+        "id": "atomek.docs-use-cases",
+        "title": "Explain Tytus use cases",
+        "description": "Explain practical Tytus agent-team workflows for repo repair, documents, creative production, app automation, and research.",
+        "driver": "host-api",
+        "skillUrl": "skills/atomek.docs-use-cases.md",
+        "triggers": [
+          "use cases",
+          "workflow",
+          "repo repair",
+          "creative production"
+        ]
+      }
+    ]
+  }
+}

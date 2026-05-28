@@ -1,3 +1,9 @@
+## 0.7.20 - 2026-05-28
+
+- Embeds `tytus-os` `v1.0.59-juli3ta-chat-safe`, including JULI3TA 0.3.23 and stable AIL compound routing.
+- Keeps speech/audio/image models out of JULI3TA chat assist model fallback so local AIL does not send `speech-02-hd` to `/v1/chat/completions`.
+- Updates the local Cortex docker-compose defaults to `ail-compound` for the new provider/model routing flow.
+
 # Changelog
 
 ## v0.7.12 — 2026-05-27 — tokenized pod-open fallback
