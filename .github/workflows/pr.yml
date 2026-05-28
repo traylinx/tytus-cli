@@ -11,14 +11,14 @@ on:
       tytus_os_ref:
         description: 'tytus-os ref to build for dist embedding checks'
         required: false
-        default: 'v1.0.59-juli3ta-chat-safe'
+        default: 'v1.0.60-juli3ta-chat-safe-tests'
         type: string
 
 permissions:
   contents: read
 
 env:
-  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || 'v1.0.59-juli3ta-chat-safe' }}
+  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || 'v1.0.60-juli3ta-chat-safe-tests' }}
 
 jobs:
   installer-contract:
