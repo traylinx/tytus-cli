@@ -93,7 +93,7 @@ services:
       SWITCH_AI_API_KEY: "${SWITCH_AI_API_KEY:-}"
 
       # Model aliases — match what local SwitchAILocal advertises.
-      # Production droplets configure ail-fast / ail-compound / ail-balanced /
+      # Production droplets configure ail-fast / ail-compound /
       # ail-embed via the AIL config layer; a fresh local SwitchAILocal exposes
       # switchai-fast / switchai-chat / switchai-reasoner / switchai-embed
       # directly. Override these env vars at install time if your gateway
