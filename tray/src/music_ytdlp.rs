@@ -560,11 +560,23 @@ pub fn stream(video_id: &str) -> Result<MusicStreamInfo, String> {
 const STREAM_FORMAT: &str =
     "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[ext=mp4]/best";
 
+// Player-client chain: yt-dlp's default list leads with web_embedded, which
+// gets "playability status: ERROR" on embed-restricted but otherwise-public
+// videos (live-event archives, channel uploads with embedding off, …). We
+// add `android,ios,tv` as fallbacks so those videos still resolve. Direct
+// probe across 4 videos confirmed `android` is the only client that returns
+// a playback URL for embed-restricted content; ios/tv cover SABR-only and
+// region edge cases that don't always hit android. Keeping `default` first
+// preserves yt-dlp's own per-version optimization order.
+const PLAYER_CLIENT_ARG: &str = "youtube:player_client=default,android,ios,tv";
+
 fn stream_url_fast(video_id: &str) -> Result<String, String> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let stdout = run_ytdlp(&[
         "-f",
         STREAM_FORMAT,
+        "--extractor-args",
+        PLAYER_CLIENT_ARG,
         "--get-url",
         "--no-playlist",
         "--no-warnings",
@@ -727,7 +739,9 @@ pub fn reference_sample(
             let page_url = format!("https://www.youtube.com/watch?v={video_id}");
             run_ytdlp(&[
                 "-f",
-                "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+                "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[ext=mp4]/best",
+                "--extractor-args",
+                PLAYER_CLIENT_ARG,
                 "--no-playlist",
                 "--no-warnings",
                 "-o",
@@ -773,6 +787,8 @@ fn stream_with_metadata(video_id: &str) -> Result<MusicStreamInfo, String> {
     let stdout = run_ytdlp(&[
         "-f",
         STREAM_FORMAT,
+        "--extractor-args",
+        PLAYER_CLIENT_ARG,
         "--dump-json",
         "--no-playlist",
         "--no-warnings",
@@ -844,6 +860,28 @@ not-json
         assert_eq!(clamp_limit(None), 20);
         assert_eq!(clamp_limit(Some(0)), 1);
         assert_eq!(clamp_limit(Some(99)), 50);
+    }
+
+    // Regression for embed-restricted videos (e.g. live-event archives like
+    // the Eindhoven Diving Cup streams Sebastian reported). yt-dlp's default
+    // client list starts with web_embedded, which gets "playability status:
+    // ERROR" on these videos even though they're public — only `android`
+    // returns a playback URL. The PLAYER_CLIENT_ARG explicitly appends
+    // android/ios/tv so the extractor walks the list before giving up.
+    #[test]
+    fn player_client_arg_includes_android_fallback() {
+        assert!(
+            PLAYER_CLIENT_ARG.starts_with("youtube:player_client="),
+            "PLAYER_CLIENT_ARG must be the yt-dlp extractor-args key: {PLAYER_CLIENT_ARG}"
+        );
+        assert!(
+            PLAYER_CLIENT_ARG.contains("default"),
+            "PLAYER_CLIENT_ARG must preserve yt-dlp's default order first: {PLAYER_CLIENT_ARG}"
+        );
+        assert!(
+            PLAYER_CLIENT_ARG.contains("android"),
+            "PLAYER_CLIENT_ARG must include android to unlock embed-restricted videos: {PLAYER_CLIENT_ARG}"
+        );
     }
 
     // Regression for yt-dlp#12482 (SABR-only experiment): YouTube sometimes
