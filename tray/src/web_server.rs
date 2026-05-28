@@ -14758,13 +14758,30 @@ mod tests {
     /// returned actual_port matches what we asked for (no surprise rebinds).
     #[test]
     fn bind_tray_exact_port_returns_same_port() {
-        let server_for_pick = tiny_http::Server::http("127.0.0.1:0").expect("bind for pick");
-        let chosen = server_for_pick.server_addr().to_ip().expect("ip").port();
-        drop(server_for_pick);
-        // Re-bind on the same port to mimic prod's fixed 4242 binding.
-        let (server, actual) = bind_tray(chosen).expect("bind explicit port");
-        assert_eq!(actual, chosen, "bind_tray must report the actual bound port");
-        drop(server);
+        // Pick an ephemeral port, then re-bind through bind_tray to mimic
+        // prod's fixed 4242 binding. CI can race another test/process for the
+        // just-released port, so retry a few times instead of making this gate
+        // flaky on "Address already in use".
+        let mut last_err = String::new();
+        for _ in 0..20 {
+            let server_for_pick = tiny_http::Server::http("127.0.0.1:0").expect("bind for pick");
+            let chosen = server_for_pick.server_addr().to_ip().expect("ip").port();
+            drop(server_for_pick);
+
+            match bind_tray(chosen) {
+                Ok((server, actual)) => {
+                    assert_eq!(actual, chosen, "bind_tray must report the actual bound port");
+                    drop(server);
+                    return;
+                }
+                Err(err) if err.contains("Address already in use") => {
+                    last_err = err;
+                    continue;
+                }
+                Err(err) => panic!("bind explicit port: {err}"),
+            }
+        }
+        panic!("bind explicit port stayed busy after retries: {last_err}");
     }
 
     /// Codex gate 2: dev co-existence — bind_tray(0) returns a non-zero
