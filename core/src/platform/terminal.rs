@@ -69,7 +69,10 @@ fn script_body(command: &str) -> String {
 fn script_body(command: &str) -> String {
     format!(
         "#!/bin/bash\n\
-         export PATH=\"$HOME/bin:/usr/local/bin:/opt/homebrew/bin:$PATH\"\n\
+         export PATH=\"$HOME/bin:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH\"\n\
+         for d in \"$HOME\"/.nvm/versions/node/*/bin; do\n\
+           [ -d \"$d\" ] && export PATH=\"$d:$PATH\"\n\
+         done\n\
          cd \"$HOME\"\n\
          rm -f \"$0\"\n\
          {command}\n"
@@ -157,6 +160,7 @@ mod tests {
             let body = script_body("echo ok");
             assert!(body.contains("rm -f \"$0\""));
             assert!(body.contains("echo ok"));
+            assert!(body.contains(".nvm/versions/node"));
             assert!(body.starts_with("#!/bin/bash"));
         }
     }

@@ -6,6 +6,7 @@
     "category": "Developer Tools",
     "icon": "Terminal",
     "url": "https://opencode.ai/",
+    "docs": "https://opencode.ai/docs/",
     "platforms": ["macos", "linux"],
     "detect": {
       "macos": ["opencode"],
@@ -14,6 +15,10 @@
     "install": {
       "macos": "brew install opencode-ai/tap/opencode",
       "linux": "curl -fsSL https://opencode.ai/install.sh | sh"
+    },
+    "launch": {
+      "macos": { "kind": "terminal", "target": "opencode" },
+      "linux": { "kind": "terminal", "target": "opencode" }
     }
   },
   {
@@ -23,6 +28,7 @@
     "category": "Developer Tools",
     "icon": "Cpu",
     "url": "https://pi.dev/",
+    "docs": "https://pi.dev/docs",
     "platforms": ["macos", "linux"],
     "detect": {
       "macos": ["pi"],
@@ -31,6 +37,10 @@
     "install": {
       "macos": "curl -fsSL https://pi.dev/install.sh | sh",
       "linux": "curl -fsSL https://pi.dev/install.sh | sh"
+    },
+    "launch": {
+      "macos": { "kind": "terminal", "target": "pi" },
+      "linux": { "kind": "terminal", "target": "pi" }
     }
   },
   {
@@ -40,6 +50,7 @@
     "category": "Developer Tools",
     "icon": "Terminal",
     "url": "https://ghostty.org/",
+    "docs": "https://ghostty.org/docs",
     "platforms": ["macos", "linux"],
     "detect": {
       "macos": ["Ghostty", "ghostty"],
@@ -48,6 +59,10 @@
     "install": {
       "macos": "brew install --cask ghostty",
       "linux": "Visit https://ghostty.org/download for your distro"
+    },
+    "launch": {
+      "macos": { "kind": "app", "target": "Ghostty" },
+      "linux": { "kind": "app", "target": "ghostty" }
     }
   },
   {
@@ -57,6 +72,7 @@
     "category": "AI & ML",
     "icon": "Brain",
     "url": "https://ail.traylinx.com/introduction",
+    "docs": "https://ail.traylinx.com/introduction",
     "platforms": ["macos", "linux"],
     "detect": {
       "macos": ["ail"],
@@ -65,6 +81,10 @@
     "install": {
       "macos": "Visit https://ail.traylinx.com for installation instructions",
       "linux": "Visit https://ail.traylinx.com for installation instructions"
+    },
+    "launch": {
+      "macos": { "kind": "terminal", "target": "ail" },
+      "linux": { "kind": "terminal", "target": "ail" }
     }
   },
   {
@@ -74,6 +94,7 @@
     "category": "Communication",
     "icon": "MessageCircle",
     "url": "https://desktop.telegram.org/",
+    "docs": "https://telegram.org/faq",
     "platforms": ["macos", "linux"],
     "detect": {
       "macos": ["Telegram", "telegram"],
@@ -82,6 +103,10 @@
     "install": {
       "macos": "brew install --cask telegram",
       "linux": "sudo apt install telegram-desktop"
+    },
+    "launch": {
+      "macos": { "kind": "app", "target": "Telegram" },
+      "linux": { "kind": "app", "target": "telegram-desktop" }
     }
   },
   {
@@ -91,6 +116,7 @@
     "category": "Communication",
     "icon": "Headphones",
     "url": "https://discord.com/download",
+    "docs": "https://support.discord.com/",
     "platforms": ["macos", "linux"],
     "detect": {
       "macos": ["Discord"],
@@ -99,6 +125,54 @@
     "install": {
       "macos": "brew install --cask discord",
       "linux": "sudo snap install discord"
+    },
+    "launch": {
+      "macos": { "kind": "app", "target": "Discord" },
+      "linux": { "kind": "app", "target": "discord" }
+    }
+  },
+  {
+    "id": "warp",
+    "name": "Warp",
+    "description": "Agentic development environment born out of the terminal. Rust-based, GPU-accelerated, with built-in AI coding agents.",
+    "category": "Developer Tools",
+    "icon": "Terminal",
+    "url": "https://www.warp.dev/",
+    "docs": "https://docs.warp.dev/",
+    "platforms": ["macos", "linux"],
+    "detect": {
+      "macos": ["Warp"],
+      "linux": ["warp-terminal"]
+    },
+    "install": {
+      "macos": "brew install --cask warp",
+      "linux": "Visit https://www.warp.dev/download for your distro"
+    },
+    "launch": {
+      "macos": { "kind": "app", "target": "Warp" },
+      "linux": { "kind": "app", "target": "warp-terminal" }
+    }
+  },
+  {
+    "id": "openwork",
+    "name": "OpenWork",
+    "description": "Open-source desktop workspace for agentic AI — run AI agents locally with a native UI. An open alternative to Claude's Cowork.",
+    "category": "AI & ML",
+    "icon": "Bot",
+    "url": "https://openworklabs.com",
+    "docs": "https://github.com/different-ai/openwork",
+    "platforms": ["macos", "linux"],
+    "detect": {
+      "macos": ["OpenWork"],
+      "linux": ["openwork"]
+    },
+    "install": {
+      "macos": "brew install --cask openwork",
+      "linux": "Visit https://openworklabs.com/download for the desktop app"
+    },
+    "launch": {
+      "macos": { "kind": "app", "target": "OpenWork" },
+      "linux": { "kind": "app", "target": "openwork" }
     }
   }
 ]

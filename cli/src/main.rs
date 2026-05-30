@@ -9,6 +9,7 @@ mod daemon;
 mod daemon_http;
 #[cfg(windows)]
 mod daemon_windows;
+mod desktop_apps;
 #[cfg(windows)]
 use daemon_windows as daemon;
 mod state;
@@ -306,6 +307,20 @@ enum AppAction {
 }
 
 #[derive(Subcommand, Debug)]
+enum DesktopAction {
+    /// List desktop apps in the catalog and whether each is installed.
+    List,
+    /// Launch an installed desktop app, or all installed ones with --all.
+    Open {
+        /// App id to open (e.g. `discord`, `ghostty`). Omit when using --all.
+        id: Option<String>,
+        /// Open every installed desktop app.
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum ChannelsAction {
     /// Configure a new chat channel for the pod's agent. Stores
     /// credentials in the OS keychain, writes them to the pod's
@@ -412,6 +427,14 @@ enum Commands {
     App {
         #[command(subcommand)]
         action: AppAction,
+    },
+    /// Launch native desktop apps from the App Store "Desktop" catalog
+    /// (Discord, Telegram, Ghostty, OpenCode, Pi, AIL). `tytus desktop list`
+    /// shows install status; `tytus desktop open <id>` launches one and
+    /// `tytus desktop open --all` launches every installed app.
+    Desktop {
+        #[command(subcommand)]
+        action: DesktopAction,
     },
     /// Clear stale tunnel state (tunnels are stopped via Ctrl+C in connect)
     Disconnect {
@@ -855,6 +878,7 @@ async fn main() {
         }
         Some(Commands::Agent { action }) => cmd_agent(&http, action, cli.json).await,
         Some(Commands::App { action }) => cmd_app(action, cli.json).await,
+        Some(Commands::Desktop { action }) => desktop_apps::cmd_desktop(action, cli.json),
         Some(Commands::Disconnect { pod }) => cmd_disconnect(pod, cli.json).await,
         Some(Commands::Revoke { pod }) => cmd_revoke(&http, &pod, cli.json).await,
         Some(Commands::Logout { all }) => cmd_logout(&http, cli.json, all).await,

@@ -401,6 +401,14 @@ tytus link [DIR] [--only ...]      Link a project to Tytus — drops AI
                                    Aliased as `tytus infect` for backwards
                                    compatibility.
 
+tytus desktop list                 List the App Store "Desktop" catalog
+                                   (Discord, Telegram, Ghostty, OpenCode,
+                                   Pi, AIL) and whether each is installed.
+tytus desktop open <id>            Launch one installed desktop app. GUI
+                                   apps open directly; CLIs open in a new
+                                   terminal.
+tytus desktop open --all           Launch every installed desktop app.
+
 tytus mcp [--format claude|kilocode|opencode|archon|json]
                                    Print an MCP server config stanza for
                                    the chosen AI tool. Stick it into the

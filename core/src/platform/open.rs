@@ -10,6 +10,42 @@ pub fn open_path(path: &Path) -> io::Result<()> {
     spawn_open(path.as_os_str())
 }
 
+/// Launch an installed GUI application by name.
+///
+/// macOS resolves `name` as an application bundle (`open -a "<name>"`), e.g.
+/// "Discord" → /Applications/Discord.app. Linux and Windows treat `name` as an
+/// executable on PATH and spawn it detached. `name` MUST come from a trusted
+/// source (the embedded App Store catalog) — it is passed to the OS launcher,
+/// not a shell, so there is no shell-injection surface, but callers must not
+/// forward arbitrary user input here.
+pub fn open_app(name: &str) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return Command::new("open")
+            .arg("-a")
+            .arg(name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ());
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        return Command::new(name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = name;
+        Ok(())
+    }
+}
+
 /// Reveal a file or folder in the platform file manager.
 ///
 /// macOS selects the item in Finder. Windows selects it in Explorer. Linux

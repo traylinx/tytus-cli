@@ -4112,6 +4112,12 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/apps/check") => {
             handle_apps_check(request);
         }
+        (Method::Post, "/api/apps/open") => {
+            handle_apps_open(request);
+        }
+        (Method::Post, "/api/apps/install") => {
+            handle_apps_install(request);
+        }
         (Method::Get, p) if p.starts_with("/api/jobs/") && p.ends_with("/stream") => {
             let job_id = p
                 .trim_start_matches("/api/jobs/")
@@ -4562,7 +4568,17 @@ fn serve_bytes(request: Request, body: &[u8], content_type: &str) {
         // This wizard is local-only by design. Block embedding in any
         // frame and discourage MIME-sniffing.
         .with_header(header("X-Content-Type-Options", "nosniff"))
-        .with_header(header("X-Frame-Options", "DENY"));
+        .with_header(header("X-Frame-Options", "DENY"))
+        // Force revalidation. These assets are embedded in the binary and
+        // served from RAM, but several (the OS shell index.html, the
+        // vendored dev-app bundles like /dev-atomek/dist/index.js) have
+        // stable, non-content-hashed paths. Without this header Chrome
+        // heuristically caches them, so a fresh tray rebuild stays invisible
+        // until the user clears the cache. We carry no ETag/Last-Modified,
+        // so revalidation always yields a fresh 200 — exactly what we want
+        // for a zero-cost localhost server. (Caught 2026-05-29: layout fix
+        // shipped in the bundle but the browser kept serving the old copy.)
+        .with_header(header("Cache-Control", "no-cache"));
     let _ = request.respond(resp);
 }
 
@@ -5062,22 +5078,301 @@ fn check_app_installed(entry: &serde_json::Value, platform: &str) -> bool {
                             }
                         }
                     }
-                    // Check if the command is on PATH
-                    if let Ok(output) = std::process::Command::new("which")
-                        .arg(cmd_str)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()
-                    {
-                        if output.success() {
-                            return true;
-                        }
+                    // Check if the command is on PATH or in common per-user
+                    // tool locations. The tray app is launched by macOS, not a
+                    // login shell, so its PATH often misses ~/bin, ~/.local/bin,
+                    // and nvm-managed Node CLIs. Without this, App Store cards
+                    // incorrectly show installed CLI tools (pi, ail) as
+                    // unavailable even though `tytus desktop list` sees them.
+                    if command_exists_for_desktop_app(cmd_str) {
+                        return true;
                     }
                 }
             }
         }
     }
     false
+}
+
+fn command_exists_for_desktop_app(cmd: &str) -> bool {
+    if cmd.trim().is_empty() || cmd.contains('/') {
+        return false;
+    }
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+
+    if let Ok(home) = std::env::var("HOME") {
+        let home = std::path::PathBuf::from(home);
+        dirs.push(home.join("bin"));
+        dirs.push(home.join(".local/bin"));
+        let nvm_versions = home.join(".nvm/versions/node");
+        if let Ok(entries) = std::fs::read_dir(nvm_versions) {
+            for entry in entries.flatten() {
+                dirs.push(entry.path().join("bin"));
+            }
+        }
+    }
+    dirs.push(std::path::PathBuf::from("/usr/local/bin"));
+    dirs.push(std::path::PathBuf::from("/opt/homebrew/bin"));
+
+    dirs.into_iter().any(|dir| dir.join(cmd).is_file())
+}
+
+// ── /api/apps/open (launch installed desktop apps) ─────────────
+
+#[derive(serde::Deserialize)]
+struct AppsOpenRequest {
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    all: bool,
+}
+
+/// Catalog app-id charset guard. Mirrors the inline check in
+/// `handle_apps_check` so a malformed id can never reach the launcher.
+fn valid_app_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Resolve a catalog entry's `launch[platform]` spec into a validated
+/// `(kind, target)` pair. Returns Err with a human reason if the spec is
+/// missing, the target is empty, or the kind is not one we can dispatch.
+/// Pure — does NOT launch anything (so it is unit-testable without side
+/// effects).
+fn resolve_launch_spec<'a>(
+    entry: &'a serde_json::Value,
+    platform: &str,
+) -> Result<(&'a str, &'a str), String> {
+    let spec = entry
+        .get("launch")
+        .and_then(|l| l.get(platform))
+        .ok_or_else(|| format!("no launch spec for platform {}", platform))?;
+    let kind = spec.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+    let target = spec.get("target").and_then(|t| t.as_str()).unwrap_or("");
+    if target.is_empty() {
+        return Err("empty launch target".to_string());
+    }
+    if kind != "app" && kind != "terminal" {
+        return Err(format!("unknown launch kind: {}", kind));
+    }
+    Ok((kind, target))
+}
+
+/// Launch a single catalog entry. Only catalog data (compile-time
+/// `APPS_JSON`) reaches the OS launcher — never request input.
+fn launch_catalog_app(entry: &serde_json::Value, platform: &str) -> Result<(), String> {
+    let (kind, target) = resolve_launch_spec(entry, platform)?;
+    match kind {
+        "app" => atomek_core::platform::open::open_app(target)
+            .map_err(|e| format!("failed to launch app: {}", e)),
+        "terminal" => atomek_core::platform::terminal::open_shell_command(target)
+            .map_err(|e| format!("failed to open terminal: {}", e)),
+        _ => unreachable!("kind validated by resolve_launch_spec"),
+    }
+}
+
+fn handle_apps_open(mut request: Request) {
+    let mut body = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+        respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+        return;
+    }
+    let parsed: AppsOpenRequest = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+            return;
+        }
+    };
+
+    let catalog: Vec<serde_json::Value> = match serde_json::from_slice(APPS_JSON) {
+        Ok(c) => c,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": format!("catalog parse error: {}", e) }),
+            );
+            return;
+        }
+    };
+
+    let platform = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+
+    // "Open all installed" — launch every catalog app that is detected as
+    // installed; report what was opened vs skipped (and why).
+    if parsed.all {
+        let mut opened: Vec<String> = Vec::new();
+        let mut skipped: Vec<serde_json::Value> = Vec::new();
+        for entry in &catalog {
+            let id = entry.get("id").and_then(|i| i.as_str()).unwrap_or("");
+            if id.is_empty() {
+                continue;
+            }
+            if !check_app_installed(entry, platform) {
+                skipped.push(serde_json::json!({ "id": id, "reason": "not installed" }));
+                continue;
+            }
+            match launch_catalog_app(entry, platform) {
+                Ok(()) => opened.push(id.to_string()),
+                Err(reason) => skipped.push(serde_json::json!({ "id": id, "reason": reason })),
+            }
+        }
+        respond_json(
+            request,
+            200,
+            &serde_json::json!({ "ok": true, "opened": opened, "skipped": skipped }),
+        );
+        return;
+    }
+
+    // Single app by id.
+    let app_id = match parsed.app_id {
+        Some(id) => id,
+        None => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({ "error": "missing app_id (or set all=true)" }),
+            );
+            return;
+        }
+    };
+    if !valid_app_id(&app_id) {
+        respond_json(request, 400, &serde_json::json!({ "error": "invalid id" }));
+        return;
+    }
+    let entry = match catalog
+        .iter()
+        .find(|e| e["id"].as_str() == Some(app_id.as_str()))
+    {
+        Some(e) => e,
+        None => {
+            respond_json(request, 404, &serde_json::json!({ "error": "unknown app" }));
+            return;
+        }
+    };
+    if !check_app_installed(entry, platform) {
+        respond_json(
+            request,
+            409,
+            &serde_json::json!({ "error": "not installed", "id": app_id }),
+        );
+        return;
+    }
+    match launch_catalog_app(entry, platform) {
+        Ok(()) => respond_json(
+            request,
+            200,
+            &serde_json::json!({ "ok": true, "id": app_id }),
+        ),
+        Err(reason) => respond_json(
+            request,
+            500,
+            &serde_json::json!({ "error": reason, "id": app_id }),
+        ),
+    }
+}
+
+// ── /api/apps/install (run a desktop app's install command) ────
+
+#[derive(serde::Deserialize)]
+struct AppsInstallRequest {
+    app_id: String,
+}
+
+/// True when the catalog `install[platform]` string is a runnable shell
+/// command (brew / curl|sh / sudo …) rather than a "Visit https://… for
+/// instructions" sentence. Instruction text is opened as a URL instead.
+fn install_is_command(cmd: &str) -> bool {
+    let t = cmd.trim();
+    !t.is_empty() && !t.to_ascii_lowercase().starts_with("visit")
+}
+
+/// D1: the Install button runs the install command in a new Terminal window
+/// (so the user sees output and sudo prompts work). Entries whose install
+/// value is prose ("Visit …") open the app's website instead. The install
+/// string comes only from the embedded catalog — never from the request.
+fn handle_apps_install(mut request: Request) {
+    let mut body = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+        respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+        return;
+    }
+    let parsed: AppsInstallRequest = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+            return;
+        }
+    };
+    if !valid_app_id(&parsed.app_id) {
+        respond_json(request, 400, &serde_json::json!({ "error": "invalid id" }));
+        return;
+    }
+    let catalog: Vec<serde_json::Value> = match serde_json::from_slice(APPS_JSON) {
+        Ok(c) => c,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": format!("catalog parse error: {}", e) }),
+            );
+            return;
+        }
+    };
+    let entry = match catalog
+        .iter()
+        .find(|e| e["id"].as_str() == Some(parsed.app_id.as_str()))
+    {
+        Some(e) => e,
+        None => {
+            respond_json(request, 404, &serde_json::json!({ "error": "unknown app" }));
+            return;
+        }
+    };
+    let platform = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let cmd = entry
+        .get("install")
+        .and_then(|i| i.get(platform))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+
+    if install_is_command(cmd) {
+        match atomek_core::platform::terminal::open_shell_command(cmd) {
+            Ok(()) => respond_json(
+                request,
+                200,
+                &serde_json::json!({ "ok": true, "action": "terminal", "id": parsed.app_id }),
+            ),
+            Err(e) => respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": format!("failed to open terminal: {}", e) }),
+            ),
+        }
+    } else {
+        // Instruction-only install: open the app's website.
+        let url = entry.get("url").and_then(|u| u.as_str()).unwrap_or("");
+        let _ = atomek_core::platform::open::open_url(url);
+        respond_json(
+            request,
+            200,
+            &serde_json::json!({ "ok": true, "action": "opened_url", "url": url, "id": parsed.app_id }),
+        );
+    }
 }
 
 // ── /api/install ──────────────────────────────────────────────
@@ -7872,7 +8167,11 @@ fn handle_pod_open(request: Request, query: &str) {
     match agent.public_url.clone() {
         Some(u) => {
             open_url(&u);
-            respond_json(request, 200, &serde_json::json!({"ok": true, "url": u, "warning": "no_token"}));
+            respond_json(
+                request,
+                200,
+                &serde_json::json!({"ok": true, "url": u, "warning": "no_token"}),
+            );
         }
         None => {
             respond_json(
@@ -7900,10 +8199,7 @@ fn fetch_ui_url_from_provider(pod_id: &str, route_id: Option<&str>) -> Option<St
         let http = atomek_core::HttpClient::new();
         // pod_id is digits, route_id is [a-z0-9]+ by validator — both are
         // already URL-safe, so format them in directly without encoding.
-        let mut url = format!(
-            "{}/pod/agent/ui-url?pod_id={}",
-            TYTUS_PROVIDER_URL, pod_id
-        );
+        let mut url = format!("{}/pod/agent/ui-url?pod_id={}", TYTUS_PROVIDER_URL, pod_id);
         if let Some(rid) = route_id.filter(|r| !r.is_empty()) {
             url.push_str(&format!("&route_id={}", rid));
         }
@@ -9152,10 +9448,7 @@ const GARAGETYTUS_STABLE_ENDPOINT_HOST: &str = "10.42.42.1";
 const GARAGETYTUS_LOCAL_ENDPOINT_PORT: u16 = 3900;
 
 fn garagetytus_endpoint_url(host: &str) -> String {
-    format!(
-        "http://{}:{}",
-        host, GARAGETYTUS_LOCAL_ENDPOINT_PORT
-    )
+    format!("http://{}:{}", host, GARAGETYTUS_LOCAL_ENDPOINT_PORT)
 }
 
 fn valid_ipv4_host(s: &str) -> bool {
@@ -12536,6 +12829,95 @@ fn respond_json<T: Serialize>(request: Request, status: u16, body: &T) {
 mod tests {
     use super::*;
 
+    // ----- App Store: open / launch (apps.json catalog) ---------------------
+
+    #[test]
+    fn valid_app_id_accepts_catalog_ids_and_rejects_junk() {
+        for good in ["opencode", "telegram", "ail", "a-b_c", "Pi9"] {
+            assert!(valid_app_id(good), "{good} should be valid");
+        }
+        for bad in ["", " ", "a b", "02&reveal=secrets", "../etc", "x/y", "a;b"] {
+            assert!(!valid_app_id(bad), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn resolve_launch_spec_handles_kinds_and_errors() {
+        let app = serde_json::json!({
+            "launch": { "macos": { "kind": "app", "target": "Discord" } }
+        });
+        assert_eq!(resolve_launch_spec(&app, "macos"), Ok(("app", "Discord")));
+
+        let term = serde_json::json!({
+            "launch": { "linux": { "kind": "terminal", "target": "opencode" } }
+        });
+        assert_eq!(
+            resolve_launch_spec(&term, "linux"),
+            Ok(("terminal", "opencode"))
+        );
+
+        // Missing platform spec.
+        assert!(resolve_launch_spec(&app, "linux").is_err());
+        // Empty target.
+        let empty = serde_json::json!({ "launch": { "macos": { "kind": "app", "target": "" } } });
+        assert!(resolve_launch_spec(&empty, "macos").is_err());
+        // Unknown kind never reaches the launcher.
+        let weird =
+            serde_json::json!({ "launch": { "macos": { "kind": "rm -rf", "target": "x" } } });
+        assert!(resolve_launch_spec(&weird, "macos").is_err());
+        // No launch field at all.
+        let none = serde_json::json!({ "id": "x" });
+        assert!(resolve_launch_spec(&none, "macos").is_err());
+    }
+
+    #[test]
+    fn install_is_command_distinguishes_commands_from_instructions() {
+        assert!(install_is_command("brew install --cask discord"));
+        assert!(install_is_command(
+            "curl -fsSL https://pi.dev/install.sh | sh"
+        ));
+        assert!(install_is_command("sudo apt install telegram-desktop"));
+        assert!(!install_is_command(
+            "Visit https://ail.traylinx.com for installation instructions"
+        ));
+        assert!(!install_is_command(
+            "Visit https://ghostty.org/download for your distro"
+        ));
+        assert!(!install_is_command(""));
+        assert!(!install_is_command("   "));
+    }
+
+    #[test]
+    fn desktop_app_command_lookup_rejects_paths_and_empty_values() {
+        assert!(!command_exists_for_desktop_app(""));
+        assert!(!command_exists_for_desktop_app("../pi"));
+        assert!(!command_exists_for_desktop_app("/usr/bin/open"));
+    }
+
+    #[test]
+    fn apps_catalog_every_entry_has_docs_and_launch_specs() {
+        let catalog: Vec<serde_json::Value> =
+            serde_json::from_slice(APPS_JSON).expect("apps.json must be valid JSON");
+        assert!(!catalog.is_empty(), "catalog should not be empty");
+        for entry in &catalog {
+            let id = entry["id"].as_str().unwrap_or("<no-id>");
+            // Docs button needs a non-empty URL.
+            let docs = entry.get("docs").and_then(|d| d.as_str());
+            assert!(
+                docs.map(|d| d.starts_with("http")).unwrap_or(false),
+                "{id}: docs must be an http(s) URL"
+            );
+            // Both platforms must resolve to a launchable spec so Open works
+            // on macOS and Linux alike.
+            for platform in ["macos", "linux"] {
+                assert!(
+                    resolve_launch_spec(entry, platform).is_ok(),
+                    "{id}: launch.{platform} must resolve to (kind, target)"
+                );
+            }
+        }
+    }
+
     // ----- Cortex profile router (M2) ---------------------------------------
 
     fn local_state_fixture(profile: &str, with_token: bool) -> CortexLocalState {
@@ -14770,7 +15152,10 @@ mod tests {
 
             match bind_tray(chosen) {
                 Ok((server, actual)) => {
-                    assert_eq!(actual, chosen, "bind_tray must report the actual bound port");
+                    assert_eq!(
+                        actual, chosen,
+                        "bind_tray must report the actual bound port"
+                    );
                     drop(server);
                     return;
                 }
@@ -14791,7 +15176,10 @@ mod tests {
     fn bind_tray_zero_returns_kernel_picked_port() {
         let (server, actual) = bind_tray(0).expect("bind kernel-picked");
         assert!(actual > 0, "kernel-picked port must be > 0, got {}", actual);
-        assert_ne!(actual, 0, "0 is a request placeholder, must not be the bound port");
+        assert_ne!(
+            actual, 0,
+            "0 is a request placeholder, must not be the bound port"
+        );
         drop(server);
     }
 
@@ -14835,7 +15223,10 @@ mod tests {
         std::fs::rename(&tmp, &target).expect("rename");
 
         let read_back = std::fs::read_to_string(&target).expect("read");
-        assert_eq!(read_back, "12345", "atomic rename must persist exact content");
+        assert_eq!(
+            read_back, "12345",
+            "atomic rename must persist exact content"
+        );
         assert!(!tmp.exists(), "tmp file must not survive the rename");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -14858,7 +15249,10 @@ mod tests {
     /// flows stay correct in prod even though dev can fall back).
     #[test]
     fn canonical_tytus_os_port_is_stable_for_production() {
-        assert_eq!(TYTUS_OS_PORT, 4242, "production invariant — do not change without a release plan");
+        assert_eq!(
+            TYTUS_OS_PORT, 4242,
+            "production invariant — do not change without a release plan"
+        );
         assert!(
             TYTUS_OS_PUBLIC_BASE_URL.contains(":4242"),
             "public base URL must reference the canonical port",

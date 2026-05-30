@@ -557,8 +557,7 @@ pub fn stream(video_id: &str) -> Result<MusicStreamInfo, String> {
 // format 18), fall back to mp4/best so the user can still play the track —
 // HTML <audio> decodes the audio track from an mp4 stream fine.
 // See yt-dlp#12482 for the upstream tracking issue.
-const STREAM_FORMAT: &str =
-    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[ext=mp4]/best";
+const STREAM_FORMAT: &str = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[ext=mp4]/best";
 
 // Player-client chain: yt-dlp's default list leads with web_embedded, which
 // gets "playability status: ERROR" on embed-restricted but otherwise-public
