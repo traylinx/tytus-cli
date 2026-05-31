@@ -1139,7 +1139,7 @@ Apps can call `host.skills.resolve({ prompt })`, fetch the selected markdown wit
 
 ## Ask pod
 
-**Ask pod** sends the selected mission task to a ready pod agent through `host.daemon.callPodEndpoint()`. Atomek first asks the pod for `/v1/models`, selects the first live model returned by the pod metadata, then sends a non-streaming `/v1/chat/completions` request through the same-origin Tytus bridge. No model id is hardcoded in Atomek.
+**Ask pod** sends the selected mission task to a ready pod agent through `host.daemon.chatAgent()`. The host preserves the pod route identity, streams through Cortex first, and falls back to the direct-agent bridge when needed. Atomek does not call pod-agent `/v1/models` directly.
 
 The pod response is saved like any other run:
 
@@ -1886,4 +1886,3 @@ browser level:
 - 17 unit tests in `lib/hostClipboard.test.ts` cover all permission paths.
 - The internal Tytus clipboard (Cmd+C inside the OS) is separate —
   `app/src/lib/clipboard.tsx`. It never touches `navigator.clipboard`.
-

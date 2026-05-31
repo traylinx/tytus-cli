@@ -1,3 +1,8 @@
+## 0.7.24 - 2026-05-31
+
+- Embeds the Atomek honesty-cleanup app release: fake Source Control, Run/Debug, and Problems UI are removed, Manual Checks is labelled honestly, and Ask pod uses the route-aware pod-agent chat bridge.
+- Updates local TytusOS docs for the new Atomek Ask pod transport.
+
 ## 0.7.22 - 2026-05-28
 
 - Hardened the TytusOS dev proxy so it refuses daemon control-port targets instead of surfacing a false login screen.
