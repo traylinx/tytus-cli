@@ -2278,7 +2278,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         "about" => {
             let version = env!("CARGO_PKG_VERSION");
             let msg = format!(
-                "Tytus Tray v{}\\n\\nPrivate AI pod for your terminal.\\nTraylinx / Makakoo.",
+                "Tytus Tray v{}\n\nPrivate AI pod for your terminal.\nTraylinx / Makakoo.",
                 version
             );
             if atomek_core::platform::dialog::show_info("About Tytus", &msg)

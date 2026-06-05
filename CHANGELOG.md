@@ -1,3 +1,8 @@
+## 0.7.27 - 2026-06-05
+
+- Fixes macOS tray app refresh so `tytus tray install` prefers the freshly installed sibling `/usr/local/bin/tytus-tray` over stale legacy `~/bin/tytus-tray`.
+- Fixes the About Tytus dialog to render real line breaks instead of literal `\n` text.
+
 ## 0.7.26 - 2026-06-05
 
 - Fixes tray update checks so the manual Check updates action writes the fresh catalog result to the shared update cache and refreshes the tray menu immediately.

@@ -7170,24 +7170,40 @@ fn render_app_icon_rgba(size: u32) -> Vec<u8> {
 }
 
 #[cfg(target_os = "macos")]
-fn find_tray_binary(home: &str) -> Option<std::path::PathBuf> {
-    let candidates = [
-        std::path::PathBuf::from(home).join("bin/tytus-tray"),
-        std::path::PathBuf::from("/usr/local/bin/tytus-tray"),
-        std::path::PathBuf::from("/opt/homebrew/bin/tytus-tray"),
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return Some(c.clone());
+fn tray_binary_candidates(
+    home: &str,
+    current_exe: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    // Prefer the tray binary next to the running `tytus` executable. The
+    // curl-pipe installer updates `/usr/local/bin/tytus` and
+    // `/usr/local/bin/tytus-tray` first, then calls `tytus tray install`.
+    // If we prefer legacy `~/bin/tytus-tray`, upgrades copy an old binary
+    // back into `/Applications/Tytus.app` and the tray never actually updates.
+    let mut push_unique = |path: std::path::PathBuf| {
+        if !candidates.iter().any(|existing| existing == &path) {
+            candidates.push(path);
+        }
+    };
+    if let Some(exe) = current_exe {
+        if let Some(dir) = exe.parent() {
+            push_unique(dir.join("tytus-tray"));
         }
     }
-    // Sibling of the running tytus binary (common during dev).
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join("tytus-tray");
-            if sibling.exists() {
-                return Some(sibling);
-            }
+    push_unique(std::path::PathBuf::from("/usr/local/bin/tytus-tray"));
+    push_unique(std::path::PathBuf::from("/opt/homebrew/bin/tytus-tray"));
+    // Legacy fallback only. Older installs dropped binaries into ~/bin; keep
+    // supporting them, but never let them shadow the freshly installed prefix.
+    push_unique(std::path::PathBuf::from(home).join("bin/tytus-tray"));
+    candidates
+}
+
+#[cfg(target_os = "macos")]
+fn find_tray_binary(home: &str) -> Option<std::path::PathBuf> {
+    let current_exe = std::env::current_exe().ok();
+    for c in tray_binary_candidates(home, current_exe.as_deref()) {
+        if c.exists() {
+            return Some(c);
         }
     }
     // PATH lookup as last resort.
@@ -10231,5 +10247,31 @@ mod forwarder_tests {
         ));
         assert!(!response_is_2xx(b""));
         assert!(!response_is_2xx(b"garbage"));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tray_bundle_tests {
+    use super::*;
+
+    #[test]
+    fn tray_binary_candidates_prefers_current_prefix_over_legacy_home_bin() {
+        let candidates = tray_binary_candidates(
+            "/Users/example",
+            Some(std::path::Path::new("/usr/local/bin/tytus")),
+        );
+
+        assert_eq!(
+            candidates[0],
+            std::path::PathBuf::from("/usr/local/bin/tytus-tray")
+        );
+        assert_eq!(
+            candidates[1],
+            std::path::PathBuf::from("/opt/homebrew/bin/tytus-tray")
+        );
+        assert_eq!(
+            candidates[2],
+            std::path::PathBuf::from("/Users/example/bin/tytus-tray")
+        );
     }
 }
