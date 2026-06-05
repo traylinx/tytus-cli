@@ -263,6 +263,32 @@ try_release_download() {
         fi
         ok "${INSTALL_DIR}/${_bin}"
     }
+
+    refresh_legacy_home_bin_shadow() {
+        _bin="$1"
+        _legacy="${HOME}/bin/${_bin}"
+        _fresh="${INSTALL_DIR}/${_bin}"
+        [ -f "$_legacy" ] || return 0
+        [ -f "$_fresh" ] || return 0
+        [ "$_legacy" != "$_fresh" ] || return 0
+        if cp "$_fresh" "$_legacy" 2>/dev/null && chmod +x "$_legacy" 2>/dev/null; then
+            ok "Refreshed legacy PATH shadow ${_legacy}"
+        else
+            warn "Legacy ${_legacy} shadows ${_fresh}; update or remove it manually."
+        fi
+    }
+
+    refresh_legacy_home_bin_shadows() {
+        [ -d "${HOME}/bin" ] || return 0
+        refresh_legacy_home_bin_shadow "${CLI_NAME}"
+        refresh_legacy_home_bin_shadow "${MCP_NAME}"
+        refresh_legacy_home_bin_shadow "tytus-tray"
+        refresh_legacy_home_bin_shadow "garagetytus"
+        for _legacy_path in "${HOME}"/bin/garagetytus-*; do
+            [ -f "$_legacy_path" ] || continue
+            refresh_legacy_home_bin_shadow "$(basename "$_legacy_path")"
+        done
+    }
     msg "Installing to ${INSTALL_DIR}..."
     install_one "${CLI_NAME}"
     install_one "${MCP_NAME}"
@@ -281,6 +307,8 @@ try_release_download() {
             warn "This Tytus release does not bundle garagetytus yet — shared-folder sync tools were not installed."
         fi
     fi
+
+    refresh_legacy_home_bin_shadows
 
     BIN_PATH="${INSTALL_DIR}/${CLI_NAME}"
     return 0
@@ -359,11 +387,13 @@ install_from_source() {
         msg "Installing to ${TYTUS_INSTALL_DIR}"
         # shellcheck disable=SC2086
         cargo install $CARGO_ARGS --root "${TYTUS_INSTALL_DIR%/bin}"
-        BIN_PATH="${TYTUS_INSTALL_DIR}/${CLI_NAME}"
+        INSTALL_DIR="${TYTUS_INSTALL_DIR}"
+        BIN_PATH="${INSTALL_DIR}/${CLI_NAME}"
     else
         # shellcheck disable=SC2086
         cargo install $CARGO_ARGS
-        BIN_PATH="${HOME}/.cargo/bin/${CLI_NAME}"
+        INSTALL_DIR="${HOME}/.cargo/bin"
+        BIN_PATH="${INSTALL_DIR}/${CLI_NAME}"
     fi
 }
 
@@ -412,23 +442,21 @@ setup_sudoers() {
 # ── Verify ─────────────────────────────────────────────────
 
 verify_install() {
-    if ! command -v "${CLI_NAME}" >/dev/null 2>&1; then
-        err "${CLI_NAME} was installed but isn't on PATH."
-        err "Add this to your shell profile and open a new terminal:"
-        err "    export PATH=\"\$HOME/.cargo/bin:\$PATH\""
+    if [ -z "${BIN_PATH:-}" ] || [ ! -x "$BIN_PATH" ]; then
+        err "${CLI_NAME} was not installed at the expected path: ${BIN_PATH:-<unset>}"
         exit 1
     fi
-    ok "$(${CLI_NAME} --version)"
-    if command -v "${MCP_NAME}" >/dev/null 2>&1; then
+    ok "$($BIN_PATH --version)"
+    if [ -x "${INSTALL_DIR}/${MCP_NAME}" ]; then
         ok "${MCP_NAME} ready (MCP server for Claude Code / OpenCode)"
     fi
     if [ "${TYTUS_SKIP_GARAGETYTUS:-}" != "1" ]; then
-        if command -v garagetytus >/dev/null 2>&1; then
+        if [ -x "${INSTALL_DIR}/garagetytus" ]; then
             ok "garagetytus ready (shared-folder CLI)"
-        elif command -v garagetytus-folder-list >/dev/null 2>&1; then
+        elif [ -x "${INSTALL_DIR}/garagetytus-folder-list" ]; then
             ok "garagetytus helpers ready (shared-folder scripts)"
         else
-            warn "garagetytus shared-folder tools are not on PATH."
+            warn "garagetytus shared-folder tools are not installed at ${INSTALL_DIR}."
         fi
     fi
 }
@@ -446,9 +474,9 @@ verify_install() {
 install_tray_macos() {
     [ "$(uname -s)" = "Darwin" ] || return 0
     [ "${TYTUS_SKIP_TRAY:-}" = "1" ] && { ok "Skipping tray install (TYTUS_SKIP_TRAY=1)"; return 0; }
-    if ! command -v tytus-tray >/dev/null 2>&1; then
-        warn "tytus-tray binary not on PATH — skipping menubar install."
-        warn "Re-run after fixing PATH: tytus tray install"
+    if [ -z "${INSTALL_DIR:-}" ] || [ ! -x "${INSTALL_DIR}/tytus-tray" ]; then
+        warn "tytus-tray binary not installed at ${INSTALL_DIR:-<unset>} — skipping menubar install."
+        warn "Re-run after fixing install path: ${BIN_PATH:-tytus} tray install"
         return 0
     fi
     # Upgrade-safe install: if /Applications/Tytus.app already exists, it
@@ -456,14 +484,14 @@ install_tray_macos() {
     # process may still be holding port 4242. `tytus tray install` does
     # not replace a running app, so first uninstall (which kills the
     # process + removes the .app + clears the LaunchAgent) and then
-    # install fresh from the just-installed v$(tytus --version) binary.
+    # install fresh from the just-installed absolute ${BIN_PATH} binary.
     # Without this step, end users on the curl-pipe upgrade path keep
     # serving the old TytusOS bundle until they manually run
     # `tytus tray uninstall && tytus tray install` — a footgun caught
     # during the v0.7.4 → v0.7.5 dogfood (2026-05-24).
     if [ -d "/Applications/Tytus.app" ]; then
         msg "Tytus.app exists — refreshing to current binary..."
-        "${CLI_NAME}" tray uninstall >/dev/null 2>&1 || true
+        "${BIN_PATH}" tray uninstall >/dev/null 2>&1 || true
         # Belt + braces: the uninstall above sometimes leaves a running
         # process if launchctl didn't grab the right pid. Kill any
         # lingering Tytus.app or tytus-tray process before reinstall.
@@ -473,7 +501,7 @@ install_tray_macos() {
         sleep 1
     fi
     msg "Installing menubar app (Tytus.app)..."
-    if "${CLI_NAME}" tray install >/dev/null 2>&1; then
+    if "${BIN_PATH}" tray install >/dev/null 2>&1; then
         ok "Tytus.app installed in /Applications + auto-start at login"
     else
         warn "Menubar install failed — run manually: tytus tray install"

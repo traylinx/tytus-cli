@@ -1,3 +1,7 @@
+## 0.7.28 - 2026-06-05
+
+- Fixes curl-pipe upgrades on machines where legacy `~/bin/tytus` shadows `/usr/local/bin/tytus`: the installer now verifies and refreshes the absolute installed binary path, syncs stale `~/bin` shadows, and uses the absolute installed CLI for `Tytus.app` refresh.
+
 ## 0.7.27 - 2026-06-05
 
 - Fixes macOS tray app refresh so `tytus tray install` prefers the freshly installed sibling `/usr/local/bin/tytus-tray` over stale legacy `~/bin/tytus-tray`.
