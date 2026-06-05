@@ -2135,6 +2135,8 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                 match fetch_latest_tytus_version() {
                     Ok((latest, release_tag)) => {
                         let current = env!("CARGO_PKG_VERSION");
+                        write_cached_update_prefs(&latest, release_tag.as_deref());
+                        trigger_refresh();
                         if is_newer_tytus_version(&latest, current) {
                             let release = release_tag.unwrap_or_else(|| format!("v{}", latest));
                             notify(
@@ -2159,6 +2161,8 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                         }
                     }
                     Err(e) => {
+                        write_cached_update_error(&e);
+                        trigger_refresh();
                         notify("Tytus", &format!("Update check failed: {}", e));
                     }
                 }
@@ -3257,44 +3261,97 @@ fn read_cached_update_prefs() -> Option<(String, Option<String>)> {
     Some((version, tag))
 }
 
-/// Write `(latest_version, latest_release_tag)` back to the cache file.
-/// Preserves the rest of the JSON shape by merging into whatever's there.
-fn write_cached_update_prefs(version: &str, release_tag: Option<&str>) {
+fn current_update_check_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn merge_cached_update_success(
+    body: &mut serde_json::Value,
+    version: &str,
+    release_tag: Option<&str>,
+    checked_at: u64,
+) {
+    if !body.is_object() {
+        *body = serde_json::json!({});
+    }
+    let Some(map) = body.as_object_mut() else {
+        return;
+    };
+    map.insert(
+        "latest_version".to_string(),
+        serde_json::Value::String(version.to_string()),
+    );
+    map.insert(
+        "latest_release_tag".to_string(),
+        release_tag
+            .map(|t| serde_json::Value::String(t.to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    map.insert(
+        "last_checked_at".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(checked_at)),
+    );
+    map.insert("last_check_error".to_string(), serde_json::Value::Null);
+}
+
+fn merge_cached_update_error(body: &mut serde_json::Value, error: &str, checked_at: u64) {
+    if !body.is_object() {
+        *body = serde_json::json!({});
+    }
+    let Some(map) = body.as_object_mut() else {
+        return;
+    };
+    map.insert(
+        "last_checked_at".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(checked_at)),
+    );
+    map.insert(
+        "last_check_error".to_string(),
+        serde_json::Value::String(error.to_string()),
+    );
+}
+
+fn read_cached_update_body() -> serde_json::Value {
+    update_prefs_file_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn write_cached_update_body(mut body: serde_json::Value) {
     let Some(path) = update_prefs_file_path() else {
         return;
     };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut body: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let serde_json::Value::Object(ref mut map) = body {
-        map.insert(
-            "latest_version".to_string(),
-            serde_json::Value::String(version.to_string()),
-        );
-        map.insert(
-            "latest_release_tag".to_string(),
-            release_tag
-                .map(|t| serde_json::Value::String(t.to_string()))
-                .unwrap_or(serde_json::Value::Null),
-        );
-        map.insert(
-            "last_checked_at".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-            )),
-        );
+    if !body.is_object() {
+        body = serde_json::json!({});
     }
     let _ = std::fs::write(
         &path,
         serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".to_string()),
     );
+}
+
+/// Write a successful update check back to the cache file.
+/// Preserves the rest of the JSON shape by merging into whatever's there.
+fn write_cached_update_prefs(version: &str, release_tag: Option<&str>) {
+    let mut body = read_cached_update_body();
+    merge_cached_update_success(&mut body, version, release_tag, current_update_check_secs());
+    write_cached_update_body(body);
+}
+
+/// Record a failed user-triggered update check without wiping the last known
+/// good update version. This keeps the tray row useful while TytusOS can show
+/// the real fetch error from `/api/update/status`.
+fn write_cached_update_error(error: &str) {
+    let mut body = read_cached_update_body();
+    merge_cached_update_error(&mut body, error, current_update_check_secs());
+    write_cached_update_body(body);
 }
 
 /// Background task: every 6h (`TYTUS_UPDATE_AUTO_CHECK_INTERVAL_SECS`)
@@ -3422,5 +3479,48 @@ mod scopeguard_lite {
                 f();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod update_cache_tests {
+    use super::*;
+
+    #[test]
+    fn update_success_refreshes_version_timestamp_and_clears_error() {
+        let mut body = serde_json::json!({
+            "automatic_checks": true,
+            "latest_version": "0.7.23",
+            "latest_release_tag": "v0.7.23",
+            "last_checked_at": 111_u64,
+            "last_check_error": "network down",
+            "keep_me": "unchanged"
+        });
+
+        merge_cached_update_success(&mut body, "0.7.25", Some("v0.7.25"), 222);
+
+        assert_eq!(body["automatic_checks"], true);
+        assert_eq!(body["keep_me"], "unchanged");
+        assert_eq!(body["latest_version"], "0.7.25");
+        assert_eq!(body["latest_release_tag"], "v0.7.25");
+        assert_eq!(body["last_checked_at"], 222);
+        assert!(body["last_check_error"].is_null());
+    }
+
+    #[test]
+    fn update_error_preserves_last_known_update() {
+        let mut body = serde_json::json!({
+            "latest_version": "0.7.25",
+            "latest_release_tag": "v0.7.25",
+            "last_checked_at": 222_u64,
+            "last_check_error": null
+        });
+
+        merge_cached_update_error(&mut body, "catalog timeout", 333);
+
+        assert_eq!(body["latest_version"], "0.7.25");
+        assert_eq!(body["latest_release_tag"], "v0.7.25");
+        assert_eq!(body["last_checked_at"], 333);
+        assert_eq!(body["last_check_error"], "catalog timeout");
     }
 }

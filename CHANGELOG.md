@@ -1,3 +1,8 @@
+## 0.7.26 - 2026-06-05
+
+- Fixes tray update checks so the manual Check updates action writes the fresh catalog result to the shared update cache and refreshes the tray menu immediately.
+- Records failed manual update checks without deleting the last known good update target, keeping the update row useful while surfacing real catalog errors to TytusOS.
+
 ## 0.7.25 - 2026-06-05
 
 - Embeds `tytus-os` `v1.0.65-tray-bridge-recovery`, fixing the localhost:4242 dev/proxy split-brain that showed a false Daemon offline banner when the tray bridge was healthy but `/tmp/tytus/tray-web.port` was missing.
