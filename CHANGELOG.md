@@ -1,3 +1,7 @@
+## 0.7.29 - 2026-06-05
+
+- Embeds `tytus-os` `v1.0.66-shared-folder-pods`, fixing shared-folder provisioning controls so included AIL/runtime pods appear next to agent pods. Existing pod 01 sharing behavior is unchanged; users can now explicitly add additional runtimes from the UI.
+
 ## 0.7.28 - 2026-06-05
 
 - Fixes curl-pipe upgrades on machines where legacy `~/bin/tytus` shadows `/usr/local/bin/tytus`: the installer now verifies and refreshes the absolute installed binary path, syncs stale `~/bin` shadows, and uses the absolute installed CLI for `Tytus.app` refresh.
