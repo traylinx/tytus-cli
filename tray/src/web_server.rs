@@ -15140,15 +15140,15 @@ mod tests {
     /// returned actual_port matches what we asked for (no surprise rebinds).
     #[test]
     fn bind_tray_exact_port_returns_same_port() {
-        // Pick an ephemeral port, then re-bind through bind_tray to mimic
-        // prod's fixed 4242 binding. CI can race another test/process for the
-        // just-released port, so retry a few times instead of making this gate
-        // flaky on "Address already in use".
+        // Pick an ephemeral port with a bare TcpListener, then re-bind through
+        // bind_tray to mimic prod's fixed 4242 binding. Do not use
+        // tiny_http::Server for the picker: some CI kernels keep its socket
+        // busy briefly after drop, which turns this exact-bind gate flaky.
         let mut last_err = String::new();
-        for _ in 0..20 {
-            let server_for_pick = tiny_http::Server::http("127.0.0.1:0").expect("bind for pick");
-            let chosen = server_for_pick.server_addr().to_ip().expect("ip").port();
-            drop(server_for_pick);
+        for _ in 0..50 {
+            let picker = std::net::TcpListener::bind("127.0.0.1:0").expect("bind for pick");
+            let chosen = picker.local_addr().expect("picker local addr").port();
+            drop(picker);
 
             match bind_tray(chosen) {
                 Ok((server, actual)) => {
@@ -15159,7 +15159,12 @@ mod tests {
                     drop(server);
                     return;
                 }
-                Err(err) if err.contains("Address already in use") => {
+                Err(err)
+                    if err.contains("Address already in use")
+                        || err.contains("Only one usage of each socket address")
+                        || err.contains("os error 98")
+                        || err.contains("os error 10048") =>
+                {
                     last_err = err;
                     continue;
                 }
