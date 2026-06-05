@@ -1,0 +1,53 @@
+{
+  "$schema": "https://tytus.traylinx.com/schema/app/v1.json",
+  "id": "openhouse",
+  "name": "OpenHouse",
+  "version": "1.1.5",
+  "icon": "Building2",
+  "category": "Productivity",
+  "description": "Pixel office for Tytus pods and third-party AI agents, adapted from Star Office UI.",
+  "window": {
+    "defaultSize": {
+      "width": 1320,
+      "height": 860
+    },
+    "minSize": {
+      "width": 900,
+      "height": 620
+    }
+  },
+  "permissions": [
+    "daemon.read",
+    "daemon.network",
+    "storage.app",
+    "shell.notifications",
+    "shell.menu"
+  ],
+  "storage": {
+    "tables": [
+      {
+        "name": "sources",
+        "schema": "migrations/001_sources.sql"
+      },
+      {
+        "name": "agents",
+        "schema": "migrations/002_agents.sql"
+      },
+      {
+        "name": "layout",
+        "schema": "migrations/003_layout.sql"
+      },
+      {
+        "name": "probe-history",
+        "schema": "migrations/004_probe_history.sql"
+      },
+      {
+        "name": "settings",
+        "schema": "migrations/005_settings.sql"
+      }
+    ]
+  },
+  "entry": {
+    "url": "https://cdn.jsdelivr.net/gh/traylinx/tytus-app-openhouse@v1.1.5/dist/index.js"
+  }
+}

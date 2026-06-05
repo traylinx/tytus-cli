@@ -1,3 +1,8 @@
+## 0.7.25 - 2026-06-05
+
+- Embeds `tytus-os` `v1.0.65-tray-bridge-recovery`, fixing the localhost:4242 dev/proxy split-brain that showed a false Daemon offline banner when the tray bridge was healthy but `/tmp/tytus/tray-web.port` was missing.
+- Public beta refresh keeps TytusOS, vendored dist, and installer pages aligned for the tray bridge recovery.
+
 ## 0.7.24 - 2026-05-31
 
 - Embeds the Atomek honesty-cleanup app release: fake Source Control, Run/Debug, and Problems UI are removed, Manual Checks is labelled honestly, and Ask pod uses the route-aware pod-agent chat bridge.
