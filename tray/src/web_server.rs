@@ -6863,7 +6863,11 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
         );
         return;
     };
-    let message = match shared_folders_agent_chat_context(&cli_pod_id) {
+    let message = match shared_folders_agent_chat_context(
+        &cli_pod_id,
+        effective_route_id.as_deref(),
+        Some(slot.display_label.as_str()),
+    ) {
         Some(context) => format!("{context}\n\nUser message:\n{message}"),
         None => message,
     };
@@ -7387,7 +7391,12 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
         );
         return;
     };
-    if let Some(answer) = shared_folders_direct_chat_answer(&message, &slot.pod_id) {
+    if let Some(answer) = shared_folders_direct_chat_answer(
+        &message,
+        &slot.pod_id,
+        slot.route_id.as_deref(),
+        Some(slot.display_label.as_str()),
+    ) {
         respond_json(
             request,
             200,
@@ -7404,7 +7413,11 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
         "role": "system",
         "content": "You are speaking through TytusOS to the user's private pod agent. Never reveal infrastructure provider names, model provider names, private IPs, gateway URLs, hostnames, route IDs, tokens, secrets, or internal topology. Describe such details only as private infrastructure."
     })];
-    if let Some(context) = shared_folders_agent_chat_context(&slot.pod_id) {
+    if let Some(context) = shared_folders_agent_chat_context(
+        &slot.pod_id,
+        slot.route_id.as_deref(),
+        Some(slot.display_label.as_str()),
+    ) {
         messages.push(serde_json::json!({
             "role": "system",
             "content": context,
@@ -11226,26 +11239,136 @@ fn all_known_shared_buckets() -> Vec<String> {
     buckets.into_iter().collect()
 }
 
-fn shared_folders_agent_chat_context(pod_id: &str) -> Option<String> {
+fn shared_binding_provisioned_for_runtime(binding: &serde_json::Value, canonical: &str) -> bool {
+    binding
+        .get("pods_provisioned")
+        .and_then(|v| v.as_array())
+        .map(|pods| {
+            pods.iter()
+                .filter_map(|v| v.as_str())
+                .any(|raw| normalize_pod_id_for_query(raw).as_deref() == Some(canonical))
+        })
+        .unwrap_or(false)
+}
+
+fn shared_binding_target_labels(binding: &serde_json::Value, canonical: &str) -> Vec<String> {
+    let mut labels = std::collections::BTreeSet::new();
+    let Some(targets) = binding.get("targets").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    for target in targets {
+        if target
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .is_some_and(|enabled| !enabled)
+        {
+            continue;
+        }
+        let runtime_matches = target
+            .get("runtime_id")
+            .and_then(|v| v.as_str())
+            .and_then(normalize_pod_id_for_query)
+            .as_deref()
+            == Some(canonical);
+        if !runtime_matches {
+            continue;
+        }
+        if let Some(arr) = target.get("labels").and_then(|v| v.as_array()) {
+            for label in arr.iter().filter_map(|v| v.as_str()) {
+                let label = label.trim();
+                if !label.is_empty() {
+                    labels.insert(label.to_string());
+                }
+            }
+        } else if let Some(label) = target.get("label").and_then(|v| v.as_str()) {
+            let label = label.trim();
+            if !label.is_empty() {
+                labels.insert(label.to_string());
+            }
+        }
+    }
+    labels.into_iter().collect()
+}
+
+fn shared_binding_enabled_for_agent(
+    binding: &serde_json::Value,
+    canonical: &str,
+    route_id: Option<&str>,
+    display_label: Option<&str>,
+) -> bool {
+    let Some(targets) = binding.get("targets").and_then(|v| v.as_array()) else {
+        // Back-compat for pre-policy sidecars: if the runtime has the mount and
+        // no per-agent policy exists yet, every agent on that runtime can use it.
+        return true;
+    };
+    if targets.is_empty() {
+        return false;
+    }
+
+    let route_id = route_id.map(|v| v.trim().to_ascii_lowercase());
+    let display_label = display_label.map(|v| v.trim().to_ascii_lowercase());
+    for target in targets {
+        if target
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .is_some_and(|enabled| !enabled)
+        {
+            continue;
+        }
+        let runtime_matches = target
+            .get("runtime_id")
+            .and_then(|v| v.as_str())
+            .and_then(normalize_pod_id_for_query)
+            .as_deref()
+            == Some(canonical);
+        if !runtime_matches {
+            continue;
+        }
+
+        if let (Some(route_id), Some(target_id)) = (
+            route_id.as_deref(),
+            target.get("target_id").and_then(|v| v.as_str()),
+        ) {
+            if target_id.to_ascii_lowercase().contains(route_id) {
+                return true;
+            }
+        }
+
+        if let Some(display_label) = display_label.as_deref() {
+            let mut target_labels = Vec::new();
+            if let Some(arr) = target.get("labels").and_then(|v| v.as_array()) {
+                target_labels.extend(arr.iter().filter_map(|v| v.as_str()));
+            } else if let Some(label) = target.get("label").and_then(|v| v.as_str()) {
+                target_labels.push(label);
+            }
+            if target_labels
+                .into_iter()
+                .any(|label| label.trim().eq_ignore_ascii_case(display_label))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn shared_folders_agent_chat_context(
+    pod_id: &str,
+    route_id: Option<&str>,
+    display_label: Option<&str>,
+) -> Option<String> {
     let canonical = normalize_pod_id_for_query(pod_id)?;
     let mut lines = vec![
-        "Live Tytus shared-folder context. This is authoritative for this chat.".to_string(),
+        "Live Tytus shared-folder context for this specific agent. This is authoritative for this chat.".to_string(),
         "This context supersedes stale memory from previous chat turns or previous failed checks.".to_string(),
-        "If sample files are listed for a shared folder, answer that the folder is available at the listed mounted path.".to_string(),
-        "If the user asks about shared folders, use these mounted POSIX paths before saying a folder is missing.".to_string(),
+        "Agent access is policy-scoped: a folder mounted for the runtime pod is NOT available to this agent unless this agent is selected in the folder's targets.".to_string(),
+        "If a shared folder is marked NOT selected for this agent, answer that this agent does not currently have access even if the runtime pod is provisioned.".to_string(),
+        "If sample files are listed for an available shared folder, answer that the folder is available at the listed mounted path.".to_string(),
         "Do not claim you ran shell commands unless you actually used a tool; the file samples below come from the Tytus tray shared-folder index.".to_string(),
     ];
     let mut count = 0usize;
     for binding in shared_bindings_from_cache() {
-        let provisioned_here = binding
-            .get("pods_provisioned")
-            .and_then(|v| v.as_array())
-            .map(|pods| {
-                pods.iter().filter_map(|v| v.as_str()).any(|raw| {
-                    normalize_pod_id_for_query(raw).as_deref() == Some(canonical.as_str())
-                })
-            })
-            .unwrap_or(false);
+        let provisioned_here = shared_binding_provisioned_for_runtime(&binding, &canonical);
         if !provisioned_here {
             continue;
         }
@@ -11262,12 +11385,25 @@ fn shared_folders_agent_chat_context(pod_id: &str) -> Option<String> {
             .get("local_path")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        lines.push(format!(
-            "- {bucket}: Mac `{local_path}` is mounted in this pod at `/app/workspace/Shared/{slug}/` (also `/app/workspace/shared/{slug}/`)."
-        ));
-        let samples = shared_folder_sample_files(local_path, slug, 8);
-        if !samples.is_empty() {
-            lines.push(format!("  sample files: {}", samples.join(", ")));
+        let selected_labels = shared_binding_target_labels(&binding, &canonical);
+        let selected_text = if selected_labels.is_empty() {
+            "none".to_string()
+        } else {
+            selected_labels.join(", ")
+        };
+        if shared_binding_enabled_for_agent(&binding, &canonical, route_id, display_label) {
+            lines.push(format!(
+                "- {bucket}: AVAILABLE to this agent. Mac `{local_path}` is mounted at `/app/workspace/Shared/{slug}/` (also `/app/workspace/shared/{slug}/`). Selected agents on this runtime: {selected_text}."
+            ));
+            let samples = shared_folder_sample_files(local_path, slug, 8);
+            if !samples.is_empty() {
+                lines.push(format!("  sample files: {}", samples.join(", ")));
+            }
+        } else {
+            let agent = display_label.unwrap_or("this agent");
+            lines.push(format!(
+                "- {bucket}: NOT selected for {agent}. The runtime pod has the mount, but current selected agents on this runtime are: {selected_text}. Do not claim {agent} can access `/app/workspace/Shared/{slug}/` unless the policy changes."
+            ));
         }
         count += 1;
     }
@@ -11275,17 +11411,22 @@ fn shared_folders_agent_chat_context(pod_id: &str) -> Option<String> {
         return None;
     }
     lines.push(
-        "For the marketing bucket specifically, check `/app/workspace/Shared/marketing/` first."
+        "Only use paths above that are marked AVAILABLE; never use NOT selected paths for this agent."
             .to_string(),
     );
     lines.push(
-        "Recommended verification command: `find /app/workspace/Shared -maxdepth 3 -type f | head -20`."
+        "Recommended verification command for AVAILABLE folders: `find /app/workspace/Shared -maxdepth 3 -type f | head -20`."
             .to_string(),
     );
     Some(lines.join("\n"))
 }
 
-fn shared_folders_direct_chat_answer(message: &str, pod_id: &str) -> Option<String> {
+fn shared_folders_direct_chat_answer(
+    message: &str,
+    pod_id: &str,
+    route_id: Option<&str>,
+    display_label: Option<&str>,
+) -> Option<String> {
     let lower = message.to_ascii_lowercase();
     if !(lower.contains("shared folder")
         || lower.contains("shared-folder")
@@ -11299,15 +11440,7 @@ fn shared_folders_direct_chat_answer(message: &str, pod_id: &str) -> Option<Stri
     let canonical = normalize_pod_id_for_query(pod_id)?;
     let mut sections = Vec::new();
     for binding in shared_bindings_from_cache() {
-        let provisioned_here = binding
-            .get("pods_provisioned")
-            .and_then(|v| v.as_array())
-            .map(|pods| {
-                pods.iter().filter_map(|v| v.as_str()).any(|raw| {
-                    normalize_pod_id_for_query(raw).as_deref() == Some(canonical.as_str())
-                })
-            })
-            .unwrap_or(false);
+        let provisioned_here = shared_binding_provisioned_for_runtime(&binding, &canonical);
         if !provisioned_here {
             continue;
         }
@@ -11327,6 +11460,19 @@ fn shared_folders_direct_chat_answer(message: &str, pod_id: &str) -> Option<Stri
             .get("local_path")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let selected_labels = shared_binding_target_labels(&binding, &canonical);
+        if !shared_binding_enabled_for_agent(&binding, &canonical, route_id, display_label) {
+            let agent = display_label.unwrap_or("this agent");
+            let selected = if selected_labels.is_empty() {
+                "none".to_string()
+            } else {
+                selected_labels.join(", ")
+            };
+            sections.push(format!(
+                "No. `{bucket}` is mounted for runtime pod {canonical}, but {agent} is not selected for this shared folder.\n\nCurrent selected agents on this runtime: {selected}\n\nAsk Sebastian to enable {agent} in Shared folder settings if this agent should use `/app/workspace/Shared/{slug}/`."
+            ));
+            continue;
+        }
         let samples = shared_folder_sample_files(local_path, slug, 5);
         let sample_text = if samples.is_empty() {
             "No sample files found in the local binding index.".to_string()
@@ -15051,6 +15197,68 @@ mod tests {
         );
         assert_eq!(status["02"]["helper_mode"], "legacy_bucket_root");
         assert!(status.get("bad;pod").is_none());
+    }
+
+    #[test]
+    fn shared_folder_direct_answer_respects_agent_targets() {
+        let home = HomeOverrideGuard::new();
+        let marketing = home.root.join("marketing");
+        std::fs::create_dir_all(&marketing).unwrap();
+        std::fs::write(marketing.join("HANDOFF.md"), "handoff").unwrap();
+        let cache_dir = home.root.join(".cache/garagetytus/bisync");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let binding = serde_json::json!({
+            "schema_version": 2,
+            "bucket": "marketing",
+            "label": "marketing",
+            "slug": "marketing",
+            "local_path": marketing.to_string_lossy(),
+            "auto_sync": true,
+            "pods_provisioned": ["wannolot-01"],
+            "targets": [
+                {
+                    "runtime_id": "01",
+                    "kind": "agent",
+                    "target_id": "agent:01:claus-route:claus",
+                    "labels": ["Claus"],
+                    "enabled": true
+                },
+                {
+                    "runtime_id": "01",
+                    "kind": "agent",
+                    "target_id": "agent:01:lisa-route:lisa",
+                    "labels": ["Lisa"],
+                    "enabled": true
+                }
+            ]
+        });
+        std::fs::write(
+            cache_dir.join("marketing.bindings.json"),
+            serde_json::to_string(&binding).unwrap(),
+        )
+        .unwrap();
+
+        let hermie = shared_folders_direct_chat_answer(
+            "Can you access the marketing shared folder?",
+            "01",
+            Some("hermie-route"),
+            Some("Hermie"),
+        )
+        .unwrap();
+        assert!(hermie.starts_with("No."));
+        assert!(hermie.contains("Hermie is not selected"));
+        assert!(hermie.contains("Claus, Lisa"));
+
+        let claus = shared_folders_direct_chat_answer(
+            "Can you access the marketing shared folder?",
+            "01",
+            Some("claus-route"),
+            Some("Claus"),
+        )
+        .unwrap();
+        assert!(claus.starts_with("Yes."));
+        assert!(claus.contains("/app/workspace/Shared/marketing/"));
+        assert!(claus.contains("HANDOFF.md"));
     }
 
     #[test]

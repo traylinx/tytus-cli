@@ -1,3 +1,9 @@
+## 0.7.31 - 2026-06-06
+
+- Fixed shared-folder agent chat to respect per-agent targets, not just the runtime pod mount. If Hermie is removed from `marketing`, Hermie now says no even when pod 01 still has Garage credentials.
+- Embedded Tytus OS `v1.0.70-shared-folder-feedback`, adding save notifications after shared-folder binding and settings changes.
+- Added a regression test that proves selected agents (Claus/Lisa) can answer yes while removed agents (Hermie) answer no for the same mounted folder.
+
 ## 0.7.30 - 2026-06-06
 
 - Fixed shared-folder target updates so per-agent folder policy is persisted without racing a hidden background provision job.
