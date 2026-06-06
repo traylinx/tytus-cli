@@ -24,6 +24,7 @@ TARGET_DIR="$REPO_ROOT/target/release"
 
 INSTALL_DIR="/usr/local/bin"
 APP_BUNDLE_MACOS="/Applications/Tytus.app/Contents/MacOS"
+TYTUS_BIN="$INSTALL_DIR/tytus"
 
 step() { printf "\n\033[1;36m▸ %s\033[0m\n" "$*"; }
 ok()   { printf "  \033[1;32m✓\033[0m %s\n" "$*"; }
@@ -57,8 +58,8 @@ ok "release binaries built in $TARGET_DIR"
 
 # ── Stop running tray + daemon so we can replace binaries ─────────
 step "Stopping running tray + daemon"
-tytus tray uninstall 2>/dev/null | tail -3 || warn "tytus tray uninstall returned non-zero (continuing)"
-tytus daemon stop 2>/dev/null | tail -1 || true
+"$TYTUS_BIN" tray uninstall 2>/dev/null | tail -3 || warn "tytus tray uninstall returned non-zero (continuing)"
+"$TYTUS_BIN" daemon stop 2>/dev/null | tail -1 || true
 # The installed tray runs as /Applications/Tytus.app/Contents/MacOS/Tytus
 # (the bundle's executable is named "Tytus", not "tytus-tray"), so
 # `pkill -f tytus-tray` doesn't match. Kill by app-bundle path AND by
@@ -86,13 +87,13 @@ fi
 ok "binaries copied"
 
 # ── Reinstall tray (recreates /Applications/Tytus.app + LaunchAgent) ──
-step "Reinstalling tray (tytus tray install)"
-tytus tray install
+step "Reinstalling tray ($TYTUS_BIN tray install)"
+"$TYTUS_BIN" tray install
 ok "tray installed"
 
 # ── Verify ────────────────────────────────────────────────────────
 step "Verification"
-INSTALLED_VERSION="$(tytus --version | awk '{print $2}')"
+INSTALLED_VERSION="$("$TYTUS_BIN" --version | awk '{print $2}')"
 ok "installed version: $INSTALLED_VERSION"
 
 # Wait for the LaunchAgent to spawn the daemon (KeepAlive normally

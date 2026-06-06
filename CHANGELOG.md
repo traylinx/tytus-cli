@@ -1,3 +1,12 @@
+## 0.7.30 - 2026-06-06
+
+- Fixed shared-folder target updates so per-agent folder policy is persisted without racing a hidden background provision job.
+- Provisioning now refreshes all known shared buckets for a runtime pod so adding `marketing` cannot clobber `shared` credentials.
+- Bundled Tytus OS `v1.0.69-shared-folder-policy`, which skips redundant key rotation when only Claus/Hermie/Lisa policy changes on an already-provisioned runtime.
+- Pinned garagetytus `462145b`, which tolerates stale/duplicate Garage keys and documents mounted `/app/workspace/Shared/<folder>` paths for pod agents.
+- Hardened direct agent chat so Hermie answers shared-folder access questions from the tray's binding index instead of stale model memory.
+- Fixed the local dev rebuild script to use `/usr/local/bin/tytus` instead of stale `~/bin` PATH shadows.
+
 ## 0.7.29 - 2026-06-05
 
 - Embeds `tytus-os` `v1.0.66-shared-folder-pods`, fixing shared-folder provisioning controls so included AIL/runtime pods appear next to agent pods. Existing pod 01 sharing behavior is unchanged; users can now explicitly add additional runtimes from the UI.

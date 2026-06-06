@@ -4479,6 +4479,9 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/shared-folders/provision-pod") => {
             handle_shared_folders_provision_pod(request, &registry);
         }
+        (Method::Post, "/api/shared-folders/update-targets") => {
+            handle_shared_folders_update_targets(request, &registry);
+        }
         (Method::Post, "/api/shared-folders/pick-folder") => {
             handle_shared_folders_pick_folder(request);
         }
@@ -6860,6 +6863,10 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
         );
         return;
     };
+    let message = match shared_folders_agent_chat_context(&cli_pod_id) {
+        Some(context) => format!("{context}\n\nUser message:\n{message}"),
+        None => message,
+    };
     let cortex_state = read_cortex_state();
     let upstream_target = resolve_cortex_upstream(&cortex_state);
     let profile_frame = cortex_profile_sse_frame(&upstream_target);
@@ -7380,6 +7387,30 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
         );
         return;
     };
+    if let Some(answer) = shared_folders_direct_chat_answer(&message, &slot.pod_id) {
+        respond_json(
+            request,
+            200,
+            &serde_json::json!({
+                "message": answer,
+                "source": "agent_direct",
+                "agent_type": agent_type,
+                "session_id": null,
+            }),
+        );
+        return;
+    }
+    let mut messages = vec![serde_json::json!({
+        "role": "system",
+        "content": "You are speaking through TytusOS to the user's private pod agent. Never reveal infrastructure provider names, model provider names, private IPs, gateway URLs, hostnames, route IDs, tokens, secrets, or internal topology. Describe such details only as private infrastructure."
+    })];
+    if let Some(context) = shared_folders_agent_chat_context(&slot.pod_id) {
+        messages.push(serde_json::json!({
+            "role": "system",
+            "content": context,
+        }));
+    }
+    messages.push(serde_json::json!({ "role": "user", "content": message }));
     let (secret, agent_user_id) = match read_provider_auth() {
         Ok(v) => v,
         Err(e) => {
@@ -7406,13 +7437,7 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
         "model": "ail-compound",
         "app_id": safe_app_id(body.app_id),
         "route_id": route_id,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are speaking through TytusOS to the user's private pod agent. Never reveal infrastructure provider names, model provider names, private IPs, gateway URLs, hostnames, route IDs, tokens, secrets, or internal topology. Describe such details only as private infrastructure."
-            },
-            { "role": "user", "content": message }
-        ],
+        "messages": messages,
         "stream": false,
         "target": "agent",
         "chat_target": "agent",
@@ -9402,14 +9427,374 @@ fn shared_bindings_from_cache() -> Vec<serde_json::Value> {
                 Ok(r) => r,
                 Err(_) => continue,
             };
-            let json: serde_json::Value = match serde_json::from_str(&raw) {
+            let mut json: serde_json::Value = match serde_json::from_str(&raw) {
                 Ok(j) => j,
                 Err(_) => continue,
             };
+            normalize_shared_binding_value(&mut json);
             bindings.push(json);
         }
     }
     bindings
+}
+
+fn shared_bindings_cache_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".cache/garagetytus/bisync"))
+}
+
+fn find_shared_binding_sidecar(bucket: &str, local_path: &str) -> Option<PathBuf> {
+    let dir = shared_bindings_cache_dir()?;
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".bindings.json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let same_bucket = json
+            .get("bucket")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v == bucket);
+        let same_path = json
+            .get("local_path")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v == local_path);
+        if same_bucket && same_path {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn normalized_pod_json_array(pods: Vec<String>) -> serde_json::Value {
+    let mut dedup = std::collections::BTreeSet::new();
+    for pod in pods {
+        if let Some(runtime_id) = shared_runtime_id(&pod) {
+            dedup.insert(format!("wannolot-{}", runtime_id));
+        }
+    }
+    serde_json::Value::Array(
+        dedup
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn shared_runtime_id(pod: &str) -> Option<String> {
+    let trimmed = pod
+        .trim()
+        .trim_start_matches("wannolot-")
+        .trim_start_matches("tytus-")
+        .to_string();
+    if trimmed.chars().all(|c| c.is_ascii_digit()) && !trimmed.is_empty() {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
+fn shared_runtime_status_for_pods(pods: &[String], slug: &str) -> serde_json::Value {
+    let mut status = serde_json::Map::new();
+    for pod in pods {
+        if let Some(runtime_id) = shared_runtime_id(pod) {
+            status.insert(
+                runtime_id,
+                serde_json::json!({
+                    "state": "credentials_only",
+                    "workspace_path": format!("/app/workspace/shared/{}", slug),
+                    "helper_mode": "legacy_bucket_root",
+                    "last_error": null
+                }),
+            );
+        }
+    }
+    serde_json::Value::Object(status)
+}
+
+/// POST /api/shared-folders/update-targets — body
+/// `{bucket, local_path, pods, targets}`. Updates the Mac-side binding sidecar
+/// with per-agent sharing policy. Provisioning is intentionally NOT kicked
+/// off here: the UI starts a streamed `/api/shared-folders/provision-pod`
+/// job after the sidecar write succeeds. Starting a hidden background
+/// provision here races that streamed job and can rotate/delete the same
+/// Garage keys concurrently.
+fn handle_shared_folders_update_targets(mut request: Request, _registry: &Registry) {
+    #[derive(serde::Deserialize)]
+    struct Target {
+        target_id: String,
+        pod_id: String,
+        label: String,
+        kind: String,
+        enabled: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct Body {
+        bucket: String,
+        local_path: String,
+        #[serde(default)]
+        pods: Vec<String>,
+        #[serde(default)]
+        targets: Vec<Target>,
+    }
+
+    if !sharing_mutations_enabled() {
+        respond_sharing_paused(request);
+        return;
+    }
+
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: Body = match serde_json::from_str(&buf) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":format!("bad json: {}", e)}),
+            );
+            return;
+        }
+    };
+    if !valid_sharing_bucket(&body.bucket) {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"invalid bucket","code":"sharing.targets.bucket.invalid"}),
+        );
+        return;
+    }
+    let Some(path) = find_shared_binding_sidecar(&body.bucket, &body.local_path) else {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({"error":"shared folder binding not found","code":"sharing.targets.binding.not_found"}),
+        );
+        return;
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({"error":format!("failed to read binding sidecar: {}", e)}),
+            );
+            return;
+        }
+    };
+    let mut json: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(j) => j,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({"error":format!("failed to parse binding sidecar: {}", e)}),
+            );
+            return;
+        }
+    };
+    normalize_shared_binding_value(&mut json);
+    let Some(obj) = json.as_object_mut() else {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({"error":"binding sidecar is not an object"}),
+        );
+        return;
+    };
+
+    obj.insert(
+        "schema_version".to_string(),
+        serde_json::Value::Number(2.into()),
+    );
+    obj.insert(
+        "pods_provisioned".to_string(),
+        normalized_pod_json_array(body.pods.clone()),
+    );
+    let slug = obj
+        .get("slug")
+        .and_then(|v| v.as_str())
+        .unwrap_or("shared")
+        .to_string();
+    obj.insert(
+        "runtime_status".to_string(),
+        shared_runtime_status_for_pods(&body.pods, &slug),
+    );
+
+    let targets = body
+        .targets
+        .into_iter()
+        .filter(|target| target.enabled)
+        .map(|target| {
+            let runtime_id = target
+                .pod_id
+                .trim()
+                .trim_start_matches("wannolot-")
+                .trim_start_matches("tytus-")
+                .to_string();
+            serde_json::json!({
+                "runtime_id": runtime_id,
+                "kind": target.kind,
+                "target_id": target.target_id,
+                "labels": [target.label],
+                "enabled": true,
+            })
+        })
+        .collect::<Vec<_>>();
+    obj.insert("targets".to_string(), serde_json::Value::Array(targets));
+
+    let Some(parent) = path.parent() else {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({"error":"invalid sidecar path"}),
+        );
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({"error":format!("failed to create sidecar dir: {}", e)}),
+        );
+        return;
+    }
+    let tmp = path.with_extension("bindings.json.tmp");
+    let bytes = serde_json::to_vec_pretty(&json).unwrap_or_else(|_| b"{}".to_vec());
+    if let Err(e) = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)) {
+        let _ = std::fs::remove_file(&tmp);
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({"error":format!("failed to write binding sidecar: {}", e)}),
+        );
+        return;
+    }
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({"ok": true, "provisioning_started": false}),
+    );
+}
+
+fn safe_shared_slug(local_path: &str, bucket: &str) -> String {
+    let basename = Path::new(local_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(bucket);
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in basename.chars().flat_map(|c| c.to_lowercase()) {
+        let ok = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        if ok {
+            out.push(ch);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let out = out.trim_matches('-').chars().take(63).collect::<String>();
+    if out.is_empty() {
+        bucket
+            .chars()
+            .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+            .take(63)
+            .collect::<String>()
+    } else {
+        out
+    }
+}
+
+fn normalize_shared_binding_value(binding: &mut serde_json::Value) {
+    let Some(obj) = binding.as_object_mut() else {
+        return;
+    };
+    let bucket = obj
+        .get("bucket")
+        .and_then(|v| v.as_str())
+        .unwrap_or("shared")
+        .to_string();
+    let local_path = obj
+        .get("local_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let slug = obj
+        .get("slug")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| safe_shared_slug(&local_path, &bucket));
+
+    obj.entry("schema_version".to_string())
+        .or_insert_with(|| serde_json::Value::Number(1.into()));
+    obj.entry("slug".to_string())
+        .or_insert_with(|| serde_json::Value::String(slug.clone()));
+    obj.entry("folder_id".to_string()).or_insert_with(|| {
+        serde_json::Value::String(format!("sf_{}_{}", bucket.replace('.', "-"), slug))
+    });
+    obj.entry("sync_layout".to_string())
+        .or_insert_with(|| serde_json::Value::String("legacy_bucket_root".to_string()));
+
+    let pods = obj
+        .get("pods_provisioned")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    obj.entry("targets".to_string()).or_insert_with(|| {
+        serde_json::Value::Array(
+            pods.iter()
+                .filter_map(|v| v.as_str())
+                .map(|pod| {
+                    let runtime_id = pod
+                        .trim()
+                        .trim_start_matches("wannolot-")
+                        .trim_start_matches("tytus-")
+                        .to_string();
+                    serde_json::json!({
+                        "runtime_id": runtime_id,
+                        "kind": "agent-runtime",
+                        "labels": [],
+                        "enabled": true
+                    })
+                })
+                .collect(),
+        )
+    });
+    let pod_strings = pods
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect::<Vec<_>>();
+    let fresh_status = shared_runtime_status_for_pods(&pod_strings, &slug);
+    if let Some(existing) = obj
+        .get_mut("runtime_status")
+        .and_then(|v| v.as_object_mut())
+    {
+        if let Some(fresh) = fresh_status.as_object() {
+            for (runtime_id, status) in fresh {
+                existing
+                    .entry(runtime_id.clone())
+                    .or_insert_with(|| status.clone());
+            }
+        }
+    } else {
+        obj.insert("runtime_status".to_string(), fresh_status);
+    }
 }
 
 const GARAGETYTUS_REQUIRED_HELPERS: &[&str] = &[
@@ -9417,6 +9802,7 @@ const GARAGETYTUS_REQUIRED_HELPERS: &[&str] = &[
     "garagetytus-folder-list",
     "garagetytus-folder-status",
     "garagetytus-folder-conflicts",
+    "garagetytus-folder-materialize",
     "garagetytus-refresh-watchdog",
     "garagetytus-pod-provision",
     "garagetytus-pod-refresh",
@@ -10840,6 +11226,169 @@ fn all_known_shared_buckets() -> Vec<String> {
     buckets.into_iter().collect()
 }
 
+fn shared_folders_agent_chat_context(pod_id: &str) -> Option<String> {
+    let canonical = normalize_pod_id_for_query(pod_id)?;
+    let mut lines = vec![
+        "Live Tytus shared-folder context. This is authoritative for this chat.".to_string(),
+        "This context supersedes stale memory from previous chat turns or previous failed checks.".to_string(),
+        "If sample files are listed for a shared folder, answer that the folder is available at the listed mounted path.".to_string(),
+        "If the user asks about shared folders, use these mounted POSIX paths before saying a folder is missing.".to_string(),
+        "Do not claim you ran shell commands unless you actually used a tool; the file samples below come from the Tytus tray shared-folder index.".to_string(),
+    ];
+    let mut count = 0usize;
+    for binding in shared_bindings_from_cache() {
+        let provisioned_here = binding
+            .get("pods_provisioned")
+            .and_then(|v| v.as_array())
+            .map(|pods| {
+                pods.iter().filter_map(|v| v.as_str()).any(|raw| {
+                    normalize_pod_id_for_query(raw).as_deref() == Some(canonical.as_str())
+                })
+            })
+            .unwrap_or(false);
+        if !provisioned_here {
+            continue;
+        }
+        let bucket = binding
+            .get("bucket")
+            .and_then(|v| v.as_str())
+            .unwrap_or("shared");
+        let slug = binding
+            .get("slug")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .unwrap_or(bucket);
+        let local_path = binding
+            .get("local_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        lines.push(format!(
+            "- {bucket}: Mac `{local_path}` is mounted in this pod at `/app/workspace/Shared/{slug}/` (also `/app/workspace/shared/{slug}/`)."
+        ));
+        let samples = shared_folder_sample_files(local_path, slug, 8);
+        if !samples.is_empty() {
+            lines.push(format!("  sample files: {}", samples.join(", ")));
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    lines.push(
+        "For the marketing bucket specifically, check `/app/workspace/Shared/marketing/` first."
+            .to_string(),
+    );
+    lines.push(
+        "Recommended verification command: `find /app/workspace/Shared -maxdepth 3 -type f | head -20`."
+            .to_string(),
+    );
+    Some(lines.join("\n"))
+}
+
+fn shared_folders_direct_chat_answer(message: &str, pod_id: &str) -> Option<String> {
+    let lower = message.to_ascii_lowercase();
+    if !(lower.contains("shared folder")
+        || lower.contains("shared-folder")
+        || lower.contains("marketing folder")
+        || lower.contains("marketing shared")
+        || lower.contains("access to marketing")
+        || lower.contains("/app/workspace/shared"))
+    {
+        return None;
+    }
+    let canonical = normalize_pod_id_for_query(pod_id)?;
+    let mut sections = Vec::new();
+    for binding in shared_bindings_from_cache() {
+        let provisioned_here = binding
+            .get("pods_provisioned")
+            .and_then(|v| v.as_array())
+            .map(|pods| {
+                pods.iter().filter_map(|v| v.as_str()).any(|raw| {
+                    normalize_pod_id_for_query(raw).as_deref() == Some(canonical.as_str())
+                })
+            })
+            .unwrap_or(false);
+        if !provisioned_here {
+            continue;
+        }
+        let bucket = binding
+            .get("bucket")
+            .and_then(|v| v.as_str())
+            .unwrap_or("shared");
+        if lower.contains("marketing") && bucket != "marketing" {
+            continue;
+        }
+        let slug = binding
+            .get("slug")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .unwrap_or(bucket);
+        let local_path = binding
+            .get("local_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let samples = shared_folder_sample_files(local_path, slug, 5);
+        let sample_text = if samples.is_empty() {
+            "No sample files found in the local binding index.".to_string()
+        } else {
+            samples
+                .iter()
+                .enumerate()
+                .map(|(idx, path)| format!("{}. {}", idx + 1, path))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        sections.push(format!(
+            "Yes. `{bucket}` is shared with this runtime pod.\n\nExact path: `/app/workspace/Shared/{slug}/`\nAlias: `/app/workspace/shared/{slug}/`\nMac source: `{local_path}`\n\nSample files:\n{sample_text}"
+        ));
+    }
+    if sections.is_empty() {
+        return None;
+    }
+    Some(sections.join("\n\n---\n\n"))
+}
+
+fn shared_folder_sample_files(local_path: &str, slug: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let root = PathBuf::from(local_path);
+    if !root.is_absolute() || !root.is_dir() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries = entries.flatten().map(|e| e.path()).collect::<Vec<_>>();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+            if name == ".DS_Store" || name.starts_with(".tmp-") {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(&root) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            out.push(format!("/app/workspace/Shared/{slug}/{rel}"));
+            if out.len() >= limit {
+                return out;
+            }
+        }
+    }
+    out
+}
+
 /// POST /api/shared-folders/provision-pod — body
 /// `{ "pod":"02", "buckets":["shared"] }`. Spawns
 /// `garagetytus-pod-provision 02 --bucket shared ...` and streams via
@@ -10885,10 +11434,11 @@ fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry
         }
     };
 
-    let buckets = if body.buckets.is_empty() {
-        all_known_shared_buckets()
-    } else {
+    let buckets = {
         let mut dedup = std::collections::BTreeSet::new();
+        for bucket in all_known_shared_buckets() {
+            dedup.insert(bucket);
+        }
         for bucket in body.buckets {
             let bucket = bucket.trim().to_string();
             if !valid_sharing_bucket(&bucket) {
@@ -14483,6 +15033,24 @@ mod tests {
         assert!(shared_folder_action_argv("../../../etc/passwd").is_none());
         assert!(shared_folder_action_argv("list\0").is_none());
         assert!(shared_folder_action_argv("list ").is_none());
+    }
+
+    #[test]
+    fn shared_runtime_status_tracks_selected_pods() {
+        let status = shared_runtime_status_for_pods(
+            &[
+                "wannolot-01".to_string(),
+                "tytus-02".to_string(),
+                "bad;pod".to_string(),
+            ],
+            "shared",
+        );
+        assert_eq!(
+            status["01"]["workspace_path"],
+            "/app/workspace/shared/shared"
+        );
+        assert_eq!(status["02"]["helper_mode"], "legacy_bucket_root");
+        assert!(status.get("bad;pod").is_none());
     }
 
     #[test]
