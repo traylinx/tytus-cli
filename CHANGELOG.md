@@ -1,3 +1,7 @@
+## 0.7.35 - 2026-06-06
+
+- Embeds `tytus-os` `v1.0.74-shared-folder-bucket-autofill`, so the Bind shared folder dialog derives the Garage bucket from the selected local folder name (for example `Outbox` → `outbox`) instead of leaving the default/blank bucket.
+
 ## 0.7.34 - 2026-06-06
 
 - Embeds `tytus-os` `v1.0.73-shared-folder-create-guards`, warning users before duplicate bucket, same-folder, or nested shared-folder binds can start a failing job.
