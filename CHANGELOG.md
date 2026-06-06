@@ -1,3 +1,7 @@
+## 0.7.32 - 2026-06-06
+
+- Embeds `tytus-os` `v1.0.71-shared-folder-inline-save`, keeping Shared folder settings open after Save and showing an inline saved state while preserving the notification.
+
 ## 0.7.31 - 2026-06-06
 
 - Fixed shared-folder agent chat to respect per-agent targets, not just the runtime pod mount. If Hermie is removed from `marketing`, Hermie now says no even when pod 01 still has Garage credentials.
