@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::TrayIconBuilder;
 
+mod desktop_llm;
 mod error_ui;
 mod files;
 mod gateway_probe;

@@ -19,6 +19,12 @@
     "launch": {
       "macos": { "kind": "terminal", "target": "opencode" },
       "linux": { "kind": "terminal", "target": "opencode" }
+    },
+    "llm_setup": {
+      "adapter": "opencode",
+      "provider": "tytus-ail",
+      "default_model": "ail-compound",
+      "supports_default": true
     }
   },
   {
@@ -41,6 +47,12 @@
     "launch": {
       "macos": { "kind": "terminal", "target": "pi" },
       "linux": { "kind": "terminal", "target": "pi" }
+    },
+    "llm_setup": {
+      "adapter": "pi",
+      "provider": "tytus-ail",
+      "default_model": "ail-compound",
+      "supports_default": true
     }
   },
   {
@@ -173,6 +185,12 @@
     "launch": {
       "macos": { "kind": "app", "target": "OpenWork" },
       "linux": { "kind": "app", "target": "openwork" }
+    },
+    "llm_setup": {
+      "adapter": "opencode",
+      "provider": "tytus-ail",
+      "default_model": "ail-compound",
+      "supports_default": true
     }
   }
 ]

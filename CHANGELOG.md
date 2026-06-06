@@ -1,3 +1,8 @@
+## 0.7.36 - 2026-06-06
+
+- Embeds `tytus-os` `v1.0.75-tytus-ail-setup`, adding one-click Tytus AIL provider setup in the App Store for OpenCode, OpenWork, and Pi.
+- Adds safe tray API adapters for desktop LLM configuration with fixed config paths, backups, atomic writes, and frontend status that never exposes the full user key.
+
 ## 0.7.35 - 2026-06-06
 
 - Embeds `tytus-os` `v1.0.74-shared-folder-bucket-autofill`, so the Bind shared folder dialog derives the Garage bucket from the selected local folder name (for example `Outbox` → `outbox`) instead of leaving the default/blank bucket.

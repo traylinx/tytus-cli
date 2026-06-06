@@ -4118,6 +4118,12 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/apps/install") => {
             handle_apps_install(request);
         }
+        (Method::Get, "/api/apps/llm-status") => {
+            handle_apps_llm_status(request, &query);
+        }
+        (Method::Post, "/api/apps/configure-llm") => {
+            handle_apps_configure_llm(request);
+        }
         (Method::Get, p) if p.starts_with("/api/jobs/") && p.ends_with("/stream") => {
             let job_id = p
                 .trim_start_matches("/api/jobs/")
@@ -5375,6 +5381,168 @@ fn handle_apps_install(mut request: Request) {
             200,
             &serde_json::json!({ "ok": true, "action": "opened_url", "url": url, "id": parsed.app_id }),
         );
+    }
+}
+
+// ── /api/apps/* LLM provider setup ───────────────────────────
+
+#[derive(serde::Deserialize)]
+struct AppsConfigureLlmRequest {
+    app_id: String,
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+fn app_id_from_query(query: &str) -> Option<String> {
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == "app_id" && valid_app_id(v) {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn apps_catalog() -> Result<Vec<serde_json::Value>, String> {
+    serde_json::from_slice(APPS_JSON).map_err(|e| format!("catalog parse error: {e}"))
+}
+
+fn catalog_entry_for_app<'a>(
+    catalog: &'a [serde_json::Value],
+    app_id: &str,
+) -> Option<&'a serde_json::Value> {
+    catalog
+        .iter()
+        .find(|e| e.get("id").and_then(|i| i.as_str()) == Some(app_id))
+}
+
+fn llm_adapter_for_entry(entry: &serde_json::Value) -> Option<&str> {
+    entry
+        .get("llm_setup")
+        .and_then(|v| v.get("adapter"))
+        .and_then(|v| v.as_str())
+}
+
+fn tytus_ail_provider() -> Result<crate::desktop_llm::TytusAilProvider, String> {
+    let snap = compute_state_snapshot();
+    let inc = snap
+        .included
+        .first()
+        .ok_or_else(|| "no included Tytus AIL gateway available".to_string())?;
+    if inc.user_key.trim().is_empty() {
+        return Err("Tytus AIL user key is missing; run Tytus connect first".to_string());
+    }
+
+    let base = if snap.tunnel_active {
+        inc.endpoint.clone()
+    } else if let Some(public) = inc.public_url.as_ref() {
+        public.clone()
+    } else {
+        inc.endpoint.clone()
+    };
+    Ok(crate::desktop_llm::TytusAilProvider {
+        base_url: format!("{}/v1", base.trim_end_matches('/').trim_end_matches("/v1")),
+        api_key: inc.user_key.clone(),
+        model: crate::desktop_llm::TYTUS_MODEL_ID.to_string(),
+    })
+}
+
+fn llm_setup_context(
+    app_id: &str,
+) -> Result<(String, crate::desktop_llm::TytusAilProvider), (u16, serde_json::Value)> {
+    if !valid_app_id(app_id) {
+        return Err((400, serde_json::json!({ "error": "invalid id" })));
+    }
+    let catalog = apps_catalog().map_err(|e| (500, serde_json::json!({ "error": e })))?;
+    let entry = catalog_entry_for_app(&catalog, app_id)
+        .ok_or_else(|| (404, serde_json::json!({ "error": "unknown app" })))?;
+    let adapter = llm_adapter_for_entry(entry)
+        .ok_or_else(|| {
+            (
+                404,
+                serde_json::json!({ "error": "llm setup is not supported for this app" }),
+            )
+        })?
+        .to_string();
+    let provider = tytus_ail_provider().map_err(|e| {
+        (
+            409,
+            serde_json::json!({ "error": "gateway_unavailable", "message": e }),
+        )
+    })?;
+    Ok((adapter, provider))
+}
+
+fn handle_apps_llm_status(request: Request, query: &str) {
+    let Some(app_id) = app_id_from_query(query) else {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({ "error": "missing or invalid app_id" }),
+        );
+        return;
+    };
+    let (adapter, provider) = match llm_setup_context(&app_id) {
+        Ok(v) => v,
+        Err((status, body)) => {
+            respond_json(request, status, &body);
+            return;
+        }
+    };
+    match crate::desktop_llm::status(&app_id, &adapter, &provider) {
+        Ok(status) => respond_json(request, 200, &status),
+        Err(e) => respond_json(request, 500, &serde_json::json!({ "error": e })),
+    }
+}
+
+fn handle_apps_configure_llm(mut request: Request) {
+    let mut body = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+        respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+        return;
+    }
+    let parsed: AppsConfigureLlmRequest = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+            return;
+        }
+    };
+    if parsed
+        .provider
+        .as_deref()
+        .unwrap_or(crate::desktop_llm::TYTUS_PROVIDER_ID)
+        != crate::desktop_llm::TYTUS_PROVIDER_ID
+    {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({ "error": "unsupported provider" }),
+        );
+        return;
+    }
+    let (adapter, provider) = match llm_setup_context(&parsed.app_id) {
+        Ok(v) => v,
+        Err((status, body)) => {
+            respond_json(request, status, &body);
+            return;
+        }
+    };
+    if !crate::desktop_llm::adapter_supported(&adapter) {
+        respond_json(
+            request,
+            501,
+            &serde_json::json!({
+                "error": "adapter_not_implemented",
+                "message": format!("No safe Tytus AIL adapter is available for {adapter} yet.")
+            }),
+        );
+        return;
+    }
+    match crate::desktop_llm::configure(&parsed.app_id, &adapter, &provider) {
+        Ok(result) => respond_json(request, 200, &result),
+        Err(e) => respond_json(request, 500, &serde_json::json!({ "error": e })),
     }
 }
 
