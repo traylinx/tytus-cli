@@ -1,7 +1,7 @@
 {
-  "version": "0.7.29",
-  "release_tag": "v0.7.29",
-  "updated_at": "2026-06-05",
+  "version": "0.7.33",
+  "release_tag": "v0.7.33",
+  "updated_at": "2026-06-06",
   "platforms": {
     "macos": {
       "label": "macOS",
@@ -34,10 +34,8 @@
         "command": "powershell -c \"irm https://get.traylinx.com/install.ps1 | iex\""
       },
       "alternative": {
-        "available": true,
-        "kind": "zip",
-        "url": "https://github.com/traylinx/tytus-cli/releases/download/v0.7.29/tytus-windows-x86_64.zip",
-        "sha256": "092326a38a2f014c8e4557b775587416847314324aa4feab4ba2949f48c50893"
+        "available": false,
+        "available_label": "Use PowerShell install command"
       },
       "extra": "PowerShell installer first; zip fallback for locked-down machines"
     }

@@ -1,3 +1,7 @@
+## 0.7.33 - 2026-06-06
+
+- Embeds `tytus-os` `v1.0.72-shared-folder-bind-recovery`, making new shared-folder binds resilient when the helper completes but the browser job stream reports failed/lost. The UI now recovers the completed binding and saves per-agent access automatically, removing the second manual Settings save.
+
 ## 0.7.32 - 2026-06-06
 
 - Embeds `tytus-os` `v1.0.71-shared-folder-inline-save`, keeping Shared folder settings open after Save and showing an inline saved state while preserving the notification.

@@ -2,10 +2,10 @@
   "$schema": "https://tytus.traylinx.com/schema/app/v1.json",
   "id": "atomek",
   "name": "Atomek",
-  "version": "0.4.33-dev",
+  "version": "0.4.35-local-root-collapse",
   "icon": "atomek:mark",
   "category": "Productivity",
-  "description": "Atomek — branded Tytus Resource Fabric cockpit with embedded docs/skills for OpenClaw, Hermes, shared folders, local agents, app skills, files, chat, artifacts, and approval-gated outputs.",
+  "description": "Atomek \u2014 branded Tytus Resource Fabric cockpit with embedded docs/skills for OpenClaw, Hermes, shared folders, local agents, app skills, files, chat, artifacts, and approval-gated outputs.",
   "window": {
     "defaultSize": {
       "width": 1200,
