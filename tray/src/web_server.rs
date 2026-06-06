@@ -9451,6 +9451,86 @@ fn shared_bindings_from_cache() -> Vec<serde_json::Value> {
     bindings
 }
 
+fn shared_folder_bind_conflict(local_path: &str, bucket: &str) -> Option<(u16, serde_json::Value)> {
+    shared_folder_bind_conflict_for_bindings(local_path, bucket, &shared_bindings_from_cache())
+}
+
+fn shared_folder_bind_conflict_for_bindings(
+    local_path: &str,
+    bucket: &str,
+    bindings: &[serde_json::Value],
+) -> Option<(u16, serde_json::Value)> {
+    let requested = Path::new(local_path).canonicalize().ok()?;
+    let requested_s = requested
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+
+    for binding in bindings {
+        let existing_bucket = binding.get("bucket").and_then(|v| v.as_str()).unwrap_or("");
+        let existing_local = binding
+            .get("local_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if existing_bucket == bucket {
+            return Some((
+                409,
+                serde_json::json!({
+                    "error": format!(
+                        "bucket {:?} is already bound to {}",
+                        bucket, existing_local
+                    ),
+                    "code": "shared_folders.bind.bucket_already_bound",
+                    "bucket": bucket,
+                    "existing_local_path": existing_local,
+                }),
+            ));
+        }
+
+        if existing_local.is_empty() {
+            continue;
+        }
+        let existing = match Path::new(existing_local).canonicalize() {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        let existing_s = existing.to_string_lossy().trim_end_matches('/').to_string();
+
+        if requested_s == existing_s {
+            return Some((
+                409,
+                serde_json::json!({
+                    "error": format!(
+                        "local_path is already bound as bucket {:?}",
+                        existing_bucket
+                    ),
+                    "code": "shared_folders.bind.path_already_bound",
+                    "bucket": existing_bucket,
+                    "existing_local_path": existing_local,
+                }),
+            ));
+        }
+
+        if requested.starts_with(&existing) || existing.starts_with(&requested) {
+            return Some((
+                409,
+                serde_json::json!({
+                    "error": format!(
+                        "local_path overlaps existing shared folder bucket {:?} at {}",
+                        existing_bucket, existing_local
+                    ),
+                    "code": "shared_folders.bind.nested_binding",
+                    "bucket": existing_bucket,
+                    "existing_local_path": existing_local,
+                }),
+            ));
+        }
+    }
+
+    None
+}
+
 fn shared_bindings_cache_dir() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
@@ -11133,6 +11213,11 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
             );
             return;
         }
+    }
+
+    if let Some((status, payload)) = shared_folder_bind_conflict(&body.local_path, &body.bucket) {
+        respond_json(request, status, &payload);
+        return;
     }
 
     // The Mac-side rclone remote points at Garage through the active local
@@ -16011,6 +16096,62 @@ mod tests {
         assert!(!tmp.exists(), "tmp file must not survive the rename");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_folder_bind_conflict_rejects_duplicate_bucket() {
+        let root = std::env::temp_dir().join(format!(
+            "tytus-shared-conflict-{}-bucket",
+            std::process::id()
+        ));
+        let existing = root.join("existing");
+        let requested = root.join("requested");
+        std::fs::create_dir_all(&existing).expect("existing dir");
+        std::fs::create_dir_all(&requested).expect("requested dir");
+        let bindings = vec![serde_json::json!({
+            "bucket": "shared",
+            "local_path": existing.to_string_lossy(),
+        })];
+
+        let conflict = shared_folder_bind_conflict_for_bindings(
+            &requested.to_string_lossy(),
+            "shared",
+            &bindings,
+        )
+        .expect("duplicate bucket conflict");
+
+        assert_eq!(conflict.0, 409);
+        assert_eq!(
+            conflict.1.get("code").and_then(|v| v.as_str()),
+            Some("shared_folders.bind.bucket_already_bound")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shared_folder_bind_conflict_rejects_nested_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "tytus-shared-conflict-{}-nested",
+            std::process::id()
+        ));
+        let parent = root.join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).expect("child dir");
+        let bindings = vec![serde_json::json!({
+            "bucket": "parent",
+            "local_path": parent.to_string_lossy(),
+        })];
+
+        let conflict =
+            shared_folder_bind_conflict_for_bindings(&child.to_string_lossy(), "child", &bindings)
+                .expect("nested path conflict");
+
+        assert_eq!(conflict.0, 409);
+        assert_eq!(
+            conflict.1.get("code").and_then(|v| v.as_str()),
+            Some("shared_folders.bind.nested_binding")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Codex gate 5: two successive bind_tray(0) calls must produce

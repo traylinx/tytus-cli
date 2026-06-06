@@ -1,3 +1,8 @@
+## 0.7.34 - 2026-06-06
+
+- Embeds `tytus-os` `v1.0.73-shared-folder-create-guards`, warning users before duplicate bucket, same-folder, or nested shared-folder binds can start a failing job.
+- Rejects duplicate/nested shared-folder creation in the tray API before launching Garage/Rclone work, and pins garagetytus `8dd59b8` so helper scripts fail fast instead of leaving stale bisync locks.
+
 ## 0.7.33 - 2026-06-06
 
 - Embeds `tytus-os` `v1.0.72-shared-folder-bind-recovery`, making new shared-folder binds resilient when the helper completes but the browser job stream reports failed/lost. The UI now recovers the completed binding and saves per-agent access automatically, removing the second manual Settings save.
