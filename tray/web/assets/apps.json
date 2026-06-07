@@ -699,6 +699,113 @@
     ]
   },
   {
+    "id": "open-design",
+    "name": "Open Design",
+    "description": "Local-first agentic design workspace with chat, design systems, skills, artifacts, previews, media generation, and external agent support.",
+    "category": "AI & ML",
+    "icon": "Package",
+    "url": "https://github.com/nexu-io/open-design",
+    "docs": "https://github.com/nexu-io/open-design",
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ],
+    "detect": {
+      "macos": [
+        "Open Design"
+      ],
+      "linux": [
+        "open-design"
+      ],
+      "windows": [
+        "Open Design",
+        "OpenDesign"
+      ]
+    },
+    "install": {
+      "macos": "Tytus selects the matching Open Design macOS release automatically (Intel x64 or Apple Silicon arm64) and verifies the signed app before first launch.",
+      "linux": "The stable Open Design release does not currently publish Linux desktop assets. Use Docker/source from the docs until a Linux AppImage is published.",
+      "windows": "Tytus installs the Open Design Windows x64 setup release. Windows ARM64 is not supported yet."
+    },
+    "launch": {
+      "macos": {
+        "kind": "app",
+        "target": "Open Design"
+      },
+      "linux": {
+        "kind": "terminal",
+        "target": "open-design"
+      },
+      "windows": {
+        "kind": "app",
+        "target": "Open Design"
+      }
+    },
+    "llm_setup": {
+      "adapter": "open-design",
+      "provider": "tytus-ail",
+      "default_model": "ail-compound",
+      "supports_default": true
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "x64",
+        "kind": "github_release_dmg",
+        "label": "Install Open Design for Intel Mac",
+        "repo": "nexu-io/open-design",
+        "asset_regex": "^open-design-[0-9]+\\.[0-9]+\\.[0-9]+-mac-x64\\.dmg$"
+      },
+      {
+        "os": "macos",
+        "arch": "arm64",
+        "kind": "github_release_dmg",
+        "label": "Install Open Design for Apple Silicon",
+        "repo": "nexu-io/open-design",
+        "asset_regex": "^open-design-[0-9]+\\.[0-9]+\\.[0-9]+-mac-arm64\\.dmg$"
+      },
+      {
+        "os": "windows",
+        "arch": "x64",
+        "kind": "github_release_exe",
+        "label": "Install Open Design for Windows x64",
+        "repo": "nexu-io/open-design",
+        "asset_regex": "^open-design-[0-9]+\\.[0-9]+\\.[0-9]+-win-x64-setup\\.exe$"
+      },
+      {
+        "os": "windows",
+        "arch": "arm64",
+        "kind": "github_release_exe",
+        "label": "Windows ARM64 unsupported",
+        "repo": "nexu-io/open-design",
+        "asset_regex": "^$",
+        "disabled": true,
+        "disabled_reason": "Open Design Windows ARM64 support is not evidenced by current release assets. Use Windows x64, macOS, or Docker/source."
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "kind": "github_release_appimage",
+        "label": "Linux desktop unsupported",
+        "repo": "nexu-io/open-design",
+        "asset_regex": "^$",
+        "disabled": true,
+        "disabled_reason": "The latest stable Open Design release does not publish Linux x64 desktop assets. Use Docker/source from the Open Design docs until an AppImage is published."
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "kind": "github_release_appimage",
+        "label": "Linux ARM64 desktop unsupported",
+        "repo": "nexu-io/open-design",
+        "asset_regex": "^$",
+        "disabled": true,
+        "disabled_reason": "The latest stable Open Design release does not publish Linux ARM64 desktop assets. Use Docker/source from the Open Design docs until an ARM64 desktop artifact is published."
+      }
+    ]
+  },
+  {
     "id": "odysseus",
     "name": "Odysseus",
     "description": "Self-hosted local-first AI workspace with chat, agents, tools, documents, memory, email, calendar, and deep research.",

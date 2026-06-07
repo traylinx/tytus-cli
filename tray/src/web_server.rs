@@ -5038,6 +5038,7 @@ fn desktop_target_label(platform: &str, arch: &str) -> String {
 struct ResolvedInstaller {
     kind: String,
     label: String,
+    app_name: Option<String>,
     command: Option<String>,
     url: Option<String>,
     repo: Option<String>,
@@ -5167,9 +5168,22 @@ fn resolve_app_installer(
                     }
                 })
                 .to_string();
+            let app_name = installer
+                .get("app_name")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    entry
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                        .map(str::to_string)
+                });
             return Some(ResolvedInstaller {
                 kind,
                 label,
+                app_name,
                 command,
                 url,
                 repo,
@@ -5194,6 +5208,11 @@ fn resolve_app_installer(
             "url".to_string()
         },
         label: "Install".to_string(),
+        app_name: entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string),
         command: install_is_command(cmd).then(|| cmd.to_string()),
         url: (!install_is_command(cmd)).then(|| {
             entry
@@ -5747,26 +5766,39 @@ fn github_release_asset_install_command(
         .asset_regex
         .as_deref()
         .ok_or_else(|| "dynamic GitHub installer is missing asset_regex".to_string())?;
+    let app_name = installer
+        .app_name
+        .as_deref()
+        .unwrap_or_else(|| repo.rsplit('/').next().unwrap_or("app"));
+    let install_slug = repo
+        .rsplit('/')
+        .next()
+        .unwrap_or("app")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>();
 
     if platform == "windows" {
         // The command runs inside a generated .cmd file. Keep the PowerShell
         // payload self-contained and catalog-only; no request data reaches it.
         return Ok(format!(
-            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference='Stop'; $repo={repo:?}; $pattern={pattern:?}; $release=Invoke-RestMethod -Uri ('https://api.github.com/repos/'+$repo+'/releases/latest'); $asset=$release.assets | Where-Object {{ $_.name -match $pattern }} | Select-Object -First 1; if (-not $asset) {{ throw 'No matching stable OpenWork release asset for this Windows architecture' }}; $dir=Join-Path $env:TEMP 'tytus-openwork-install'; New-Item -ItemType Directory -Force -Path $dir | Out-Null; $dest=Join-Path $dir $asset.name; Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $dest; Start-Process $dest; Write-Host ('Opened installer: '+$dest)\"",
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference='Stop'; $repo={repo:?}; $pattern={pattern:?}; $appName={app_name:?}; $slug={slug:?}; $release=Invoke-RestMethod -Uri ('https://api.github.com/repos/'+$repo+'/releases/latest'); $asset=$release.assets | Where-Object {{ $_.name -match $pattern }} | Select-Object -First 1; if (-not $asset) {{ throw ('No matching stable '+$appName+' release asset for this Windows architecture') }}; $dir=Join-Path $env:TEMP ('tytus-'+$slug+'-install'); New-Item -ItemType Directory -Force -Path $dir | Out-Null; $dest=Join-Path $dir $asset.name; Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $dest; Start-Process $dest; Write-Host ('Opened installer: '+$dest)\"",
             repo = repo,
             pattern = asset_regex,
+            app_name = app_name,
+            slug = install_slug,
         ));
     }
 
     let (dest_name, open_cmd) = if platform == "linux" {
         (
-            "openwork-installer.AppImage",
+            "desktop-installer.AppImage",
             "chmod +x \"$dest\" || true\n( xdg-open \"$dest\" >/dev/null 2>&1 || echo \"Downloaded installer: $dest\" )",
         )
     } else {
         (
-            "openwork-installer.dmg",
-            "mount_dir=$(mktemp -d \"${TMPDIR:-/tmp}/tytus-openwork-mount.XXXXXX\")\n\
+            "desktop-installer.dmg",
+            "mount_dir=$(mktemp -d \"${TMPDIR:-/tmp}/tytus-desktop-app-mount.XXXXXX\")\n\
              cleanup_mount() { hdiutil detach \"$mount_dir\" >/dev/null 2>&1 || true; rmdir \"$mount_dir\" >/dev/null 2>&1 || true; }\n\
              trap cleanup_mount EXIT\n\
              echo \"Mounting $dest\"\n\
@@ -5787,19 +5819,19 @@ fn github_release_asset_install_command(
 
     let verify_cmd = if platform == "macos" {
         r#"
-verify_openwork_app() {
-  if [ "${app_name:-}" != "OpenWork.app" ]; then return 0; fi
-  echo "Verifying OpenWork code signature before first launch"
+verify_macos_app() {
+  if [ -z "${target:-}" ] || [ ! -d "$target" ]; then return 0; fi
+  echo "Verifying $app_name code signature before first launch"
   if ! codesign --verify --deep --strict --verbose=4 "$target"; then
-    echo "OpenWork install failed validation: code signature is invalid. The published artifact or local bundle is broken."
+    echo "$app_name install failed validation: code signature is invalid. The published artifact or local bundle is broken."
     return 1
   fi
   if ! spctl --assess --type execute --verbose=4 "$target"; then
-    echo "OpenWork install failed validation: Gatekeeper rejects this app."
+    echo "$app_name install failed validation: Gatekeeper rejects this app."
     return 1
   fi
 }
-verify_openwork_app
+verify_macos_app
 "#
     } else {
         ""
@@ -5809,10 +5841,12 @@ verify_openwork_app
         "set -eo pipefail\n\
          repo={repo}\n\
          pattern={pattern}\n\
-         dir=\"${{TMPDIR:-/tmp}}/tytus-openwork-install\"\n\
+         app_name={app_name}\n\
+         install_slug={slug}\n\
+         dir=\"${{TMPDIR:-/tmp}}/tytus-$install_slug-install\"\n\
          dest=\"$dir/{dest_name}\"\n\
          mkdir -p \"$dir\"\n\
-         echo \"Fetching latest stable OpenWork release for this machine…\"\n\
+         echo \"Fetching latest stable $app_name release for this machine…\"\n\
          asset_url=$(curl -fsSL \"https://api.github.com/repos/$repo/releases/latest\" | python3 -c 'import json,re,sys; pattern=sys.argv[1]; data=json.load(sys.stdin); asset=next((a for a in data.get(\"assets\",[]) if re.match(pattern, a.get(\"name\",\"\"))), None); sys.exit(\"No matching stable release asset\") if asset is None else print(asset[\"browser_download_url\"])' \"$pattern\")\n\
          echo \"Downloading $asset_url\"\n\
          curl -L --fail --progress-bar -o \"$dest\" \"$asset_url\"\n\
@@ -5822,6 +5856,8 @@ verify_openwork_app
          echo \"Done. Refresh Tytus App Store if it does not update automatically.\"",
         repo = shell_single_quote(repo),
         pattern = shell_single_quote(asset_regex),
+        app_name = shell_single_quote(app_name),
+        slug = shell_single_quote(&install_slug),
         dest_name = dest_name,
         open_cmd = open_cmd,
         verify_cmd = verify_cmd,
@@ -14695,6 +14731,55 @@ mod tests {
 
         assert!(resolve_app_installer(openwork, "windows", "arm64").is_none());
         assert!(disabled_installer_reason(openwork, "windows", "arm64")
+            .expect("Windows ARM64 reason")
+            .contains("Windows ARM64 support is not evidenced"));
+    }
+
+    #[test]
+    fn open_design_catalog_uses_audited_arch_specific_installers() {
+        let catalog: Vec<serde_json::Value> =
+            serde_json::from_slice(APPS_JSON).expect("apps.json must be valid JSON");
+        let open_design = catalog
+            .iter()
+            .find(|entry| entry.get("id").and_then(|v| v.as_str()) == Some("open-design"))
+            .expect("open-design catalog entry");
+
+        let intel =
+            resolve_app_installer(open_design, "macos", "x64").expect("Intel Mac installer");
+        assert_eq!(intel.kind, "github_release_dmg");
+        assert_eq!(intel.label, "Install Open Design for Intel Mac");
+        assert_eq!(intel.repo.as_deref(), Some("nexu-io/open-design"));
+        assert_eq!(
+            intel.asset_regex.as_deref(),
+            Some(r"^open-design-[0-9]+\.[0-9]+\.[0-9]+-mac-x64\.dmg$")
+        );
+
+        let apple =
+            resolve_app_installer(open_design, "macos", "arm64").expect("Apple Silicon installer");
+        assert_eq!(apple.kind, "github_release_dmg");
+        assert_eq!(
+            apple.asset_regex.as_deref(),
+            Some(r"^open-design-[0-9]+\.[0-9]+\.[0-9]+-mac-arm64\.dmg$")
+        );
+
+        let windows =
+            resolve_app_installer(open_design, "windows", "x64").expect("Windows x64 installer");
+        assert_eq!(windows.kind, "github_release_exe");
+        assert_eq!(
+            windows.asset_regex.as_deref(),
+            Some(r"^open-design-[0-9]+\.[0-9]+\.[0-9]+-win-x64-setup\.exe$")
+        );
+
+        assert!(resolve_app_installer(open_design, "linux", "x64").is_none());
+        assert!(disabled_installer_reason(open_design, "linux", "x64")
+            .expect("Linux x64 reason")
+            .contains("does not publish Linux x64 desktop assets"));
+        assert!(resolve_app_installer(open_design, "linux", "arm64").is_none());
+        assert!(disabled_installer_reason(open_design, "linux", "arm64")
+            .expect("Linux ARM64 reason")
+            .contains("does not publish Linux ARM64 desktop assets"));
+        assert!(resolve_app_installer(open_design, "windows", "arm64").is_none());
+        assert!(disabled_installer_reason(open_design, "windows", "arm64")
             .expect("Windows ARM64 reason")
             .contains("Windows ARM64 support is not evidenced"));
     }

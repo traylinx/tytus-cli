@@ -50,7 +50,7 @@ pub struct LlmConfigResult {
 }
 
 pub fn adapter_supported(adapter: &str) -> bool {
-    matches!(adapter, "opencode" | "pi" | "odysseus")
+    matches!(adapter, "opencode" | "pi" | "odysseus" | "open-design")
 }
 
 pub fn status(
@@ -62,6 +62,7 @@ pub fn status(
         "opencode" => opencode_status(app_id, provider),
         "pi" => pi_status(app_id, provider),
         "odysseus" => odysseus_status(app_id, provider),
+        "open-design" => open_design_status(app_id, provider),
         other => Ok(unsupported_status(app_id, other, provider)),
     }
 }
@@ -75,6 +76,7 @@ pub fn configure(
         "opencode" => configure_opencode(app_id, provider),
         "pi" => configure_pi(app_id, provider),
         "odysseus" => configure_odysseus(app_id, provider),
+        "open-design" => configure_open_design(app_id, provider),
         other => Err(format!(
             "No safe Tytus AIL adapter is available for {other} yet."
         )),
@@ -653,6 +655,240 @@ fn configure_odysseus(
     })
 }
 
+fn open_design_data_roots() -> Result<Vec<PathBuf>, String> {
+    let home = home_dir()?;
+    let mut roots = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        let base = home.join("Library/Application Support/Open Design/namespaces");
+        for ns in ["release-stable-intel", "release-stable-arm64", "default"] {
+            roots.push(base.join(ns).join("data"));
+        }
+        if let Ok(entries) = fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let data = entry.path().join("data");
+                if data.is_dir() {
+                    roots.push(data);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let base = PathBuf::from(appdata).join("Open Design/namespaces");
+            for ns in ["release-stable-win", "default"] {
+                roots.push(base.join(ns).join("data"));
+            }
+            if let Ok(entries) = fs::read_dir(&base) {
+                for entry in entries.flatten() {
+                    let data = entry.path().join("data");
+                    if data.is_dir() {
+                        roots.push(data);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        let config_home = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        for base in [
+            config_home.join("Open Design/namespaces"),
+            config_home.join("open-design/namespaces"),
+        ] {
+            for ns in ["release-stable-linux", "default"] {
+                roots.push(base.join(ns).join("data"));
+            }
+            if let Ok(entries) = fs::read_dir(&base) {
+                for entry in entries.flatten() {
+                    let data = entry.path().join("data");
+                    if data.is_dir() {
+                        roots.push(data);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut deduped = Vec::new();
+    for root in roots {
+        if !deduped.contains(&root) {
+            deduped.push(root);
+        }
+    }
+    Ok(deduped)
+}
+
+fn open_design_data_root() -> Result<PathBuf, String> {
+    let roots = open_design_data_roots()?;
+    roots
+        .iter()
+        .find(|root| {
+            root.join("app-config.json").exists() || root.join("media-config.json").exists()
+        })
+        .cloned()
+        .or_else(|| roots.iter().find(|root| root.exists()).cloned())
+        .or_else(|| roots.first().cloned())
+        .ok_or_else(|| "Open Design data directory could not be resolved.".to_string())
+}
+
+fn open_design_image_base_url(provider: &TytusAilProvider) -> String {
+    let trimmed = provider.base_url.trim_end_matches('/');
+    if let Some(root) = trimmed.strip_suffix("/v1") {
+        format!("{root}/openai/v1")
+    } else {
+        format!("{trimmed}/openai/v1")
+    }
+}
+
+fn open_design_status(
+    app_id: &str,
+    provider: &TytusAilProvider,
+) -> Result<LlmConfigStatus, String> {
+    let root = open_design_data_root()?;
+    let root_exists = root.exists();
+    let app_config = read_json_object(&root.join("app-config.json")).unwrap_or_else(|_| json!({}));
+    let media_config =
+        read_json_object(&root.join("media-config.json")).unwrap_or_else(|_| json!({}));
+    let codex_env = app_config.get("agentCliEnv").and_then(|v| v.get("codex"));
+    let env_base_ok = codex_env
+        .and_then(|v| v.get("OPENAI_BASE_URL"))
+        .and_then(|v| v.as_str())
+        == Some(provider.base_url.as_str());
+    let env_key_ok = codex_env
+        .and_then(|v| v.get("OPENAI_API_KEY").or_else(|| v.get("CODEX_API_KEY")))
+        .and_then(|v| v.as_str())
+        == Some(provider.api_key.as_str());
+    let model_ok = app_config
+        .get("agentModels")
+        .and_then(|v| v.get("codex"))
+        .and_then(|v| v.get("model"))
+        .and_then(|v| v.as_str())
+        == Some(provider.model.as_str());
+
+    let providers = media_config.get("providers");
+    let openai = providers.and_then(|v| v.get("openai"));
+    let media_chat_ok = openai
+        .and_then(|v| v.get("baseUrl"))
+        .and_then(|v| v.as_str())
+        == Some(provider.base_url.as_str())
+        && openai
+            .and_then(|v| v.get("apiKey"))
+            .and_then(|v| v.as_str())
+            == Some(provider.api_key.as_str())
+        && openai.and_then(|v| v.get("model")).and_then(|v| v.as_str())
+            == Some(provider.model.as_str());
+    let image_base = open_design_image_base_url(provider);
+    let custom_image = providers.and_then(|v| v.get("custom-image"));
+    let media_image_ok = custom_image
+        .and_then(|v| v.get("baseUrl"))
+        .and_then(|v| v.as_str())
+        == Some(image_base.as_str())
+        && custom_image
+            .and_then(|v| v.get("apiKey"))
+            .and_then(|v| v.as_str())
+            == Some(provider.api_key.as_str());
+
+    let configured = env_base_ok && env_key_ok && model_ok && media_chat_ok && media_image_ok;
+    Ok(LlmConfigStatus {
+        app_id: app_id.to_string(),
+        supported: true,
+        configured,
+        provider: TYTUS_PROVIDER_ID.to_string(),
+        model: provider.model.clone(),
+        base_url: if env_base_ok || media_chat_ok {
+            Some(provider.base_url.clone())
+        } else {
+            None
+        },
+        key_hint: if env_key_ok || media_chat_ok {
+            Some(key_hint(&provider.api_key))
+        } else {
+            None
+        },
+        restart_required: true,
+        message: if configured {
+            "Tytus AIL is configured for Open Design Codex agent env plus OpenAI-compatible media providers."
+        } else if !root_exists {
+            "Install or launch Open Design once, then Tytus can add the Tytus AIL provider."
+        } else {
+            "Open Design can be configured with Tytus AIL for Codex agent runs and OpenAI-compatible media."
+        }
+        .to_string(),
+    })
+}
+
+fn configure_open_design(
+    app_id: &str,
+    provider: &TytusAilProvider,
+) -> Result<LlmConfigResult, String> {
+    let root = open_design_data_root()?;
+    let app_config_path = root.join("app-config.json");
+    let media_config_path = root.join("media-config.json");
+    let mut app_config = read_json_object(&app_config_path)?;
+    let mut media_config = read_json_object(&media_config_path)?;
+    let app_backup = backup_existing(&app_config_path, "app-config")?;
+    let media_backup = backup_existing(&media_config_path, "media-config")?;
+
+    object_mut(&mut app_config, "agentCliEnv").insert(
+        "codex".to_string(),
+        json!({
+            "OPENAI_BASE_URL": provider.base_url.clone(),
+            "OPENAI_API_KEY": provider.api_key.clone(),
+            "CODEX_API_KEY": provider.api_key.clone(),
+        }),
+    );
+    object_mut(&mut app_config, "agentModels").insert(
+        "codex".to_string(),
+        json!({
+            "model": provider.model.clone(),
+        }),
+    );
+
+    object_mut(&mut media_config, "providers").insert(
+        "openai".to_string(),
+        json!({
+            "apiKey": provider.api_key.clone(),
+            "baseUrl": provider.base_url.clone(),
+            "model": provider.model.clone(),
+        }),
+    );
+    object_mut(&mut media_config, "providers").insert(
+        "custom-image".to_string(),
+        json!({
+            "apiKey": provider.api_key.clone(),
+            "baseUrl": open_design_image_base_url(provider),
+            "model": "ail-image",
+        }),
+    );
+
+    let app_rendered = serde_json::to_string_pretty(&app_config)
+        .map_err(|e| format!("render Open Design app config failed: {e}"))?;
+    let media_rendered = serde_json::to_string_pretty(&media_config)
+        .map_err(|e| format!("render Open Design media config failed: {e}"))?;
+    write_atomic(&app_config_path, &(app_rendered + "\n"))?;
+    write_atomic(&media_config_path, &(media_rendered + "\n"))?;
+
+    Ok(LlmConfigResult {
+        ok: true,
+        app_id: app_id.to_string(),
+        configured: true,
+        provider: TYTUS_PROVIDER_ID.to_string(),
+        model: provider.model.clone(),
+        backup_path: app_backup.or(media_backup).map(|p| p.display().to_string()),
+        restart_required: true,
+        message:
+            "Tytus AIL is configured for Open Design. Restart Open Design if it is already open."
+                .to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +898,7 @@ mod tests {
         assert!(adapter_supported("opencode"));
         assert!(adapter_supported("pi"));
         assert!(adapter_supported("odysseus"));
+        assert!(adapter_supported("open-design"));
         assert!(!adapter_supported("../opencode"));
         assert!(!adapter_supported("unknown"));
     }
@@ -695,5 +932,28 @@ mod tests {
         assert!(ext.contains("@mariozechner/pi-coding-agent"));
         assert!(ext.contains("registerProvider(\"tytus-ail\""));
         assert!(ext.contains("ail-compound"));
+    }
+
+    #[test]
+    fn open_design_image_base_uses_openai_namespace() {
+        let provider = TytusAilProvider {
+            base_url: "http://10.42.42.1:18080/v1".into(),
+            api_key: "sk-test".into(),
+            model: TYTUS_MODEL_ID.into(),
+        };
+        assert_eq!(
+            open_design_image_base_url(&provider),
+            "http://10.42.42.1:18080/openai/v1"
+        );
+
+        let provider = TytusAilProvider {
+            base_url: "https://switchai.example.com".into(),
+            api_key: "sk-test".into(),
+            model: TYTUS_MODEL_ID.into(),
+        };
+        assert_eq!(
+            open_design_image_base_url(&provider),
+            "https://switchai.example.com/openai/v1"
+        );
     }
 }
