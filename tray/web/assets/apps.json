@@ -7,25 +7,85 @@
     "icon": "Terminal",
     "url": "https://opencode.ai/",
     "docs": "https://opencode.ai/docs/",
-    "platforms": ["macos", "linux"],
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ],
     "detect": {
-      "macos": ["opencode"],
-      "linux": ["opencode"]
+      "macos": [
+        "opencode"
+      ],
+      "linux": [
+        "opencode"
+      ],
+      "windows": [
+        "opencode"
+      ]
     },
     "install": {
-      "macos": "brew install opencode-ai/tap/opencode",
-      "linux": "curl -fsSL https://opencode.ai/install.sh | sh"
+      "macos": "brew install anomalyco/tap/opencode",
+      "linux": "curl -fsSL https://opencode.ai/install.sh | sh",
+      "windows": "Visit https://opencode.ai/docs for Windows installation instructions"
     },
     "launch": {
-      "macos": { "kind": "terminal", "target": "opencode" },
-      "linux": { "kind": "terminal", "target": "opencode" }
+      "macos": {
+        "kind": "terminal",
+        "target": "opencode"
+      },
+      "linux": {
+        "kind": "terminal",
+        "target": "opencode"
+      },
+      "windows": {
+        "kind": "terminal",
+        "target": "opencode"
+      }
     },
     "llm_setup": {
       "adapter": "opencode",
       "provider": "tytus-ail",
       "default_model": "ail-compound",
       "supports_default": true
-    }
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "universal",
+        "package_manager": "brew",
+        "kind": "command",
+        "label": "Install for this Mac",
+        "command": "brew install anomalyco/tap/opencode"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "kind": "command",
+        "label": "Install for Linux x64",
+        "command": "curl -fsSL https://opencode.ai/install | bash"
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "kind": "command",
+        "label": "Install for Linux ARM64",
+        "command": "curl -fsSL https://opencode.ai/install | bash"
+      },
+      {
+        "os": "windows",
+        "arch": "x64",
+        "kind": "command",
+        "label": "Install for Windows x64",
+        "command": "npm install -g opencode-ai"
+      },
+      {
+        "os": "windows",
+        "arch": "arm64",
+        "kind": "command",
+        "label": "Install for Windows ARM64",
+        "command": "npm install -g opencode-ai"
+      }
+    ]
   },
   {
     "id": "pi",
@@ -35,25 +95,84 @@
     "icon": "Cpu",
     "url": "https://pi.dev/",
     "docs": "https://pi.dev/docs",
-    "platforms": ["macos", "linux"],
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ],
     "detect": {
-      "macos": ["pi"],
-      "linux": ["pi"]
+      "macos": [
+        "pi"
+      ],
+      "linux": [
+        "pi"
+      ],
+      "windows": [
+        "pi"
+      ]
     },
     "install": {
       "macos": "curl -fsSL https://pi.dev/install.sh | sh",
-      "linux": "curl -fsSL https://pi.dev/install.sh | sh"
+      "linux": "curl -fsSL https://pi.dev/install.sh | sh",
+      "windows": "npm install -g @earendil-works/pi-coding-agent --min-release-age=0"
     },
     "launch": {
-      "macos": { "kind": "terminal", "target": "pi" },
-      "linux": { "kind": "terminal", "target": "pi" }
+      "macos": {
+        "kind": "terminal",
+        "target": "pi"
+      },
+      "linux": {
+        "kind": "terminal",
+        "target": "pi"
+      },
+      "windows": {
+        "kind": "terminal",
+        "target": "pi"
+      }
     },
     "llm_setup": {
       "adapter": "pi",
       "provider": "tytus-ail",
       "default_model": "ail-compound",
       "supports_default": true
-    }
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "universal",
+        "kind": "command",
+        "label": "Install for this Mac",
+        "command": "curl -fsSL https://pi.dev/install.sh | sh"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "kind": "command",
+        "label": "Install for Linux x64",
+        "command": "curl -fsSL https://pi.dev/install.sh | sh"
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "kind": "command",
+        "label": "Install for Linux ARM64",
+        "command": "curl -fsSL https://pi.dev/install.sh | sh"
+      },
+      {
+        "os": "windows",
+        "arch": "x64",
+        "kind": "command",
+        "label": "Install for Windows x64",
+        "command": "npm install -g @earendil-works/pi-coding-agent --min-release-age=0"
+      },
+      {
+        "os": "windows",
+        "arch": "arm64",
+        "kind": "command",
+        "label": "Install for Windows ARM64",
+        "command": "npm install -g @earendil-works/pi-coding-agent --min-release-age=0"
+      }
+    ]
   },
   {
     "id": "ghostty",
@@ -63,19 +182,57 @@
     "icon": "Terminal",
     "url": "https://ghostty.org/",
     "docs": "https://ghostty.org/docs",
-    "platforms": ["macos", "linux"],
+    "platforms": [
+      "macos",
+      "linux"
+    ],
     "detect": {
-      "macos": ["Ghostty", "ghostty"],
-      "linux": ["ghostty"]
+      "macos": [
+        "Ghostty",
+        "ghostty"
+      ],
+      "linux": [
+        "ghostty"
+      ]
     },
     "install": {
       "macos": "brew install --cask ghostty",
       "linux": "Visit https://ghostty.org/download for your distro"
     },
     "launch": {
-      "macos": { "kind": "app", "target": "Ghostty" },
-      "linux": { "kind": "app", "target": "ghostty" }
-    }
+      "macos": {
+        "kind": "app",
+        "target": "Ghostty"
+      },
+      "linux": {
+        "kind": "app",
+        "target": "ghostty"
+      }
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "universal",
+        "package_manager": "brew",
+        "kind": "command",
+        "label": "Install universal macOS build",
+        "command": "brew install --cask ghostty"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "kind": "url",
+        "label": "Choose Linux x64 package",
+        "url": "https://ghostty.org/download"
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "kind": "url",
+        "label": "Choose Linux ARM64 package",
+        "url": "https://ghostty.org/download"
+      }
+    ]
   },
   {
     "id": "ail",
@@ -85,19 +242,74 @@
     "icon": "Brain",
     "url": "https://ail.traylinx.com/introduction",
     "docs": "https://ail.traylinx.com/introduction",
-    "platforms": ["macos", "linux"],
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ],
     "detect": {
-      "macos": ["ail"],
-      "linux": ["ail"]
+      "macos": [
+        "ail"
+      ],
+      "linux": [
+        "ail"
+      ]
     },
     "install": {
       "macos": "Visit https://ail.traylinx.com for installation instructions",
       "linux": "Visit https://ail.traylinx.com for installation instructions"
     },
     "launch": {
-      "macos": { "kind": "terminal", "target": "ail" },
-      "linux": { "kind": "terminal", "target": "ail" }
-    }
+      "macos": {
+        "kind": "terminal",
+        "target": "ail"
+      },
+      "linux": {
+        "kind": "terminal",
+        "target": "ail"
+      },
+      "windows": {
+        "kind": "terminal",
+        "target": "ail"
+      }
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "universal",
+        "kind": "url",
+        "label": "Install for this Mac",
+        "url": "https://ail.traylinx.com/introduction"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "kind": "url",
+        "label": "Install for Linux x64",
+        "url": "https://ail.traylinx.com/introduction"
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "kind": "url",
+        "label": "Install for Linux ARM64",
+        "url": "https://ail.traylinx.com/introduction"
+      },
+      {
+        "os": "windows",
+        "arch": "x64",
+        "kind": "url",
+        "label": "Install for Windows x64",
+        "url": "https://ail.traylinx.com/introduction"
+      },
+      {
+        "os": "windows",
+        "arch": "arm64",
+        "kind": "url",
+        "label": "Install for Windows ARM64",
+        "url": "https://ail.traylinx.com/introduction"
+      }
+    ]
   },
   {
     "id": "telegram",
@@ -107,19 +319,99 @@
     "icon": "MessageCircle",
     "url": "https://desktop.telegram.org/",
     "docs": "https://telegram.org/faq",
-    "platforms": ["macos", "linux"],
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ],
     "detect": {
-      "macos": ["Telegram", "telegram"],
-      "linux": ["telegram-desktop"]
+      "macos": [
+        "Telegram",
+        "telegram"
+      ],
+      "linux": [
+        "telegram-desktop"
+      ],
+      "windows": [
+        "Telegram"
+      ]
     },
     "install": {
       "macos": "brew install --cask telegram",
-      "linux": "sudo apt install telegram-desktop"
+      "linux": "sudo apt install telegram-desktop",
+      "windows": "Visit https://desktop.telegram.org/ for the Windows installer"
     },
     "launch": {
-      "macos": { "kind": "app", "target": "Telegram" },
-      "linux": { "kind": "app", "target": "telegram-desktop" }
-    }
+      "macos": {
+        "kind": "app",
+        "target": "Telegram"
+      },
+      "linux": {
+        "kind": "app",
+        "target": "telegram-desktop"
+      },
+      "windows": {
+        "kind": "app",
+        "target": "Telegram"
+      }
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "universal",
+        "package_manager": "brew",
+        "kind": "command",
+        "label": "Install for this Mac",
+        "command": "brew install --cask telegram"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "package_manager": "apt",
+        "kind": "command",
+        "label": "Install with apt for Linux x64",
+        "command": "sudo apt install telegram-desktop"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "package_manager": "snap",
+        "kind": "command",
+        "label": "Install with Snap for Linux x64",
+        "command": "sudo snap install telegram-desktop"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "package_manager": "flatpak",
+        "kind": "command",
+        "label": "Install with Flatpak for Linux x64",
+        "command": "flatpak install flathub org.telegram.desktop"
+      },
+      {
+        "os": "windows",
+        "arch": "x64",
+        "kind": "url",
+        "label": "Install for Windows x64",
+        "url": "https://desktop.telegram.org/"
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "kind": "disabled",
+        "label": "Linux ARM64 unsupported",
+        "disabled": true,
+        "disabled_reason": "Telegram Desktop Linux ARM64 installer is not evidenced by the current official/catalog install surface. Use official Telegram Desktop downloads manually if they add ARM64 support."
+      },
+      {
+        "os": "windows",
+        "arch": "arm64",
+        "kind": "disabled",
+        "label": "Windows ARM64 unsupported",
+        "disabled": true,
+        "disabled_reason": "Telegram Desktop Windows ARM64 installer is not evidenced by the current official/catalog install surface. Use the official site only if it offers a matching ARM64 build for your machine."
+      }
+    ]
   },
   {
     "id": "discord",
@@ -129,19 +421,89 @@
     "icon": "Headphones",
     "url": "https://discord.com/download",
     "docs": "https://support.discord.com/",
-    "platforms": ["macos", "linux"],
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ],
     "detect": {
-      "macos": ["Discord"],
-      "linux": ["discord"]
+      "macos": [
+        "Discord"
+      ],
+      "linux": [
+        "discord"
+      ],
+      "windows": [
+        "Discord"
+      ]
     },
     "install": {
       "macos": "brew install --cask discord",
-      "linux": "sudo snap install discord"
+      "linux": "sudo snap install discord",
+      "windows": "Visit https://discord.com/download for the Windows installer"
     },
     "launch": {
-      "macos": { "kind": "app", "target": "Discord" },
-      "linux": { "kind": "app", "target": "discord" }
-    }
+      "macos": {
+        "kind": "app",
+        "target": "Discord"
+      },
+      "linux": {
+        "kind": "app",
+        "target": "discord"
+      },
+      "windows": {
+        "kind": "app",
+        "target": "Discord"
+      }
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "universal",
+        "package_manager": "brew",
+        "kind": "command",
+        "label": "Install for this Mac",
+        "command": "brew install --cask discord"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "package_manager": "snap",
+        "kind": "command",
+        "label": "Install with Snap for Linux x64",
+        "command": "sudo snap install discord"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "kind": "url",
+        "label": "Download Linux package",
+        "url": "https://discord.com/download"
+      },
+      {
+        "os": "windows",
+        "arch": "x64",
+        "kind": "url",
+        "label": "Install for Windows x64",
+        "url": "https://discord.com/download"
+      },
+      {
+        "os": "windows",
+        "arch": "arm64",
+        "kind": "disabled",
+        "label": "Windows ARM64 unsupported",
+        "disabled": true,
+        "disabled_reason": "Discord Windows ARM64 desktop installer is not evidenced by the current official/catalog install surface. Use the official site only if it offers a matching ARM64 build for your machine."
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "kind": "disabled",
+        "label": "Linux ARM64 unsupported",
+        "disabled": true,
+        "disabled_reason": "Discord Linux ARM64 desktop installer is not evidenced by the current official/catalog install surface. Use a supported x64 Linux package or the web app."
+      }
+    ]
   },
   {
     "id": "warp",
@@ -151,46 +513,278 @@
     "icon": "Terminal",
     "url": "https://www.warp.dev/",
     "docs": "https://docs.warp.dev/",
-    "platforms": ["macos", "linux"],
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ],
     "detect": {
-      "macos": ["Warp"],
-      "linux": ["warp-terminal"]
+      "macos": [
+        "Warp"
+      ],
+      "linux": [
+        "warp-terminal"
+      ],
+      "windows": [
+        "warp"
+      ]
     },
     "install": {
       "macos": "brew install --cask warp",
-      "linux": "Visit https://www.warp.dev/download for your distro"
+      "linux": "Visit https://www.warp.dev/download for your distro",
+      "windows": "winget install Warp.Warp"
     },
     "launch": {
-      "macos": { "kind": "app", "target": "Warp" },
-      "linux": { "kind": "app", "target": "warp-terminal" }
-    }
+      "macos": {
+        "kind": "app",
+        "target": "Warp"
+      },
+      "linux": {
+        "kind": "app",
+        "target": "warp-terminal"
+      },
+      "windows": {
+        "kind": "app",
+        "target": "warp"
+      }
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "universal",
+        "package_manager": "brew",
+        "kind": "command",
+        "label": "Install for this Mac",
+        "command": "brew install --cask warp"
+      },
+      {
+        "os": "windows",
+        "arch": "x64",
+        "package_manager": "winget",
+        "kind": "command",
+        "label": "Install for Windows x64",
+        "command": "winget install Warp.Warp"
+      },
+      {
+        "os": "windows",
+        "arch": "arm64",
+        "package_manager": "winget",
+        "kind": "command",
+        "label": "Install for Windows ARM64",
+        "command": "winget install Warp.Warp"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "package_manager": "apt",
+        "kind": "command",
+        "label": "Install with apt for Linux x64",
+        "command": "sudo apt-get install wget gpg && wget -qO- https://releases.warp.dev/linux/keys/warp.asc | gpg --dearmor > warpdotdev.gpg && sudo install -D -o root -g root -m 644 warpdotdev.gpg /etc/apt/keyrings/warpdotdev.gpg && sudo sh -c 'echo \"deb [arch=amd64 signed-by=/etc/apt/keyrings/warpdotdev.gpg] https://releases.warp.dev/linux/deb stable main\" > /etc/apt/sources.list.d/warpdotdev.list' && rm warpdotdev.gpg && sudo apt update && sudo apt install warp-terminal"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "kind": "url",
+        "label": "Download Linux x64 package",
+        "url": "https://www.warp.dev/download"
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "kind": "url",
+        "label": "Download Linux ARM64 package",
+        "url": "https://www.warp.dev/download"
+      }
+    ]
   },
   {
     "id": "openwork",
     "name": "OpenWork",
-    "description": "Open-source desktop workspace for agentic AI — run AI agents locally with a native UI. An open alternative to Claude's Cowork.",
+    "description": "Open-source desktop workspace for agentic AI \u2014 run AI agents locally with a native UI. An open alternative to Claude's Cowork.",
     "category": "AI & ML",
     "icon": "Bot",
     "url": "https://openworklabs.com",
     "docs": "https://github.com/different-ai/openwork",
-    "platforms": ["macos", "linux"],
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ],
     "detect": {
-      "macos": ["OpenWork"],
-      "linux": ["openwork"]
+      "macos": [
+        "OpenWork"
+      ],
+      "linux": [
+        "openwork"
+      ],
+      "windows": [
+        "OpenWork"
+      ]
     },
     "install": {
-      "macos": "brew install --cask openwork",
-      "linux": "Visit https://openworklabs.com/download for the desktop app"
+      "macos": "On Intel Mac, Tytus builds OpenWork locally from source because the published x64 DMG currently contains ARM64 native modules. Apple Silicon uses the official release.",
+      "linux": "Tytus selects the matching OpenWork Linux release automatically (x64 or ARM64).",
+      "windows": "Tytus selects the matching OpenWork Windows x64 release automatically. Windows ARM64 is not supported yet."
     },
     "launch": {
-      "macos": { "kind": "app", "target": "OpenWork" },
-      "linux": { "kind": "app", "target": "openwork" }
+      "macos": {
+        "kind": "app",
+        "target": "OpenWork"
+      },
+      "linux": {
+        "kind": "app",
+        "target": "openwork"
+      },
+      "windows": {
+        "kind": "app",
+        "target": "OpenWork"
+      }
     },
     "llm_setup": {
       "adapter": "opencode",
       "provider": "tytus-ail",
       "default_model": "ail-compound",
       "supports_default": true
-    }
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "x64",
+        "kind": "openwork_source_build_macos",
+        "label": "Build OpenWork locally for Intel Mac",
+        "repo": "different-ai/openwork"
+      },
+      {
+        "os": "macos",
+        "arch": "arm64",
+        "kind": "github_release_dmg",
+        "label": "Install OpenWork for Apple Silicon",
+        "repo": "different-ai/openwork",
+        "asset_regex": "^openwork-mac-arm64-[0-9]+\\.[0-9]+\\.[0-9]+\\.dmg$"
+      },
+      {
+        "os": "windows",
+        "arch": "x64",
+        "kind": "github_release_exe",
+        "label": "Install OpenWork for Windows x64",
+        "repo": "different-ai/openwork",
+        "asset_regex": "^openwork-win-x64-[0-9]+\\.[0-9]+\\.[0-9]+\\.exe$"
+      },
+      {
+        "os": "windows",
+        "arch": "arm64",
+        "kind": "github_release_exe",
+        "label": "Windows ARM64 unsupported",
+        "repo": "different-ai/openwork",
+        "asset_regex": "^$",
+        "disabled": true,
+        "disabled_reason": "OpenWork Windows ARM64 support is not evidenced by current release assets. Use Windows x64, macOS, or Linux builds."
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "kind": "github_release_appimage",
+        "label": "Install OpenWork for Linux x64",
+        "repo": "different-ai/openwork",
+        "asset_regex": "^openwork-linux-x86_64-[0-9]+\\.[0-9]+\\.[0-9]+\\.AppImage$"
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "kind": "github_release_appimage",
+        "label": "Install OpenWork for Linux ARM64",
+        "repo": "different-ai/openwork",
+        "asset_regex": "^openwork-linux-arm64-[0-9]+\\.[0-9]+\\.[0-9]+\\.AppImage$"
+      }
+    ]
+  },
+  {
+    "id": "odysseus",
+    "name": "Odysseus",
+    "description": "Self-hosted local-first AI workspace with chat, agents, tools, documents, memory, email, calendar, and deep research.",
+    "category": "AI & ML",
+    "icon": "Package",
+    "url": "https://github.com/pewdiepie-archdaemon/odysseus",
+    "docs": "https://github.com/pewdiepie-archdaemon/odysseus",
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ],
+    "detect": {
+      "macos": [
+        "Odysseus",
+        "odysseus"
+      ],
+      "linux": [
+        "odysseus"
+      ],
+      "windows": [
+        "odysseus",
+        "Odysseus"
+      ]
+    },
+    "install": {
+      "macos": "Tytus installs Odysseus natively, creates an app launcher, and uses the matching Python/architecture for this Mac.",
+      "linux": "Tytus installs Odysseus from source into ~/Tytus/ExternalApps/odysseus and creates a local launcher.",
+      "windows": "Tytus installs Odysseus from source and starts its native Windows launcher. Python 3.11+ is required."
+    },
+    "launch": {
+      "macos": {
+        "kind": "app",
+        "target": "Odysseus"
+      },
+      "linux": {
+        "kind": "terminal",
+        "target": "odysseus"
+      },
+      "windows": {
+        "kind": "terminal",
+        "target": "odysseus"
+      }
+    },
+    "llm_setup": {
+      "adapter": "odysseus",
+      "provider": "tytus-ail",
+      "default_model": "ail-compound",
+      "supports_default": true
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "universal",
+        "kind": "odysseus_native_macos",
+        "label": "Install Odysseus for this Mac",
+        "repo": "pewdiepie-archdaemon/odysseus"
+      },
+      {
+        "os": "linux",
+        "arch": "x64",
+        "kind": "odysseus_native_linux",
+        "label": "Install Odysseus for Linux x64",
+        "repo": "pewdiepie-archdaemon/odysseus"
+      },
+      {
+        "os": "linux",
+        "arch": "arm64",
+        "kind": "odysseus_native_linux",
+        "label": "Install Odysseus for Linux ARM64",
+        "repo": "pewdiepie-archdaemon/odysseus"
+      },
+      {
+        "os": "windows",
+        "arch": "x64",
+        "kind": "odysseus_native_windows",
+        "label": "Install Odysseus for Windows x64",
+        "repo": "pewdiepie-archdaemon/odysseus"
+      },
+      {
+        "os": "windows",
+        "arch": "arm64",
+        "kind": "odysseus_native_windows",
+        "label": "Install Odysseus for Windows ARM64",
+        "repo": "pewdiepie-archdaemon/odysseus"
+      }
+    ]
   }
 ]

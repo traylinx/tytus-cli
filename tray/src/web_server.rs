@@ -5002,6 +5002,211 @@ fn handle_apps_catalog(request: Request) {
     serve_bytes(request, APPS_JSON, "application/json; charset=utf-8");
 }
 
+fn desktop_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+fn desktop_arch() -> &'static str {
+    if cfg!(target_arch = "x86_64") {
+        "x64"
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "unknown"
+    }
+}
+
+fn desktop_target_label(platform: &str, arch: &str) -> String {
+    match (platform, arch) {
+        ("macos", "x64") => "Intel Mac".to_string(),
+        ("macos", "arm64") => "Apple Silicon Mac".to_string(),
+        ("windows", "x64") => "Windows x64".to_string(),
+        ("windows", "arm64") => "Windows ARM64".to_string(),
+        ("linux", "x64") => "Linux x64".to_string(),
+        ("linux", "arm64") => "Linux ARM64".to_string(),
+        _ => format!("{platform}/{arch}"),
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedInstaller {
+    kind: String,
+    label: String,
+    command: Option<String>,
+    url: Option<String>,
+    repo: Option<String>,
+    asset_regex: Option<String>,
+}
+
+fn package_manager_available(pm: &str) -> bool {
+    match pm {
+        "brew" => command_exists_for_desktop_app("brew"),
+        "winget" => command_exists_for_desktop_app("winget"),
+        "scoop" => command_exists_for_desktop_app("scoop"),
+        "choco" => command_exists_for_desktop_app("choco"),
+        "apt" => command_exists_for_desktop_app("apt") || command_exists_for_desktop_app("apt-get"),
+        "dnf" => command_exists_for_desktop_app("dnf"),
+        "yum" => command_exists_for_desktop_app("yum"),
+        "zypper" => command_exists_for_desktop_app("zypper"),
+        "pacman" => command_exists_for_desktop_app("pacman"),
+        "snap" => command_exists_for_desktop_app("snap"),
+        "flatpak" => command_exists_for_desktop_app("flatpak"),
+        _ => false,
+    }
+}
+
+fn installer_score(installer: &serde_json::Value, platform: &str, arch: &str) -> Option<i32> {
+    if installer
+        .get("disabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if installer.get("os").and_then(|v| v.as_str()) != Some(platform) {
+        return None;
+    }
+    let installer_arch = installer.get("arch").and_then(|v| v.as_str());
+    if let Some(a) = installer_arch {
+        if a != arch && a != "universal" {
+            return None;
+        }
+    }
+    let mut score = 10;
+    if installer_arch == Some(arch) {
+        score += 20;
+    } else if installer_arch == Some("universal") {
+        score += 12;
+    }
+    if let Some(pm) = installer.get("package_manager").and_then(|v| v.as_str()) {
+        if package_manager_available(pm) {
+            score += 10;
+        } else if installer.get("url").is_none() {
+            return None;
+        }
+    }
+    Some(score)
+}
+
+fn disabled_installer_reason(
+    entry: &serde_json::Value,
+    platform: &str,
+    arch: &str,
+) -> Option<String> {
+    entry
+        .get("installers")
+        .and_then(|v| v.as_array())
+        .and_then(|installers| {
+            installers.iter().find(|installer| {
+                installer.get("os").and_then(|v| v.as_str()) == Some(platform)
+                    && installer.get("arch").and_then(|v| v.as_str()) == Some(arch)
+                    && installer
+                        .get("disabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+            })
+        })
+        .and_then(|installer| installer.get("disabled_reason").and_then(|v| v.as_str()))
+        .map(|reason| reason.to_string())
+}
+
+fn resolve_app_installer(
+    entry: &serde_json::Value,
+    platform: &str,
+    arch: &str,
+) -> Option<ResolvedInstaller> {
+    if let Some(installers) = entry.get("installers").and_then(|v| v.as_array()) {
+        let best = installers
+            .iter()
+            .filter_map(|installer| {
+                installer_score(installer, platform, arch).map(|s| (s, installer))
+            })
+            .max_by_key(|(score, _)| *score)
+            .map(|(_, installer)| installer);
+
+        if let Some(installer) = best {
+            let kind = installer
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("command")
+                .to_string();
+            let command = installer
+                .get("command")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            let url = installer
+                .get("url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            let repo = installer
+                .get("repo")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            let asset_regex = installer
+                .get("asset_regex")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            let label = installer
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| {
+                    if command.is_some() || kind.starts_with("github_release") {
+                        "Install"
+                    } else {
+                        "Open install page"
+                    }
+                })
+                .to_string();
+            return Some(ResolvedInstaller {
+                kind,
+                label,
+                command,
+                url,
+                repo,
+                asset_regex,
+            });
+        }
+        return None;
+    }
+
+    let cmd = entry
+        .get("install")
+        .and_then(|i| i.get(platform))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    if cmd.trim().is_empty() {
+        return None;
+    }
+    Some(ResolvedInstaller {
+        kind: if install_is_command(cmd) {
+            "command".to_string()
+        } else {
+            "url".to_string()
+        },
+        label: "Install".to_string(),
+        command: install_is_command(cmd).then(|| cmd.to_string()),
+        url: (!install_is_command(cmd)).then(|| {
+            entry
+                .get("url")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string()
+        }),
+        repo: None,
+        asset_regex: None,
+    })
+}
+
 #[derive(serde::Deserialize)]
 struct AppsCheckRequest {
     app_ids: Vec<String>,
@@ -5034,11 +5239,9 @@ fn handle_apps_check(mut request: Request) {
         }
     };
 
-    let platform = if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux"
-    };
+    let platform = desktop_platform();
+    let arch = desktop_arch();
+    let target_label = desktop_target_label(platform, arch);
     let mut results: Vec<serde_json::Value> = Vec::new();
 
     for app_id in &parsed.app_ids {
@@ -5054,16 +5257,97 @@ fn handle_apps_check(mut request: Request) {
         }
 
         let entry = catalog.iter().find(|e| e["id"].as_str() == Some(app_id));
-        let installed = if let Some(entry) = entry {
-            check_app_installed(entry, platform)
+        let result = if let Some(entry) = entry {
+            let installer = resolve_app_installer(entry, platform, arch);
+            let mut health = check_app_health(entry, platform, arch);
+            if !health.installed && installer.is_none() {
+                health.status = "unsupported";
+                health.health = "unsupported";
+                health.problems = vec![disabled_installer_reason(entry, platform, arch)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "No installer available for {}",
+                            desktop_target_label(platform, arch)
+                        )
+                    })];
+            }
+            serde_json::json!({
+                "id": app_id,
+                "installed": health.installed,
+                "status": health.status,
+                "health": health.health,
+                "problems": health.problems,
+                "install_label": installer.as_ref().map(|i| i.label.as_str()),
+                "install_command": installer.as_ref().and_then(|i| i.command.as_deref()),
+                "install_url": installer.as_ref().and_then(|i| i.url.as_deref()),
+                "install_kind": installer.as_ref().map(|i| i.kind.as_str()),
+                "target_label": target_label.clone(),
+            })
         } else {
-            false
+            serde_json::json!({
+                "id": app_id,
+                "installed": false,
+                "status": "unknown",
+                "health": "unknown",
+                "problems": ["unknown app"],
+                "target_label": target_label.clone(),
+            })
         };
 
-        results.push(serde_json::json!({ "id": app_id, "installed": installed }));
+        results.push(result);
     }
 
     respond_json(request, 200, &serde_json::json!({ "results": results }));
+}
+
+#[derive(Debug, Clone)]
+struct AppHealth {
+    installed: bool,
+    status: &'static str,
+    health: &'static str,
+    problems: Vec<String>,
+}
+
+fn check_app_health(entry: &serde_json::Value, platform: &str, arch: &str) -> AppHealth {
+    let installed = check_app_installed(entry, platform);
+    if !installed {
+        let supported = entry
+            .get("platforms")
+            .and_then(|p| p.as_array())
+            .map(|arr| arr.iter().any(|p| p.as_str() == Some(platform)))
+            .unwrap_or(false);
+        return AppHealth {
+            installed: false,
+            status: if supported {
+                "not_installed"
+            } else {
+                "unsupported"
+            },
+            health: if supported { "ok" } else { "unsupported" },
+            problems: Vec::new(),
+        };
+    }
+
+    let mut problems = Vec::new();
+    if entry.get("id").and_then(|v| v.as_str()) == Some("openwork") && platform == "macos" {
+        problems.extend(openwork_macos_health_problems(arch));
+    }
+
+    if problems.is_empty() {
+        AppHealth {
+            installed: true,
+            status: "installed_ok",
+            health: "ok",
+            problems,
+        }
+    } else {
+        AppHealth {
+            installed: true,
+            status: "installed_broken",
+            health: "broken",
+            problems,
+        }
+    }
 }
 
 fn check_app_installed(entry: &serde_json::Value, platform: &str) -> bool {
@@ -5075,16 +5359,8 @@ fn check_app_installed(entry: &serde_json::Value, platform: &str) -> bool {
                     // On macOS: check /Applications/<Name>.app first
                     #[cfg(target_os = "macos")]
                     {
-                        let app_path = format!("/Applications/{}.app", cmd_str);
-                        if std::path::Path::new(&app_path).exists() {
+                        if find_macos_app_bundle(cmd_str).is_some() {
                             return true;
-                        }
-                        // Also check ~/Applications/
-                        if let Ok(home) = std::env::var("HOME") {
-                            let user_app_path = format!("{}/Applications/{}.app", home, cmd_str);
-                            if std::path::Path::new(&user_app_path).exists() {
-                                return true;
-                            }
                         }
                     }
                     // Check if the command is on PATH or in common per-user
@@ -5101,6 +5377,135 @@ fn check_app_installed(entry: &serde_json::Value, platform: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(target_os = "macos")]
+fn find_macos_app_bundle(name: &str) -> Option<PathBuf> {
+    let system = PathBuf::from(format!("/Applications/{name}.app"));
+    if system.exists() {
+        return Some(system);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let user = PathBuf::from(home)
+            .join("Applications")
+            .join(format!("{name}.app"));
+        if user.exists() {
+            return Some(user);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn openwork_macos_health_problems(arch: &str) -> Vec<String> {
+    let Some(app_root) = find_macos_app_bundle("OpenWork") else {
+        return Vec::new();
+    };
+    let mut problems = Vec::new();
+    let expected_file_arch = if arch == "x64" { "x86_64" } else { "arm64" };
+    let expected_pkg = if arch == "x64" {
+        "node-pty-darwin-x64"
+    } else {
+        "node-pty-darwin-arm64"
+    };
+
+    let binary = app_root.join("Contents/MacOS/OpenWork");
+    if binary.exists() {
+        if let Ok(output) = Command::new("/usr/bin/file").arg(&binary).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !stdout.contains(expected_file_arch) && !stdout.contains("universal") {
+                problems.push(format!(
+                    "OpenWork binary does not match this device architecture ({})",
+                    desktop_target_label("macos", arch)
+                ));
+            }
+        }
+    }
+
+    if let Ok(output) = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict", "--verbose=4"])
+        .arg(&app_root)
+        .output()
+    {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            problems.push(format!(
+                "OpenWork code signature is invalid; macOS Gatekeeper will reject this app{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            ));
+        }
+    }
+
+    let unpacked_node_modules = app_root.join("Contents/Resources/app.asar.unpacked/node_modules");
+    let node_pty = unpacked_node_modules.join("node-pty");
+    let lydell_root = unpacked_node_modules.join("@lydell");
+    let platform_pkg = lydell_root.join(expected_pkg);
+    let found_native_packages = std::fs::read_dir(&lydell_root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| name.starts_with("node-pty-darwin-"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if (node_pty.exists() || !found_native_packages.is_empty()) && !platform_pkg.exists() {
+        let found = if found_native_packages.is_empty() {
+            String::from("none")
+        } else {
+            found_native_packages.join(", ")
+        };
+        problems.push(format!(
+            "OpenWork is missing the native terminal package for {} ({expected_pkg}); found {found}",
+            desktop_target_label("macos", arch),
+        ));
+    }
+
+    for (label, relative_path) in [
+        (
+            "OpenWork better-sqlite3 native module",
+            "Contents/Resources/app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+        ),
+        (
+            "OpenWork better-sqlite3 test extension",
+            "Contents/Resources/app.asar.unpacked/node_modules/better-sqlite3/build/Release/test_extension.node",
+        ),
+        (
+            "OpenWork Computer Use helper",
+            "Contents/Resources/helpers/OpenWork Computer Use.app/Contents/MacOS/ComputerUse",
+        ),
+    ] {
+        let path = app_root.join(relative_path);
+        if let Some(problem) = macos_native_arch_problem(label, &path, expected_file_arch) {
+            problems.push(problem);
+        }
+    }
+    problems
+}
+
+#[cfg(not(target_os = "macos"))]
+fn openwork_macos_health_problems(_arch: &str) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_native_arch_problem(label: &str, path: &Path, expected_file_arch: &str) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+    let output = Command::new("/usr/bin/file").arg(path).output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains(expected_file_arch) || stdout.contains("universal") {
+        return None;
+    }
+    Some(format!(
+        "{label} does not match this device architecture; expected {expected_file_arch}, got {}",
+        stdout.trim()
+    ))
 }
 
 fn command_exists_for_desktop_app(cmd: &str) -> bool {
@@ -5125,7 +5530,20 @@ fn command_exists_for_desktop_app(cmd: &str) -> bool {
     dirs.push(std::path::PathBuf::from("/usr/local/bin"));
     dirs.push(std::path::PathBuf::from("/opt/homebrew/bin"));
 
-    dirs.into_iter().any(|dir| dir.join(cmd).is_file())
+    dirs.into_iter().any(|dir| {
+        dir.join(cmd).is_file() || {
+            #[cfg(target_os = "windows")]
+            {
+                dir.join(format!("{cmd}.exe")).is_file()
+                    || dir.join(format!("{cmd}.cmd")).is_file()
+                    || dir.join(format!("{cmd}.bat")).is_file()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                false
+            }
+        }
+    })
 }
 
 // ── /api/apps/open (launch installed desktop apps) ─────────────
@@ -5210,11 +5628,8 @@ fn handle_apps_open(mut request: Request) {
         }
     };
 
-    let platform = if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux"
-    };
+    let platform = desktop_platform();
+    let arch = desktop_arch();
 
     // "Open all installed" — launch every catalog app that is detected as
     // installed; report what was opened vs skipped (and why).
@@ -5226,8 +5641,13 @@ fn handle_apps_open(mut request: Request) {
             if id.is_empty() {
                 continue;
             }
-            if !check_app_installed(entry, platform) {
+            let health = check_app_health(entry, platform, arch);
+            if !health.installed {
                 skipped.push(serde_json::json!({ "id": id, "reason": "not installed" }));
+                continue;
+            }
+            if health.health == "broken" {
+                skipped.push(serde_json::json!({ "id": id, "reason": health.problems.join("; ") }));
                 continue;
             }
             match launch_catalog_app(entry, platform) {
@@ -5269,11 +5689,20 @@ fn handle_apps_open(mut request: Request) {
             return;
         }
     };
-    if !check_app_installed(entry, platform) {
+    let health = check_app_health(entry, platform, arch);
+    if !health.installed {
         respond_json(
             request,
             409,
             &serde_json::json!({ "error": "not installed", "id": app_id }),
+        );
+        return;
+    }
+    if health.health == "broken" {
+        respond_json(
+            request,
+            409,
+            &serde_json::json!({ "error": health.problems.join("; "), "id": app_id }),
         );
         return;
     }
@@ -5304,6 +5733,331 @@ struct AppsInstallRequest {
 fn install_is_command(cmd: &str) -> bool {
     let t = cmd.trim();
     !t.is_empty() && !t.to_ascii_lowercase().starts_with("visit")
+}
+
+fn github_release_asset_install_command(
+    installer: &ResolvedInstaller,
+    platform: &str,
+) -> Result<String, String> {
+    let repo = installer
+        .repo
+        .as_deref()
+        .ok_or_else(|| "dynamic GitHub installer is missing repo".to_string())?;
+    let asset_regex = installer
+        .asset_regex
+        .as_deref()
+        .ok_or_else(|| "dynamic GitHub installer is missing asset_regex".to_string())?;
+
+    if platform == "windows" {
+        // The command runs inside a generated .cmd file. Keep the PowerShell
+        // payload self-contained and catalog-only; no request data reaches it.
+        return Ok(format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference='Stop'; $repo={repo:?}; $pattern={pattern:?}; $release=Invoke-RestMethod -Uri ('https://api.github.com/repos/'+$repo+'/releases/latest'); $asset=$release.assets | Where-Object {{ $_.name -match $pattern }} | Select-Object -First 1; if (-not $asset) {{ throw 'No matching stable OpenWork release asset for this Windows architecture' }}; $dir=Join-Path $env:TEMP 'tytus-openwork-install'; New-Item -ItemType Directory -Force -Path $dir | Out-Null; $dest=Join-Path $dir $asset.name; Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $dest; Start-Process $dest; Write-Host ('Opened installer: '+$dest)\"",
+            repo = repo,
+            pattern = asset_regex,
+        ));
+    }
+
+    let (dest_name, open_cmd) = if platform == "linux" {
+        (
+            "openwork-installer.AppImage",
+            "chmod +x \"$dest\" || true\n( xdg-open \"$dest\" >/dev/null 2>&1 || echo \"Downloaded installer: $dest\" )",
+        )
+    } else {
+        (
+            "openwork-installer.dmg",
+            "mount_dir=$(mktemp -d \"${TMPDIR:-/tmp}/tytus-openwork-mount.XXXXXX\")\n\
+             cleanup_mount() { hdiutil detach \"$mount_dir\" >/dev/null 2>&1 || true; rmdir \"$mount_dir\" >/dev/null 2>&1 || true; }\n\
+             trap cleanup_mount EXIT\n\
+             echo \"Mounting $dest\"\n\
+             hdiutil attach -nobrowse -quiet -mountpoint \"$mount_dir\" \"$dest\"\n\
+             app_path=$(find \"$mount_dir\" -maxdepth 2 -name \"*.app\" -type d | head -n 1)\n\
+             if [ -z \"$app_path\" ]; then echo \"No .app bundle found in $dest\"; open \"$dest\"; exit 1; fi\n\
+             app_name=$(basename \"$app_path\")\n\
+             app_display=${app_name%.app}\n\
+             target=\"/Applications/$app_name\"\n\
+             osascript -e \"tell application \\\"$app_display\\\" to quit\" >/dev/null 2>&1 || true\n\
+             echo \"Installing $app_name to /Applications\"\n\
+             rm -rf \"$target\"\n\
+             ditto \"$app_path\" \"$target\"\n\
+             xattr -dr com.apple.quarantine \"$target\" >/dev/null 2>&1 || true\n\
+             echo \"Installed $target\"",
+        )
+    };
+
+    let verify_cmd = if platform == "macos" {
+        r#"
+verify_openwork_app() {
+  if [ "${app_name:-}" != "OpenWork.app" ]; then return 0; fi
+  echo "Verifying OpenWork code signature before first launch"
+  if ! codesign --verify --deep --strict --verbose=4 "$target"; then
+    echo "OpenWork install failed validation: code signature is invalid. The published artifact or local bundle is broken."
+    return 1
+  fi
+  if ! spctl --assess --type execute --verbose=4 "$target"; then
+    echo "OpenWork install failed validation: Gatekeeper rejects this app."
+    return 1
+  fi
+}
+verify_openwork_app
+"#
+    } else {
+        ""
+    };
+
+    Ok(format!(
+        "set -eo pipefail\n\
+         repo={repo}\n\
+         pattern={pattern}\n\
+         dir=\"${{TMPDIR:-/tmp}}/tytus-openwork-install\"\n\
+         dest=\"$dir/{dest_name}\"\n\
+         mkdir -p \"$dir\"\n\
+         echo \"Fetching latest stable OpenWork release for this machine…\"\n\
+         asset_url=$(curl -fsSL \"https://api.github.com/repos/$repo/releases/latest\" | python3 -c 'import json,re,sys; pattern=sys.argv[1]; data=json.load(sys.stdin); asset=next((a for a in data.get(\"assets\",[]) if re.match(pattern, a.get(\"name\",\"\"))), None); sys.exit(\"No matching stable release asset\") if asset is None else print(asset[\"browser_download_url\"])' \"$pattern\")\n\
+         echo \"Downloading $asset_url\"\n\
+         curl -L --fail --progress-bar -o \"$dest\" \"$asset_url\"\n\
+         echo \"Installing from $dest\"\n\
+         {open_cmd}\n\
+         {verify_cmd}\n\
+         echo \"Done. Refresh Tytus App Store if it does not update automatically.\"",
+        repo = shell_single_quote(repo),
+        pattern = shell_single_quote(asset_regex),
+        dest_name = dest_name,
+        open_cmd = open_cmd,
+        verify_cmd = verify_cmd,
+    ))
+}
+
+fn openwork_source_build_macos_install_command() -> String {
+    let preferred_local_repo = "/Users/sebastian/projects/makakoo/agents/sample_apps/openwork";
+    format!(
+        r#"set -eo pipefail
+export PATH="$HOME/.bun/bin:$HOME/.nvm/versions/node/v22.22.3/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+preferred_repo={preferred_repo}
+repo_dir="$HOME/Tytus/ExternalApps/openwork"
+
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "OpenWork source build installer is macOS-only."
+  exit 1
+fi
+if [ "$(uname -m)" != "x86_64" ]; then
+  echo "This installer is for Intel Mac. Apple Silicon should use the official OpenWork release."
+  exit 1
+fi
+
+echo "Installing OpenWork for Intel Mac from source."
+echo "Reason: the official OpenWork x64 DMG currently ships ARM64 native modules."
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is required. Install Xcode Command Line Tools first: xcode-select --install"
+  exit 1
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "Node.js is required before building OpenWork."
+  exit 1
+fi
+
+if [ -d "$preferred_repo/.git" ]; then
+  repo_dir="$preferred_repo"
+  echo "Using local OpenWork source: $repo_dir"
+else
+  mkdir -p "$(dirname "$repo_dir")"
+  if [ -d "$repo_dir/.git" ]; then
+    echo "Updating OpenWork source: $repo_dir"
+    git -C "$repo_dir" fetch origin dev
+    git -C "$repo_dir" checkout dev
+    git -C "$repo_dir" pull --ff-only origin dev
+  else
+    echo "Cloning OpenWork source to $repo_dir"
+    git clone --branch dev https://github.com/different-ai/openwork "$repo_dir"
+  fi
+fi
+
+cd "$repo_dir"
+corepack enable
+corepack prepare pnpm@11.4.0 --activate
+
+needs_bun_upgrade=0
+if ! command -v bun >/dev/null 2>&1; then
+  needs_bun_upgrade=1
+elif ! python3 - "$(bun --version)" <<'PY'
+import sys
+parts = tuple(int(p) for p in sys.argv[1].split(".")[:3])
+raise SystemExit(0 if parts >= (1, 3, 9) else 1)
+PY
+then
+  needs_bun_upgrade=1
+fi
+if [ "$needs_bun_upgrade" = "1" ]; then
+  if command -v bun >/dev/null 2>&1; then
+    bun upgrade
+  else
+    curl -fsSL https://bun.sh/install | bash
+    export PATH="$HOME/.bun/bin:$PATH"
+  fi
+fi
+
+echo "Installing OpenWork dependencies"
+pnpm install --frozen-lockfile
+
+echo "Building OpenWork Intel Mac app"
+pnpm --filter @openwork/desktop package:electron:dir
+
+built_app="$repo_dir/apps/desktop/dist-electron/mac/OpenWork.app"
+if [ ! -d "$built_app" ]; then
+  echo "Build completed but no OpenWork.app was produced at $built_app"
+  exit 1
+fi
+
+target="/Applications/OpenWork.app"
+if [ ! -w "/Applications" ]; then
+  mkdir -p "$HOME/Applications"
+  target="$HOME/Applications/OpenWork.app"
+fi
+
+osascript -e 'tell application "OpenWork" to quit' >/dev/null 2>&1 || true
+rm -rf "$target"
+ditto "$built_app" "$target"
+xattr -dr com.apple.quarantine "$target" >/dev/null 2>&1 || true
+codesign --force --deep --sign - "$target"
+codesign --verify --deep --strict --verbose=2 "$target"
+
+echo "Installed source-built OpenWork: $target"
+echo "Refresh Tytus App Store if it does not update automatically."
+"#,
+        preferred_repo = shell_single_quote(preferred_local_repo),
+    )
+}
+
+fn odysseus_native_macos_install_command() -> String {
+    let preferred_local_repo = "/Users/sebastian/projects/makakoo/agents/sample_apps/odysseus";
+    format!(
+        r#"set -eo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+preferred_repo={preferred_repo}
+repo_dir="$HOME/Tytus/ExternalApps/odysseus"
+
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "Odysseus native app installer is macOS-only."
+  exit 1
+fi
+
+echo "Installing Odysseus natively for this Mac."
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is required. Install Xcode Command Line Tools first: xcode-select --install"
+  exit 1
+fi
+if ! command -v brew >/dev/null 2>&1; then
+  echo "Homebrew is required by Odysseus' macOS setup. Install it, then rerun:"
+  echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+  exit 1
+fi
+
+if [ -d "$preferred_repo/.git" ]; then
+  repo_dir="$preferred_repo"
+  echo "Using local Odysseus source: $repo_dir"
+else
+  mkdir -p "$(dirname "$repo_dir")"
+  if [ -d "$repo_dir/.git" ]; then
+    echo "Updating Odysseus source: $repo_dir"
+    git -C "$repo_dir" pull --ff-only
+  else
+    echo "Cloning Odysseus source to $repo_dir"
+    git clone https://github.com/pewdiepie-archdaemon/odysseus "$repo_dir"
+  fi
+fi
+
+cd "$repo_dir"
+echo "Preparing Odysseus dependencies and data."
+ODYSSEUS_NO_OPEN=1 ODYSSEUS_SKIP_RUN_HINT=1 ./start-macos.sh &
+setup_pid=$!
+
+for _ in $(seq 1 180); do
+  if curl -fsS --max-time 2 http://127.0.0.1:7860 >/dev/null 2>&1; then
+    kill "$setup_pid" >/dev/null 2>&1 || true
+    wait "$setup_pid" >/dev/null 2>&1 || true
+    break
+  fi
+  if ! kill -0 "$setup_pid" >/dev/null 2>&1; then
+    wait "$setup_pid"
+    break
+  fi
+  sleep 1
+done
+
+if [ ! -x venv/bin/uvicorn ] || [ ! -f data/app.db ]; then
+  echo "Odysseus setup did not finish creating venv/bin/uvicorn and data/app.db."
+  echo "Rerun this installer or run ./start-macos.sh in $repo_dir for full logs."
+  exit 1
+fi
+
+echo "Building Odysseus.app launcher."
+ODYSSEUS_PORT=7860 ./build-macos-app.sh
+
+target="/Applications/Odysseus.app"
+if [ ! -w "/Applications" ]; then
+  mkdir -p "$HOME/Applications"
+  target="$HOME/Applications/Odysseus.app"
+fi
+osascript -e 'tell application "Odysseus" to quit' >/dev/null 2>&1 || true
+rm -rf "$target"
+ditto "$repo_dir/dist/Odysseus.app" "$target"
+xattr -dr com.apple.quarantine "$target" >/dev/null 2>&1 || true
+codesign --force --deep --sign - "$target" >/dev/null 2>&1 || true
+echo "Installed $target"
+echo "Done. Refresh Tytus App Store if it does not update automatically."
+"#,
+        preferred_repo = shell_single_quote(preferred_local_repo),
+    )
+}
+
+fn odysseus_native_linux_install_command() -> String {
+    r#"set -eo pipefail
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+repo_dir="$HOME/Tytus/ExternalApps/odysseus"
+echo "Installing Odysseus natively for Linux."
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is required before installing Odysseus."
+  exit 1
+fi
+py=""
+for cand in python3.13 python3.12 python3.11 python3; do
+  if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3,11) else 1)' 2>/dev/null; then
+    py="$(command -v "$cand")"; break
+  fi
+done
+if [ -z "$py" ]; then
+  echo "Python 3.11+ is required before installing Odysseus."
+  exit 1
+fi
+mkdir -p "$(dirname "$repo_dir")"
+if [ -d "$repo_dir/.git" ]; then
+  git -C "$repo_dir" pull --ff-only
+else
+  git clone https://github.com/pewdiepie-archdaemon/odysseus "$repo_dir"
+fi
+cd "$repo_dir"
+if [ ! -d venv ]; then "$py" -m venv venv; fi
+./venv/bin/python -m pip install --upgrade pip
+./venv/bin/python -m pip install -r requirements.txt
+ODYSSEUS_SKIP_RUN_HINT=1 ./venv/bin/python setup.py
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/odysseus" <<'SH'
+#!/usr/bin/env bash
+set -e
+cd "$HOME/Tytus/ExternalApps/odysseus"
+exec ./venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port "${ODYSSEUS_PORT:-7000}"
+SH
+chmod +x "$HOME/.local/bin/odysseus"
+echo "Installed Odysseus. Run: odysseus"
+echo "Then open http://127.0.0.1:7000"
+"#
+    .to_string()
+}
+
+fn odysseus_native_windows_install_command() -> String {
+    r#"powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $repo=Join-Path $env:USERPROFILE 'Tytus\ExternalApps\odysseus'; if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git is required before installing Odysseus' }; if (Test-Path (Join-Path $repo '.git')) { git -C $repo pull --ff-only } else { New-Item -ItemType Directory -Force -Path (Split-Path $repo) | Out-Null; git clone https://github.com/pewdiepie-archdaemon/odysseus $repo }; Set-Location $repo; powershell -ExecutionPolicy Bypass -File .\launch-windows.ps1""#
+        .to_string()
 }
 
 /// D1: the Install button runs the install command in a new Terminal window
@@ -5348,18 +6102,41 @@ fn handle_apps_install(mut request: Request) {
             return;
         }
     };
-    let platform = if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux"
+    let platform = desktop_platform();
+    let arch = desktop_arch();
+    let installer = match resolve_app_installer(entry, platform, arch) {
+        Some(installer) => installer,
+        None => {
+            respond_json(
+                request,
+                409,
+                &serde_json::json!({ "error": "no supported installer for this device", "id": parsed.app_id }),
+            );
+            return;
+        }
     };
-    let cmd = entry
-        .get("install")
-        .and_then(|i| i.get(platform))
-        .and_then(|c| c.as_str())
-        .unwrap_or("");
 
-    if install_is_command(cmd) {
+    let dynamic_command = if installer.kind.starts_with("github_release") {
+        match github_release_asset_install_command(&installer, platform) {
+            Ok(cmd) => Some(cmd),
+            Err(e) => {
+                respond_json(request, 500, &serde_json::json!({ "error": e }));
+                return;
+            }
+        }
+    } else if installer.kind == "openwork_source_build_macos" {
+        Some(openwork_source_build_macos_install_command())
+    } else if installer.kind == "odysseus_native_macos" {
+        Some(odysseus_native_macos_install_command())
+    } else if installer.kind == "odysseus_native_linux" {
+        Some(odysseus_native_linux_install_command())
+    } else if installer.kind == "odysseus_native_windows" {
+        Some(odysseus_native_windows_install_command())
+    } else {
+        None
+    };
+
+    if let Some(cmd) = installer.command.as_deref().or(dynamic_command.as_deref()) {
         match atomek_core::platform::terminal::open_shell_command(cmd) {
             Ok(()) => respond_json(
                 request,
@@ -5373,8 +6150,12 @@ fn handle_apps_install(mut request: Request) {
             ),
         }
     } else {
-        // Instruction-only install: open the app's website.
-        let url = entry.get("url").and_then(|u| u.as_str()).unwrap_or("");
+        // URL-only installer: open the app's download page.
+        let url = installer
+            .url
+            .as_deref()
+            .or_else(|| entry.get("url").and_then(|u| u.as_str()))
+            .unwrap_or("");
         let _ = atomek_core::platform::open::open_url(url);
         respond_json(
             request,
@@ -13844,6 +14625,131 @@ mod tests {
     }
 
     #[test]
+    fn resolve_app_installer_picks_current_arch_and_marks_unsupported() {
+        let app = serde_json::json!({
+            "url": "https://example.com",
+            "installers": [
+                { "os": "macos", "arch": "arm64", "kind": "url", "label": "Apple Silicon", "url": "https://example.com/arm64" },
+                { "os": "macos", "arch": "x64", "kind": "url", "label": "Intel Mac", "url": "https://example.com/x64" },
+                { "os": "windows", "arch": "x64", "kind": "url", "label": "Windows x64", "url": "https://example.com/win" }
+            ]
+        });
+
+        let mac_x64 = resolve_app_installer(&app, "macos", "x64").expect("x64 installer");
+        assert_eq!(mac_x64.label, "Intel Mac");
+        assert_eq!(mac_x64.url.as_deref(), Some("https://example.com/x64"));
+
+        let mac_arm = resolve_app_installer(&app, "macos", "arm64").expect("arm64 installer");
+        assert_eq!(mac_arm.label, "Apple Silicon");
+
+        assert!(resolve_app_installer(&app, "linux", "x64").is_none());
+    }
+
+    #[test]
+    fn openwork_catalog_uses_stable_arch_specific_installers() {
+        let catalog: Vec<serde_json::Value> =
+            serde_json::from_slice(APPS_JSON).expect("apps.json must be valid JSON");
+        let openwork = catalog
+            .iter()
+            .find(|entry| entry.get("id").and_then(|v| v.as_str()) == Some("openwork"))
+            .expect("openwork catalog entry");
+
+        let intel = resolve_app_installer(openwork, "macos", "x64").expect("Intel Mac installer");
+        assert_eq!(intel.kind, "openwork_source_build_macos");
+        assert_eq!(intel.label, "Build OpenWork locally for Intel Mac");
+        assert_eq!(intel.repo.as_deref(), Some("different-ai/openwork"));
+        assert!(intel.asset_regex.is_none());
+        let intel_install_script = openwork_source_build_macos_install_command();
+        assert!(
+            intel_install_script.contains("pnpm --filter @openwork/desktop package:electron:dir"),
+            "Intel Mac OpenWork installer must build locally because the official x64 DMG contains ARM64 native modules"
+        );
+        assert!(
+            intel_install_script.contains("codesign --force --deep --sign -"),
+            "source-built OpenWork app must be ad-hoc signed after local packaging"
+        );
+        assert!(
+            !intel_install_script.contains("Repairing OpenWork native terminal package"),
+            "OpenWork installer must not add native packages inside a signed app bundle"
+        );
+
+        let apple =
+            resolve_app_installer(openwork, "macos", "arm64").expect("Apple Silicon installer");
+        assert_eq!(apple.label, "Install OpenWork for Apple Silicon");
+        assert_eq!(
+            apple.asset_regex.as_deref(),
+            Some(r"^openwork-mac-arm64-[0-9]+\.[0-9]+\.[0-9]+\.dmg$")
+        );
+
+        let linux_x64 =
+            resolve_app_installer(openwork, "linux", "x64").expect("Linux x64 installer");
+        assert_eq!(linux_x64.kind, "github_release_appimage");
+        assert_eq!(
+            linux_x64.asset_regex.as_deref(),
+            Some(r"^openwork-linux-x86_64-[0-9]+\.[0-9]+\.[0-9]+\.AppImage$")
+        );
+
+        let windows_x64 =
+            resolve_app_installer(openwork, "windows", "x64").expect("Windows x64 installer");
+        assert_eq!(windows_x64.kind, "github_release_exe");
+
+        assert!(resolve_app_installer(openwork, "windows", "arm64").is_none());
+        assert!(disabled_installer_reason(openwork, "windows", "arm64")
+            .expect("Windows ARM64 reason")
+            .contains("Windows ARM64 support is not evidenced"));
+    }
+
+    #[test]
+    fn desktop_app_installers_cover_every_declared_target_or_explain_gap() {
+        let catalog: Vec<serde_json::Value> =
+            serde_json::from_slice(APPS_JSON).expect("apps.json must be valid JSON");
+        let target_arches = [
+            ("macos", ["x64", "arm64"]),
+            ("linux", ["x64", "arm64"]),
+            ("windows", ["x64", "arm64"]),
+        ];
+
+        for entry in &catalog {
+            let id = entry["id"].as_str().unwrap_or("<no-id>");
+            let platforms = entry
+                .get("platforms")
+                .and_then(|p| p.as_array())
+                .expect("platforms must be an array");
+
+            for (platform, arches) in target_arches {
+                if !platforms.iter().any(|p| p.as_str() == Some(platform)) {
+                    continue;
+                }
+                for arch in arches {
+                    let has_installer = entry
+                        .get("installers")
+                        .and_then(|v| v.as_array())
+                        .map(|installers| {
+                            installers.iter().any(|installer| {
+                                installer.get("os").and_then(|v| v.as_str()) == Some(platform)
+                                    && matches!(
+                                        installer.get("arch").and_then(|v| v.as_str()),
+                                        Some(a) if a == arch || a == "universal"
+                                    )
+                                    && !installer
+                                        .get("disabled")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false);
+                    let has_disabled_reason =
+                        disabled_installer_reason(entry, platform, arch).is_some();
+                    assert!(
+                        has_installer || has_disabled_reason,
+                        "{id}: {platform}/{arch} needs either a compatible installer or an explicit disabled_reason"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn apps_catalog_every_entry_has_docs_and_launch_specs() {
         let catalog: Vec<serde_json::Value> =
             serde_json::from_slice(APPS_JSON).expect("apps.json must be valid JSON");
@@ -13856,13 +14762,32 @@ mod tests {
                 docs.map(|d| d.starts_with("http")).unwrap_or(false),
                 "{id}: docs must be an http(s) URL"
             );
-            // Both platforms must resolve to a launchable spec so Open works
-            // on macOS and Linux alike.
-            for platform in ["macos", "linux"] {
+            // Supported desktop platforms must resolve to a launchable spec.
+            let platforms = entry
+                .get("platforms")
+                .and_then(|p| p.as_array())
+                .expect("platforms must be an array");
+            for platform in platforms.iter().filter_map(|p| p.as_str()) {
                 assert!(
                     resolve_launch_spec(entry, platform).is_ok(),
                     "{id}: launch.{platform} must resolve to (kind, target)"
                 );
+            }
+            if let Some(installers) = entry.get("installers").and_then(|v| v.as_array()) {
+                for installer in installers {
+                    let os = installer
+                        .get("os")
+                        .and_then(|v| v.as_str())
+                        .expect("installer.os required");
+                    assert!(
+                        platforms.iter().any(|p| p.as_str() == Some(os)),
+                        "{id}: installer for {os} exists but platforms does not include it"
+                    );
+                    assert!(
+                        resolve_launch_spec(entry, os).is_ok(),
+                        "{id}: installer for {os} exists but launch.{os} is missing"
+                    );
+                }
             }
         }
     }

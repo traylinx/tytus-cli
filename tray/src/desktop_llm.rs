@@ -6,7 +6,9 @@
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const TYTUS_PROVIDER_ID: &str = "tytus-ail";
@@ -48,7 +50,7 @@ pub struct LlmConfigResult {
 }
 
 pub fn adapter_supported(adapter: &str) -> bool {
-    matches!(adapter, "opencode" | "pi")
+    matches!(adapter, "opencode" | "pi" | "odysseus")
 }
 
 pub fn status(
@@ -59,6 +61,7 @@ pub fn status(
     match adapter {
         "opencode" => opencode_status(app_id, provider),
         "pi" => pi_status(app_id, provider),
+        "odysseus" => odysseus_status(app_id, provider),
         other => Ok(unsupported_status(app_id, other, provider)),
     }
 }
@@ -71,6 +74,7 @@ pub fn configure(
     match adapter {
         "opencode" => configure_opencode(app_id, provider),
         "pi" => configure_pi(app_id, provider),
+        "odysseus" => configure_odysseus(app_id, provider),
         other => Err(format!(
             "No safe Tytus AIL adapter is available for {other} yet."
         )),
@@ -375,6 +379,280 @@ fn configure_pi(app_id: &str, provider: &TytusAilProvider) -> Result<LlmConfigRe
     })
 }
 
+fn odysseus_candidate_roots() -> Result<Vec<PathBuf>, String> {
+    let home = home_dir()?;
+    let mut roots = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        for app in [
+            PathBuf::from("/Applications/Odysseus.app/Contents/MacOS/Odysseus"),
+            home.join("Applications/Odysseus.app/Contents/MacOS/Odysseus"),
+        ] {
+            if let Ok(raw) = fs::read_to_string(&app) {
+                if let Some(line) = raw.lines().find(|l| l.starts_with("INSTALL_DIR=")) {
+                    let value = line
+                        .trim_start_matches("INSTALL_DIR=")
+                        .trim()
+                        .trim_matches('"')
+                        .to_string();
+                    if !value.is_empty() {
+                        roots.push(PathBuf::from(value));
+                    }
+                }
+            }
+        }
+    }
+    roots.push(home.join("Tytus/ExternalApps/odysseus"));
+    roots.push(PathBuf::from(
+        "/Users/sebastian/projects/makakoo/agents/sample_apps/odysseus",
+    ));
+    let mut deduped = Vec::new();
+    for root in roots {
+        if !deduped.contains(&root) {
+            deduped.push(root);
+        }
+    }
+    let roots = deduped;
+    Ok(roots)
+}
+
+fn odysseus_root() -> Result<Option<PathBuf>, String> {
+    Ok(odysseus_candidate_roots()?
+        .into_iter()
+        .find(|p| p.join("app.py").exists() && p.join("data").exists()))
+}
+
+fn run_python_json(
+    script: &str,
+    root: &Path,
+    provider: &TytusAilProvider,
+) -> Result<Value, String> {
+    let mut child = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .env("ODYSSEUS_ROOT", root)
+        .env("TYTUS_BASE_URL", &provider.base_url)
+        .env("TYTUS_API_KEY", &provider.api_key)
+        .env("TYTUS_MODEL", &provider.model)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("python3 is required to configure Odysseus: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(b"")
+            .map_err(|e| format!("failed to close Python stdin: {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Odysseus configuration helper failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Odysseus configuration helper failed".to_string()
+        } else {
+            stderr
+        });
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Odysseus helper returned invalid JSON: {e}"))
+}
+
+const ODYSSEUS_STATUS_SCRIPT: &str = r#"
+import json, os, sqlite3
+root=os.environ["ODYSSEUS_ROOT"]
+db_path=os.path.join(root,"data","app.db")
+settings_path=os.path.join(root,"data","settings.json")
+base=os.environ["TYTUS_BASE_URL"]
+key=os.environ["TYTUS_API_KEY"]
+model=os.environ["TYTUS_MODEL"]
+out={"db_exists":os.path.exists(db_path),"configured":False,"base_url":None,"key_ok":False,"endpoint_id":None}
+settings={}
+if os.path.exists(settings_path):
+    try:
+        settings=json.load(open(settings_path))
+    except Exception:
+        settings={}
+if os.path.exists(db_path):
+    con=sqlite3.connect(db_path)
+    con.row_factory=sqlite3.Row
+    try:
+        rows=con.execute("select id,name,base_url,api_key from model_endpoints").fetchall()
+        match=None
+        for row in rows:
+            if row["id"]=="tytusail" or row["name"]=="Tytus AIL" or row["base_url"]==base:
+                match=row
+                if row["base_url"]==base:
+                    break
+        if match:
+            out["endpoint_id"]=match["id"]
+            out["base_url"]=match["base_url"]
+            stored_key=match["api_key"] or ""
+            # Odysseus encrypts plaintext provider keys on startup with an
+            # enc: prefix. Treat encrypted Tytus rows as configured; the app
+            # owns decryption and will use the stored secret.
+            out["key_ok"]=(stored_key==key or stored_key.startswith("enc:"))
+            out["configured"]=(match["base_url"]==base and out["key_ok"] and settings.get("default_endpoint_id")==match["id"] and settings.get("default_model")==model)
+    except sqlite3.Error as e:
+        out["error"]=str(e)
+    finally:
+        con.close()
+print(json.dumps(out))
+"#;
+
+const ODYSSEUS_CONFIGURE_SCRIPT: &str = r#"
+import json, os, shutil, sqlite3, time
+from datetime import datetime
+root=os.environ["ODYSSEUS_ROOT"]
+db_path=os.path.join(root,"data","app.db")
+settings_path=os.path.join(root,"data","settings.json")
+base=os.environ["TYTUS_BASE_URL"]
+key=os.environ["TYTUS_API_KEY"]
+model=os.environ["TYTUS_MODEL"]
+if not os.path.exists(db_path):
+    raise SystemExit("Odysseus data/app.db does not exist. Install or launch Odysseus once, then configure Tytus AIL.")
+backup=None
+if os.path.exists(settings_path):
+    backup=settings_path+f".tytus-backup-{int(time.time())}.json"
+    shutil.copy2(settings_path, backup)
+con=sqlite3.connect(db_path)
+con.row_factory=sqlite3.Row
+try:
+    cols={r[1] for r in con.execute("PRAGMA table_info(model_endpoints)").fetchall()}
+    if not cols:
+        raise SystemExit("Odysseus model_endpoints table does not exist. Run Odysseus setup first.")
+    now=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")
+    cached=json.dumps(["ail-compound","ail-fast"])
+    pinned=json.dumps(["ail-compound","ail-fast"])
+    hidden=json.dumps(["ail-transcribe","ail-speech","ail-image","ail-music-cover","ail-music"])
+    values={
+      "id":"tytusail","name":"Tytus AIL","base_url":base,"api_key":key,"is_enabled":1,
+      "hidden_models":hidden,"cached_models":cached,"pinned_models":pinned,
+      "model_type":"llm","endpoint_kind":"proxy","model_refresh_mode":"manual",
+      "model_refresh_interval":None,"model_refresh_timeout":15,"supports_tools":1,
+      "owner":None,"created_at":now,"updated_at":now,
+    }
+    row=con.execute("select id from model_endpoints where id=? or name=? or base_url=? order by case when id=? then 0 else 1 end limit 1", ("tytusail","Tytus AIL",base,"tytusail")).fetchone()
+    if row:
+        ep_id=row["id"]
+        updates=[k for k in values if k in cols and k not in ("id","created_at")]
+        con.execute("update model_endpoints set "+", ".join(f"{k}=?" for k in updates)+" where id=?", [values[k] for k in updates]+[ep_id])
+    else:
+        insert=[k for k in values if k in cols]
+        ep_id="tytusail"
+        con.execute("insert into model_endpoints ("+", ".join(insert)+") values ("+", ".join("?" for _ in insert)+")", [values[k] for k in insert])
+    con.commit()
+finally:
+    con.close()
+settings={}
+if os.path.exists(settings_path):
+    try:
+        settings=json.load(open(settings_path))
+    except Exception:
+        settings={}
+settings.update({
+  "default_endpoint_id": ep_id,
+  "default_model": model,
+  "utility_endpoint_id": ep_id,
+  "utility_model": "ail-fast",
+  "research_endpoint_id": ep_id,
+  "research_model": model,
+  "task_endpoint_id": ep_id,
+  "task_model": model,
+  "default_model_fallbacks": [{"endpoint_id": ep_id, "model": "ail-fast"}],
+  "utility_model_fallbacks": [{"endpoint_id": ep_id, "model": model}],
+})
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+tmp=settings_path+".tmp"
+with open(tmp,"w") as f:
+    json.dump(settings,f,indent=2)
+    f.write("\n")
+os.replace(tmp, settings_path)
+print(json.dumps({"configured":True,"endpoint_id":ep_id,"backup_path":backup}))
+"#;
+
+fn odysseus_status(app_id: &str, provider: &TytusAilProvider) -> Result<LlmConfigStatus, String> {
+    let Some(root) = odysseus_root()? else {
+        return Ok(LlmConfigStatus {
+            app_id: app_id.to_string(),
+            supported: true,
+            configured: false,
+            provider: TYTUS_PROVIDER_ID.to_string(),
+            model: provider.model.clone(),
+            base_url: None,
+            key_hint: None,
+            restart_required: true,
+            message: "Install Odysseus first, then Tytus can add the Tytus AIL provider."
+                .to_string(),
+        });
+    };
+    let status = run_python_json(ODYSSEUS_STATUS_SCRIPT, &root, provider)?;
+    let configured = status
+        .get("configured")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let key_ok = status
+        .get("key_ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(LlmConfigStatus {
+        app_id: app_id.to_string(),
+        supported: true,
+        configured,
+        provider: TYTUS_PROVIDER_ID.to_string(),
+        model: provider.model.clone(),
+        base_url: status
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        key_hint: if key_ok {
+            Some(key_hint(&provider.api_key))
+        } else {
+            None
+        },
+        restart_required: true,
+        message: if configured {
+            "Tytus AIL is configured as the default Odysseus provider."
+        } else if !status
+            .get("db_exists")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            "Odysseus is installed, but data/app.db is missing. Launch Odysseus once, then configure Tytus AIL."
+        } else {
+            "Odysseus can be configured with Tytus AIL."
+        }
+        .to_string(),
+    })
+}
+
+fn configure_odysseus(
+    app_id: &str,
+    provider: &TytusAilProvider,
+) -> Result<LlmConfigResult, String> {
+    let root = odysseus_root()?.ok_or_else(|| {
+        "Install Odysseus first, then Tytus can add the Tytus AIL provider.".to_string()
+    })?;
+    let result = run_python_json(ODYSSEUS_CONFIGURE_SCRIPT, &root, provider)?;
+    Ok(LlmConfigResult {
+        ok: true,
+        app_id: app_id.to_string(),
+        configured: result
+            .get("configured")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        provider: TYTUS_PROVIDER_ID.to_string(),
+        model: provider.model.clone(),
+        backup_path: result
+            .get("backup_path")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        restart_required: true,
+        message: "Tytus AIL is now the default provider for Odysseus. Restart Odysseus if it is already open.".to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +661,7 @@ mod tests {
     fn adapter_support_is_allowlisted() {
         assert!(adapter_supported("opencode"));
         assert!(adapter_supported("pi"));
+        assert!(adapter_supported("odysseus"));
         assert!(!adapter_supported("../opencode"));
         assert!(!adapter_supported("unknown"));
     }

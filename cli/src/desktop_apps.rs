@@ -16,6 +16,8 @@ const APPS_JSON: &str = include_str!("../../tray/web/assets/apps.json");
 fn platform() -> &'static str {
     if cfg!(target_os = "macos") {
         "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
     } else {
         "linux"
     }
@@ -83,7 +85,20 @@ fn command_exists_for_desktop_app(cmd: &str) -> bool {
     dirs.push(std::path::PathBuf::from("/usr/local/bin"));
     dirs.push(std::path::PathBuf::from("/opt/homebrew/bin"));
 
-    dirs.into_iter().any(|dir| dir.join(cmd).is_file())
+    dirs.into_iter().any(|dir| {
+        dir.join(cmd).is_file() || {
+            #[cfg(target_os = "windows")]
+            {
+                dir.join(format!("{cmd}.exe")).is_file()
+                    || dir.join(format!("{cmd}.cmd")).is_file()
+                    || dir.join(format!("{cmd}.bat")).is_file()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                false
+            }
+        }
+    })
 }
 
 fn resolve_launch_spec<'a>(
@@ -235,7 +250,8 @@ mod tests {
         assert!(!catalog.is_empty());
         for e in &catalog {
             let id = e["id"].as_str().unwrap_or("<no-id>");
-            for platform in ["macos", "linux"] {
+            let platforms = e["platforms"].as_array().expect("platforms must be array");
+            for platform in platforms.iter().filter_map(|p| p.as_str()) {
                 assert!(
                     resolve_launch_spec(e, platform).is_ok(),
                     "{id}: launch.{platform} must resolve"
