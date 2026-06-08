@@ -734,7 +734,19 @@ fn summarize_health_json(raw: &str) -> (String, String, String) {
 /// inside a pod. Secret-safe: it reads only `.tytus/health.json`; it never cats
 /// env/config files that could contain credentials. A 15s cache prevents the
 /// install wizard from hammering `tytus exec` while it polls readiness.
-fn check_pod_tytus_bootstrap_entry(pod_id: &str, refresh: bool) -> BootstrapHealthEntry {
+fn agent_exec_selector(agent: &AgentSlot) -> &str {
+    agent
+        .route_id
+        .as_deref()
+        .filter(|route| !route.is_empty())
+        .unwrap_or(&agent.pod_id)
+}
+
+fn check_pod_tytus_bootstrap_entry(
+    cache_key: &str,
+    exec_selector: &str,
+    refresh: bool,
+) -> BootstrapHealthEntry {
     if !readiness_strict_enabled() {
         return BootstrapHealthEntry {
             status: "skipped".to_string(),
@@ -749,7 +761,7 @@ fn check_pod_tytus_bootstrap_entry(pod_id: &str, refresh: bool) -> BootstrapHeal
         if let Some(entry) = bootstrap_health_cache()
             .lock()
             .unwrap()
-            .get(pod_id)
+            .get(cache_key)
             .cloned()
         {
             if now.saturating_sub(entry.fetched_at) < BOOTSTRAP_HEALTH_TTL_SECS {
@@ -766,7 +778,7 @@ fi
 cat .tytus/health.json
 "#;
 
-    let entry = match run_tytus_exec_shell(pod_id, script, Duration::from_secs(12)) {
+    let entry = match run_tytus_exec_shell(exec_selector, script, Duration::from_secs(12)) {
         Ok((true, stdout, _stderr, false)) => {
             let (status, detail, overall) = summarize_health_json(&stdout);
             BootstrapHealthEntry {
@@ -825,7 +837,7 @@ cat .tytus/health.json
     bootstrap_health_cache()
         .lock()
         .unwrap()
-        .insert(pod_id.to_string(), entry.clone());
+        .insert(cache_key.to_string(), entry.clone());
     entry
 }
 
@@ -852,7 +864,7 @@ fn tytus_exec_output_requires_login(stdout: &str, stderr: &str) -> bool {
         || combined.contains("re-run tytus login")
 }
 
-fn check_pod_shared_storage_stage(pod_id: &str) -> (String, String) {
+fn check_pod_shared_storage_stage(exec_selector: &str) -> (String, String) {
     let script = r#"cd /app/workspace || exit 20
 if [ ! -e .garagetytus/garagetytus-shared ]; then
   echo "helper missing; restart/rebuild pod with latest Tytus image"
@@ -869,7 +881,7 @@ buckets = creds.get("buckets") or []
 print(f"configured ({len(buckets)} bucket(s))" if buckets else "configured (credentials present)")
 PY
 "#;
-    match run_tytus_exec_shell(pod_id, script, Duration::from_secs(8)) {
+    match run_tytus_exec_shell(exec_selector, script, Duration::from_secs(8)) {
         Ok((true, stdout, _stderr, false)) => (
             "ok".to_string(),
             stdout
@@ -902,44 +914,8 @@ PY
     }
 }
 
-fn route_scoped_exec_available(agent: &AgentSlot, snap: &StateSnapshot) -> bool {
-    let same_agent_pod = snap
-        .agents
-        .iter()
-        .filter(|slot| slot.pod_id == agent.pod_id)
-        .count();
-    let same_included_pod = snap
-        .included
-        .iter()
-        .filter(|slot| slot.pod_id == agent.pod_id)
-        .count();
-    same_agent_pod + same_included_pod <= 1
-}
-
-fn duplicate_pod_exec_skip_entry(agent: &AgentSlot) -> BootstrapHealthEntry {
-    BootstrapHealthEntry {
-        status: "degraded".to_string(),
-        detail: format!(
-            "route-scoped shell exec is not available for duplicate pod id {}; skipping optional bootstrap smoke for route {}",
-            agent.pod_id,
-            agent.route_id.as_deref().unwrap_or(&agent.id)
-        ),
-        overall: "route-scoped-exec-skipped".to_string(),
-        fetched_at: now_secs(),
-    }
-}
-
-fn check_agent_shared_storage_stage(agent: &AgentSlot, snap: &StateSnapshot) -> (String, String) {
-    if !route_scoped_exec_available(agent, snap) {
-        return (
-            "skipped".to_string(),
-            format!(
-                "route-scoped shell exec unavailable for duplicate pod id {}; shared storage probe skipped",
-                agent.pod_id
-            ),
-        );
-    }
-    check_pod_shared_storage_stage(&agent.pod_id)
+fn check_agent_shared_storage_stage(agent: &AgentSlot) -> (String, String) {
+    check_pod_shared_storage_stage(agent_exec_selector(agent))
 }
 
 fn bootstrap_stage_detail(entry: &BootstrapHealthEntry) -> String {
@@ -1007,7 +983,7 @@ fn wait_for_installed_agent_ready(job: &Arc<Mutex<Job>>, pod_id: &str) -> Result
             agent.ui_url.as_deref(),
         );
         if status == AgentStatus::Ready && readiness_strict_enabled() {
-            let bootstrap = check_pod_tytus_bootstrap_entry(pod_id, false);
+            let bootstrap = check_pod_tytus_bootstrap_entry(pod_id, pod_id, false);
             if !bootstrap_status_allows_open(&bootstrap.status) {
                 push_event(
                     job,
@@ -4112,6 +4088,9 @@ fn handle(request: Request, registry: Registry) {
         (Method::Post, "/api/apps/check") => {
             handle_apps_check(request);
         }
+        (Method::Post, "/api/apps/runtime") => {
+            handle_apps_runtime(request);
+        }
         (Method::Post, "/api/apps/open") => {
             handle_apps_open(request);
         }
@@ -4487,6 +4466,12 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Post, "/api/shared-folders/update-targets") => {
             handle_shared_folders_update_targets(request, &registry);
+        }
+        (Method::Post, "/api/shared-folders/update-alias") => {
+            handle_shared_folders_update_alias(request);
+        }
+        (Method::Post, "/api/shared-folders/remove") => {
+            handle_shared_folders_remove(request);
         }
         (Method::Post, "/api/shared-folders/pick-folder") => {
             handle_shared_folders_pick_folder(request);
@@ -5563,6 +5548,262 @@ fn command_exists_for_desktop_app(cmd: &str) -> bool {
             }
         }
     })
+}
+
+// ── /api/apps/runtime (desktop process state) ──────────────────
+
+#[derive(serde::Deserialize)]
+struct AppsRuntimeRequest {
+    app_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AppRuntime {
+    running: bool,
+    status: &'static str,
+    detail: Option<String>,
+}
+
+fn runtime_process_candidates(entry: &serde_json::Value, platform: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    if let Some(process_names) = entry
+        .get("runtime")
+        .and_then(|r| r.get(platform))
+        .and_then(|r| r.get("process_names"))
+        .and_then(|v| v.as_array())
+    {
+        for value in process_names {
+            if let Some(name) = value.as_str() {
+                push_runtime_candidate(&mut candidates, name);
+            }
+        }
+    }
+
+    if let Ok((kind, target)) = resolve_launch_spec(entry, platform) {
+        match kind {
+            "app" => {
+                push_runtime_candidate(&mut candidates, target);
+                if let Some(name) = runtime_basename(target) {
+                    push_runtime_candidate(&mut candidates, &name);
+                }
+            }
+            "terminal" => {
+                if let Some(name) = runtime_command_name(target) {
+                    push_runtime_candidate(&mut candidates, &name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    candidates
+}
+
+fn push_runtime_candidate(candidates: &mut Vec<String>, raw: &str) {
+    let mut value = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    if value.ends_with(".app") {
+        value.truncate(value.len().saturating_sub(4));
+    }
+    if value.ends_with(".exe") {
+        value.truncate(value.len().saturating_sub(4));
+    }
+    if value.is_empty() || value.len() > 128 {
+        return;
+    }
+    if !candidates.iter().any(|existing| existing == &value) {
+        candidates.push(value);
+    }
+}
+
+fn runtime_basename(target: &str) -> Option<String> {
+    let trimmed = target.trim().trim_matches('"').trim_matches('\'').trim();
+    let name = Path::new(trimmed)
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or(trimmed);
+    if name.is_empty() {
+        None
+    } else {
+        Some(
+            name.trim_end_matches(".app")
+                .trim_end_matches(".exe")
+                .to_string(),
+        )
+    }
+}
+
+fn runtime_command_name(target: &str) -> Option<String> {
+    let first = target.split_whitespace().next()?;
+    runtime_basename(first)
+}
+
+fn check_app_runtime(entry: &serde_json::Value, platform: &str, arch: &str) -> AppRuntime {
+    let health = check_app_health(entry, platform, arch);
+    if !health.installed {
+        return AppRuntime {
+            running: false,
+            status: health.status,
+            detail: health.problems.first().cloned(),
+        };
+    }
+    if health.health == "broken" {
+        return AppRuntime {
+            running: false,
+            status: "installed_broken",
+            detail: Some(health.problems.join("; ")),
+        };
+    }
+
+    let candidates = runtime_process_candidates(entry, platform);
+    if candidates.is_empty() {
+        return AppRuntime {
+            running: false,
+            status: "unsupported",
+            detail: Some(format!("no runtime process candidates for {platform}")),
+        };
+    }
+
+    let mut errors = Vec::new();
+    for candidate in candidates {
+        match process_is_running_by_name(&candidate, platform) {
+            Ok(true) => {
+                return AppRuntime {
+                    running: true,
+                    status: "running",
+                    detail: None,
+                }
+            }
+            Ok(false) => {}
+            Err(e) => errors.push(e),
+        }
+    }
+
+    AppRuntime {
+        running: false,
+        status: "not_running",
+        detail: errors.into_iter().next(),
+    }
+}
+
+fn process_is_running_by_name(name: &str, platform: &str) -> Result<bool, String> {
+    if name.trim().is_empty() {
+        return Ok(false);
+    }
+    if platform == "windows" {
+        let ps_name = name.trim_end_matches(".exe");
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "if (Get-Process -Name $args[0] -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }",
+                ps_name,
+            ])
+            .output()
+            .map_err(|e| format!("process probe failed for {name}: {e}"))?;
+        return Ok(output.status.success());
+    }
+
+    match Command::new("pgrep").args(["-x", name]).status() {
+        Ok(status) if status.success() => Ok(true),
+        Ok(status) if status.code() == Some(1) => Ok(false),
+        Ok(status) => Err(format!("pgrep exited with status {status} for {name}")),
+        Err(e) if platform == "linux" => proc_comm_contains(name).map_err(|fallback| {
+            format!("pgrep unavailable ({e}); /proc fallback failed: {fallback}")
+        }),
+        Err(e) => Err(format!("pgrep unavailable for {name}: {e}")),
+    }
+}
+
+fn proc_comm_contains(name: &str) -> Result<bool, String> {
+    let entries = fs::read_dir("/proc").map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(pid) = file_name.to_str() else {
+            continue;
+        };
+        if !pid.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let comm = entry.path().join("comm");
+        if let Ok(raw) = fs::read_to_string(comm) {
+            if raw.trim() == name {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn handle_apps_runtime(mut request: Request) {
+    let mut body = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut body) {
+        respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+        return;
+    }
+    let parsed: AppsRuntimeRequest = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({ "error": e.to_string() }));
+            return;
+        }
+    };
+
+    let catalog: Vec<serde_json::Value> = match serde_json::from_slice(APPS_JSON) {
+        Ok(c) => c,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({ "error": format!("catalog parse error: {}", e) }),
+            );
+            return;
+        }
+    };
+
+    let platform = desktop_platform();
+    let arch = desktop_arch();
+    let mut results: Vec<serde_json::Value> = Vec::new();
+
+    for app_id in parsed.app_ids {
+        if !valid_app_id(&app_id) {
+            results.push(serde_json::json!({
+                "id": app_id,
+                "running": false,
+                "status": "error",
+                "detail": "invalid id",
+            }));
+            continue;
+        }
+
+        let entry = catalog
+            .iter()
+            .find(|e| e["id"].as_str() == Some(app_id.as_str()));
+        let Some(entry) = entry else {
+            results.push(serde_json::json!({
+                "id": app_id,
+                "running": false,
+                "status": "unknown",
+                "detail": "unknown app",
+            }));
+            continue;
+        };
+
+        let runtime = check_app_runtime(entry, platform, arch);
+        results.push(serde_json::json!({
+            "id": app_id,
+            "running": runtime.running,
+            "status": runtime.status,
+            "detail": runtime.detail,
+        }));
+    }
+
+    respond_json(request, 200, &serde_json::json!({ "results": results }));
 }
 
 // ── /api/apps/open (launch installed desktop apps) ─────────────
@@ -9094,13 +9335,58 @@ fn pod_exists(pod_id: &str) -> bool {
 
 fn pod_selector_exists(selector: &str) -> bool {
     let snap = compute_state_snapshot();
+    pod_selector_match_count(&snap, selector) > 0
+}
+
+fn pod_selector_match_count(snap: &StateSnapshot, selector: &str) -> usize {
     snap.agents
         .iter()
-        .any(|a| agent_matches_selector(a, selector))
-        || snap
+        .filter(|a| agent_matches_selector(a, selector))
+        .count()
+        + snap
             .included
             .iter()
-            .any(|i| included_matches_selector(i, selector))
+            .filter(|i| included_matches_selector(i, selector))
+            .count()
+}
+
+fn pod_selector_is_numeric(selector: &str) -> bool {
+    !selector.is_empty() && selector.chars().all(|c| c.is_ascii_digit())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SharedFolderBindSelectorError {
+    Invalid(String),
+    Unknown(String),
+    AmbiguousNumeric(String),
+}
+
+fn shared_folder_bind_provision_selectors(
+    raw_pods: &[String],
+    snap: &StateSnapshot,
+) -> Result<Vec<String>, SharedFolderBindSelectorError> {
+    let mut selectors = std::collections::BTreeSet::new();
+    for raw in raw_pods {
+        let Some(selector) = canonical_pod_selector(raw) else {
+            return Err(SharedFolderBindSelectorError::Invalid(raw.clone()));
+        };
+        let matches = pod_selector_match_count(snap, &selector);
+        if matches == 0 {
+            return Err(SharedFolderBindSelectorError::Unknown(raw.clone()));
+        }
+        // Numeric DAM-local ids are not unique in modern fleets. Passing a
+        // duplicate numeric id through to garagetytus would make the helper's
+        // legacy docker path hit whichever `tytus-01` is first. Route ids are
+        // the safe selector; unique numeric ids (for example the default AIL
+        // pod 02) remain valid for backwards compatibility.
+        if pod_selector_is_numeric(&selector) && matches > 1 {
+            return Err(SharedFolderBindSelectorError::AmbiguousNumeric(
+                selector.clone(),
+            ));
+        }
+        selectors.insert(selector);
+    }
+    Ok(selectors.into_iter().collect())
 }
 
 fn cli_pod_id_for_selector(selector: &str) -> Option<String> {
@@ -9978,6 +10264,17 @@ fn valid_sharing_bucket(bucket: &str) -> bool {
     alnum(bytes[0]) && alnum(bytes[len - 1]) && bytes.iter().all(|&b| allowed(b))
 }
 
+fn valid_shared_slug(slug: &str) -> bool {
+    let len = slug.len();
+    if !(1..=63).contains(&len) {
+        return false;
+    }
+    let bytes = slug.as_bytes();
+    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let allowed = |b: u8| alnum(b) || b == b'-';
+    alnum(bytes[0]) && alnum(bytes[len - 1]) && bytes.iter().all(|&b| allowed(b))
+}
+
 fn respond_sharing_paused(request: Request) {
     respond_json(
         request,
@@ -10554,6 +10851,64 @@ fn find_shared_binding_sidecar(bucket: &str, local_path: &str) -> Option<PathBuf
     None
 }
 
+fn same_shared_binding(binding: &serde_json::Value, bucket: &str, local_path: &str) -> bool {
+    let same_bucket = binding
+        .get("bucket")
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| v == bucket);
+    let same_path = binding
+        .get("local_path")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim_end_matches('/') == local_path.trim_end_matches('/'))
+        .unwrap_or(false);
+    same_bucket && same_path
+}
+
+fn write_shared_binding_sidecar(path: &Path, json: &serde_json::Value) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("bindings.json.tmp");
+    let bytes = serde_json::to_vec_pretty(json).unwrap_or_else(|_| b"{}".to_vec());
+    match std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+fn runtime_pods_from_binding_object(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(targets) = obj.get("targets").and_then(|v| v.as_array()) {
+        for target in targets {
+            let enabled = target
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !enabled {
+                continue;
+            }
+            if let Some(runtime_id) = target.get("runtime_id").and_then(|v| v.as_str()) {
+                out.push(runtime_id.to_string());
+            }
+        }
+    }
+    if out.is_empty() {
+        if let Some(pods) = obj.get("pods_provisioned").and_then(|v| v.as_array()) {
+            for pod in pods {
+                if let Some(pod) = pod.as_str() {
+                    out.push(pod.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 fn normalized_pod_json_array(pods: Vec<String>) -> serde_json::Value {
     let mut dedup = std::collections::BTreeSet::new();
     for pod in pods {
@@ -10612,6 +10967,10 @@ fn handle_shared_folders_update_targets(mut request: Request, _registry: &Regist
     struct Target {
         target_id: String,
         pod_id: String,
+        #[serde(default)]
+        route_id: Option<String>,
+        #[serde(default)]
+        provision_selector: Option<String>,
         label: String,
         kind: String,
         enabled: bool,
@@ -10699,9 +11058,25 @@ fn handle_shared_folders_update_targets(mut request: Request, _registry: &Regist
         "schema_version".to_string(),
         serde_json::Value::Number(2.into()),
     );
+    let runtime_pods = body
+        .targets
+        .iter()
+        .filter(|target| target.enabled)
+        .map(|target| target.pod_id.clone())
+        .collect::<Vec<_>>();
     obj.insert(
         "pods_provisioned".to_string(),
-        normalized_pod_json_array(body.pods.clone()),
+        normalized_pod_json_array(runtime_pods.clone()),
+    );
+    obj.insert(
+        "routes_provisioned".to_string(),
+        serde_json::Value::Array(
+            body.pods
+                .iter()
+                .filter_map(|pod| canonical_pod_selector(pod))
+                .map(serde_json::Value::String)
+                .collect::<Vec<_>>(),
+        ),
     );
     let slug = obj
         .get("slug")
@@ -10710,7 +11085,7 @@ fn handle_shared_folders_update_targets(mut request: Request, _registry: &Regist
         .to_string();
     obj.insert(
         "runtime_status".to_string(),
-        shared_runtime_status_for_pods(&body.pods, &slug),
+        shared_runtime_status_for_pods(&runtime_pods, &slug),
     );
 
     let targets = body
@@ -10726,6 +11101,8 @@ fn handle_shared_folders_update_targets(mut request: Request, _registry: &Regist
                 .to_string();
             serde_json::json!({
                 "runtime_id": runtime_id,
+                "route_id": target.route_id,
+                "provision_selector": target.provision_selector,
                 "kind": target.kind,
                 "target_id": target.target_id,
                 "labels": [target.label],
@@ -10735,26 +11112,7 @@ fn handle_shared_folders_update_targets(mut request: Request, _registry: &Regist
         .collect::<Vec<_>>();
     obj.insert("targets".to_string(), serde_json::Value::Array(targets));
 
-    let Some(parent) = path.parent() else {
-        respond_json(
-            request,
-            500,
-            &serde_json::json!({"error":"invalid sidecar path"}),
-        );
-        return;
-    };
-    if let Err(e) = std::fs::create_dir_all(parent) {
-        respond_json(
-            request,
-            500,
-            &serde_json::json!({"error":format!("failed to create sidecar dir: {}", e)}),
-        );
-        return;
-    }
-    let tmp = path.with_extension("bindings.json.tmp");
-    let bytes = serde_json::to_vec_pretty(&json).unwrap_or_else(|_| b"{}".to_vec());
-    if let Err(e) = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)) {
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = write_shared_binding_sidecar(&path, &json) {
         respond_json(
             request,
             500,
@@ -10766,6 +11124,274 @@ fn handle_shared_folders_update_targets(mut request: Request, _registry: &Regist
         request,
         200,
         &serde_json::json!({"ok": true, "provisioning_started": false}),
+    );
+}
+
+/// POST /api/shared-folders/update-alias — body `{bucket, local_path, slug}`.
+/// Renames the workspace-facing alias only. It never renames/deletes the Mac
+/// folder and never changes the Garage bucket.
+fn handle_shared_folders_update_alias(mut request: Request) {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        bucket: String,
+        local_path: String,
+        slug: String,
+    }
+
+    if !sharing_mutations_enabled() {
+        respond_sharing_paused(request);
+        return;
+    }
+
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: Body = match serde_json::from_str(&buf) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":format!("bad json: {}", e)}),
+            );
+            return;
+        }
+    };
+    let slug = body.slug.trim().to_string();
+    if !valid_sharing_bucket(&body.bucket) {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"invalid bucket","code":"sharing.alias.bucket.invalid"}),
+        );
+        return;
+    }
+    if !valid_shared_slug(&slug) {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({
+                "error":"invalid alias: use lowercase letters, numbers, and hyphens; start and end with a letter or number",
+                "code":"sharing.alias.invalid"
+            }),
+        );
+        return;
+    }
+    for binding in shared_bindings_from_cache() {
+        let existing_slug = binding.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+        if existing_slug == slug && !same_shared_binding(&binding, &body.bucket, &body.local_path) {
+            respond_json(
+                request,
+                409,
+                &serde_json::json!({
+                    "error": format!("alias {:?} is already used by another shared folder", slug),
+                    "code": "sharing.alias.already_used",
+                    "alias": slug
+                }),
+            );
+            return;
+        }
+    }
+
+    let Some(path) = find_shared_binding_sidecar(&body.bucket, &body.local_path) else {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({"error":"shared folder binding not found","code":"sharing.alias.binding.not_found"}),
+        );
+        return;
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({"error":format!("failed to read binding sidecar: {}", e)}),
+            );
+            return;
+        }
+    };
+    let mut json: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(j) => j,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({"error":format!("failed to parse binding sidecar: {}", e)}),
+            );
+            return;
+        }
+    };
+    normalize_shared_binding_value(&mut json);
+    let Some(obj) = json.as_object_mut() else {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({"error":"binding sidecar is not an object"}),
+        );
+        return;
+    };
+    obj.insert(
+        "schema_version".to_string(),
+        serde_json::Value::Number(2.into()),
+    );
+    obj.insert("slug".to_string(), serde_json::Value::String(slug.clone()));
+    let runtime_pods = runtime_pods_from_binding_object(obj);
+    if !runtime_pods.is_empty() {
+        obj.insert(
+            "runtime_status".to_string(),
+            shared_runtime_status_for_pods(&runtime_pods, &slug),
+        );
+    }
+    if let Err(e) = write_shared_binding_sidecar(&path, &json) {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({"error":format!("failed to write binding sidecar: {}", e)}),
+        );
+        return;
+    }
+    respond_json(request, 200, &serde_json::json!({"ok": true, "slug": slug}));
+}
+
+/// POST /api/shared-folders/remove — body `{bucket, local_path}`. Removes the
+/// sharing binding and local sync launchd job/cache only. User files stay on
+/// disk; Garage bucket data is not deleted.
+fn handle_shared_folders_remove(mut request: Request) {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        bucket: String,
+        local_path: String,
+    }
+
+    if !sharing_mutations_enabled() {
+        respond_sharing_paused(request);
+        return;
+    }
+
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: Body = match serde_json::from_str(&buf) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":format!("bad json: {}", e)}),
+            );
+            return;
+        }
+    };
+    if !valid_sharing_bucket(&body.bucket) {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"invalid bucket","code":"sharing.remove.bucket.invalid"}),
+        );
+        return;
+    }
+    let Some(path) = find_shared_binding_sidecar(&body.bucket, &body.local_path) else {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({"error":"shared folder binding not found","code":"sharing.remove.binding.not_found"}),
+        );
+        return;
+    };
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
+    let mut json: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    normalize_shared_binding_value(&mut json);
+    let plist_label = json
+        .get("plist_label")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let workdir = json
+        .get("workdir")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+
+    let mut launchd_unloaded = false;
+    let mut plist_removed = false;
+    if let Some(label) = plist_label.as_deref() {
+        if !label.contains('/') && !label.contains("..") {
+            if let Some(home) = std::env::var_os("HOME") {
+                let plist = PathBuf::from(home)
+                    .join("Library")
+                    .join("LaunchAgents")
+                    .join(format!("{}.plist", label));
+                if plist.exists() {
+                    let uid = Command::new("id")
+                        .arg("-u")
+                        .output()
+                        .ok()
+                        .and_then(|out| String::from_utf8(out.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "501".to_string());
+                    launchd_unloaded = Command::new("launchctl")
+                        .arg("bootout")
+                        .arg(format!("gui/{}", uid))
+                        .arg(&plist)
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    plist_removed = std::fs::remove_file(&plist).is_ok();
+                }
+            }
+        }
+    }
+
+    let sidecar_removed = std::fs::remove_file(&path).is_ok();
+    if !sidecar_removed {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({"error":"failed to remove binding sidecar","code":"sharing.remove.sidecar_failed"}),
+        );
+        return;
+    }
+    let mut cache_removed = false;
+    if let (Some(cache_dir), Some(workdir)) = (shared_bindings_cache_dir(), workdir) {
+        if workdir.starts_with(&cache_dir) && workdir.exists() {
+            cache_removed = std::fs::remove_dir_all(&workdir).is_ok();
+        }
+    }
+
+    let remaining_same_local_path = shared_bindings_from_cache().iter().any(|binding| {
+        binding
+            .get("local_path")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim_end_matches('/') == body.local_path.trim_end_matches('/'))
+            .unwrap_or(false)
+    });
+    let mut marker_removed = false;
+    if !remaining_same_local_path {
+        let marker = PathBuf::from(&body.local_path).join(".garagetytus-bound");
+        if marker.exists() {
+            marker_removed = std::fs::remove_file(marker).is_ok();
+        }
+    }
+
+    respond_json(
+        request,
+        200,
+        &serde_json::json!({
+            "ok": true,
+            "sidecar_removed": sidecar_removed,
+            "launchd_unloaded": launchd_unloaded,
+            "plist_removed": plist_removed,
+            "cache_removed": cache_removed,
+            "marker_removed": marker_removed,
+            "local_files_deleted": false,
+            "remote_bucket_deleted": false
+        }),
     );
 }
 
@@ -12116,7 +12742,8 @@ fn handle_shared_folders_pick_folder(request: Request) {
 /// - bucket name matches Garage rules (lowercase alnum/dot/hyphen,
 ///   3-63 chars, alnum endpoints)
 /// - local_path is absolute + exists + is a directory
-/// - each pod is `^\d{2,3}$` (matches the existing parse_pod_id rules)
+/// - each pod selector is known locally; route ids are accepted for modern
+///   duplicate-pod fleets, while ambiguous numeric ids fail closed
 ///
 /// All values passed via `Command::arg` — no shell, no injection.
 fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
@@ -12186,19 +12813,47 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
         return;
     }
 
-    // Validate pod IDs.
-    for p in &body.pods {
-        if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) || p.len() > 3 {
+    // Validate and canonicalize pod selectors. Modern fleets can have several
+    // visible agents with the same DAM-local numeric pod_id, so route_id is the
+    // safe selector for shared-folder provisioning. We still accept a numeric
+    // pod id only when it maps to exactly one local target.
+    let snap = compute_state_snapshot();
+    let provision_selectors = match shared_folder_bind_provision_selectors(&body.pods, &snap) {
+        Ok(selectors) => selectors,
+        Err(SharedFolderBindSelectorError::Invalid(p)) => {
             respond_json(
                 request,
                 400,
                 &serde_json::json!({
-                    "error": format!("invalid pod id: {:?}", p)
+                    "error": format!("invalid pod selector: {:?}", p),
+                    "code": "sharing.bind.pod.invalid"
                 }),
             );
             return;
         }
-    }
+        Err(SharedFolderBindSelectorError::Unknown(p)) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({
+                    "error": format!("unknown pod selector: {:?}", p),
+                    "code": "sharing.bind.pod.unknown"
+                }),
+            );
+            return;
+        }
+        Err(SharedFolderBindSelectorError::AmbiguousNumeric(p)) => {
+            respond_json(
+                request,
+                409,
+                &serde_json::json!({
+                    "error": format!("ambiguous pod selector {:?}; use route_id", p),
+                    "code": "sharing.bind.pod.ambiguous"
+                }),
+            );
+            return;
+        }
+    };
 
     if let Some((status, payload)) = shared_folder_bind_conflict(&body.local_path, &body.bucket) {
         respond_json(request, status, &payload);
@@ -12231,7 +12886,7 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
 
     // Build argv: <local> <bucket> [--to N]... [--auto-sync]
     let mut args: Vec<String> = vec![body.local_path.clone(), body.bucket.clone()];
-    for p in &body.pods {
+    for p in &provision_selectors {
         args.push("--to".to_string());
         args.push(p.clone());
     }
@@ -12606,10 +13261,12 @@ fn shared_folder_sample_files(local_path: &str, slug: &str, limit: usize) -> Vec
 }
 
 /// POST /api/shared-folders/provision-pod — body
-/// `{ "pod":"02", "buckets":["shared"] }`. Spawns
-/// `garagetytus-pod-provision 02 --bucket shared ...` and streams via
+/// `{ "pod":"02", "buckets":["shared"] }`. `pod` may be a legacy runtime
+/// id (`01`) or a modern route id (`eb2qvn3t4s`). Spawns
+/// `garagetytus-pod-provision <selector> --bucket shared ...` and streams via
 /// the job channel. The helper owns secret-safe credential minting +
-/// file transfer; daemon only passes pod id + bucket names in argv.
+/// file transfer; daemon only passes the canonical selector + bucket names in
+/// argv.
 fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry) {
     #[derive(serde::Deserialize)]
     struct Body {
@@ -12642,10 +13299,17 @@ fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry
         }
     };
 
-    let pod_id = match normalize_pod_id_for_query(&body.pod) {
-        Some(p) if pod_exists(&p) => p,
+    let pod_selector = match canonical_pod_selector(&body.pod) {
+        Some(p) if pod_selector_exists(&p) => p,
         _ => {
-            respond_json(request, 400, &serde_json::json!({"error":"invalid pod"}));
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({
+                    "error":"invalid pod",
+                    "code":"sharing.provision.pod.invalid"
+                }),
+            );
             return;
         }
     };
@@ -12685,7 +13349,7 @@ fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry
         return;
     }
 
-    let mut args = vec![pod_id.clone()];
+    let mut args = vec![pod_selector.clone()];
     for bucket in &buckets {
         args.push("--bucket".to_string());
         args.push(bucket.clone());
@@ -12700,7 +13364,7 @@ fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry
     respond_json(
         request,
         202,
-        &serde_json::json!({"job_id": job_id, "pod": pod_id, "buckets": buckets}),
+        &serde_json::json!({"job_id": job_id, "pod": pod_selector, "buckets": buckets}),
     );
 }
 
@@ -12856,11 +13520,8 @@ fn handle_pod_ready(request: Request, query: &str) {
     let mut bootstrap_probe: Option<BootstrapHealthEntry> = None;
     let mut bootstrap_reason: Option<String> = None;
     if status == AgentStatus::Ready && readiness_strict_enabled() {
-        let bootstrap = if route_scoped_exec_available(&agent, &snap) {
-            check_pod_tytus_bootstrap_entry(&agent.pod_id, false)
-        } else {
-            duplicate_pod_exec_skip_entry(&agent)
-        };
+        let bootstrap =
+            check_pod_tytus_bootstrap_entry(&agent.id, agent_exec_selector(&agent), false);
         if !bootstrap_status_allows_open(&bootstrap.status) {
             status = AgentStatus::Starting;
             bootstrap_reason = Some(format!(
@@ -12965,11 +13626,7 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
         )
     };
     let ui_status = probe_agent_ui_status(&agent.agent_type, agent.ui_url.as_deref());
-    let bootstrap = if route_scoped_exec_available(&agent, &snap) {
-        check_pod_tytus_bootstrap_entry(&agent.pod_id, false)
-    } else {
-        duplicate_pod_exec_skip_entry(&agent)
-    };
+    let bootstrap = check_pod_tytus_bootstrap_entry(&agent.id, agent_exec_selector(&agent), false);
     let bootstrap_ok = bootstrap_status_allows_open(&bootstrap.status);
     let core_ready = api_status == AgentStatus::Ready;
     let ui_ready = ui_status == AgentStatus::Ready;
@@ -13026,7 +13683,7 @@ fn handle_pod_readiness(request: Request, pod_id_raw: &str) {
         "status": bootstrap.status.clone(),
         "detail": bootstrap_stage_detail(&bootstrap)
     }));
-    let (shared_status, shared_detail) = check_agent_shared_storage_stage(&agent, &snap);
+    let (shared_status, shared_detail) = check_agent_shared_storage_stage(&agent);
     stages.push(serde_json::json!({
         "id":"shared_storage",
         "label":"Shared storage",
@@ -14634,6 +15291,51 @@ mod tests {
         // No launch field at all.
         let none = serde_json::json!({ "id": "x" });
         assert!(resolve_launch_spec(&none, "macos").is_err());
+    }
+
+    #[test]
+    fn runtime_process_candidates_prefer_metadata_and_dedupe_launch_fallback() {
+        let app = serde_json::json!({
+            "runtime": {
+                "macos": { "process_names": ["Open Design", "Open Design.app", "Open Design"] }
+            },
+            "launch": {
+                "macos": { "kind": "app", "target": "Open Design" }
+            }
+        });
+        assert_eq!(
+            runtime_process_candidates(&app, "macos"),
+            vec!["Open Design"]
+        );
+    }
+
+    #[test]
+    fn runtime_process_candidates_fallback_to_terminal_command_basename() {
+        let app = serde_json::json!({
+            "launch": {
+                "linux": { "kind": "terminal", "target": "/usr/local/bin/opencode --help" }
+            }
+        });
+        assert_eq!(runtime_process_candidates(&app, "linux"), vec!["opencode"]);
+    }
+
+    #[test]
+    fn apps_catalog_every_launchable_entry_has_runtime_candidates() {
+        let catalog: Vec<serde_json::Value> =
+            serde_json::from_slice(APPS_JSON).expect("apps.json must be valid JSON");
+        for entry in &catalog {
+            let id = entry["id"].as_str().unwrap_or("<no-id>");
+            let platforms = entry
+                .get("platforms")
+                .and_then(|p| p.as_array())
+                .expect("platforms must be an array");
+            for platform in platforms.iter().filter_map(|p| p.as_str()) {
+                assert!(
+                    !runtime_process_candidates(entry, platform).is_empty(),
+                    "{id}: runtime candidates required for {platform}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -16462,6 +17164,126 @@ mod tests {
         assert!(status.get("bad;pod").is_none());
     }
 
+    fn selector_test_snapshot() -> StateSnapshot {
+        StateSnapshot {
+            connected: true,
+            logged_in: true,
+            tunnel_active: true,
+            tier: "operator".to_string(),
+            units_limit: 4,
+            units_used: 4,
+            agents: vec![
+                AgentSlot {
+                    id: "0e0ah755r3".to_string(),
+                    pod_id: "01".to_string(),
+                    route_id: Some("0e0ah755r3".to_string()),
+                    display_label: "Lisa".to_string(),
+                    display_name: Some("Lisa".to_string()),
+                    agent_type: "nemoclaw".to_string(),
+                    units: 1,
+                    public_url: None,
+                    api_url: None,
+                    ui_url: None,
+                    gateway_token: None,
+                    user_key: "sk-test".to_string(),
+                    status: AgentStatus::Ready,
+                },
+                AgentSlot {
+                    id: "eb2qvn3t4s".to_string(),
+                    pod_id: "01".to_string(),
+                    route_id: Some("eb2qvn3t4s".to_string()),
+                    display_label: "Claus".to_string(),
+                    display_name: Some("Claus".to_string()),
+                    agent_type: "nemoclaw".to_string(),
+                    units: 1,
+                    public_url: None,
+                    api_url: None,
+                    ui_url: None,
+                    gateway_token: None,
+                    user_key: "sk-test".to_string(),
+                    status: AgentStatus::Ready,
+                },
+                AgentSlot {
+                    id: "12gy79s7g0".to_string(),
+                    pod_id: "01".to_string(),
+                    route_id: Some("12gy79s7g0".to_string()),
+                    display_label: "Hermie".to_string(),
+                    display_name: Some("Hermie".to_string()),
+                    agent_type: "hermes".to_string(),
+                    units: 2,
+                    public_url: None,
+                    api_url: None,
+                    ui_url: None,
+                    gateway_token: None,
+                    user_key: "sk-test".to_string(),
+                    status: AgentStatus::Ready,
+                },
+            ],
+            included: vec![IncludedSlot {
+                id: "t3n7s69day".to_string(),
+                pod_id: "02".to_string(),
+                route_id: Some("t3n7s69day".to_string()),
+                display_label: "Pod 02".to_string(),
+                kind: "ail",
+                endpoint: "http://10.42.42.1:18080".to_string(),
+                user_key: "sk-test".to_string(),
+                public_url: None,
+            }],
+            email: "test@example.com".to_string(),
+            uptime_secs: 1,
+            keychain_healthy: true,
+            last_refresh_error: None,
+            daemon_running: true,
+            daemon_pid: 123,
+            app_bundle_installed: true,
+            forwarders: Vec::new(),
+            daemon_version: "test".to_string(),
+            daemon_started_at: 1,
+        }
+    }
+
+    #[test]
+    fn shared_folder_bind_accepts_route_selectors_and_unique_numeric_pods() {
+        let snap = selector_test_snapshot();
+        let selectors = shared_folder_bind_provision_selectors(
+            &[
+                "0e0ah755r3".to_string(),
+                "12gy79s7g0".to_string(),
+                "02".to_string(),
+            ],
+            &snap,
+        )
+        .unwrap();
+
+        assert_eq!(selectors, vec!["02", "0e0ah755r3", "12gy79s7g0"]);
+    }
+
+    #[test]
+    fn shared_folder_bind_rejects_ambiguous_numeric_pod_id() {
+        let snap = selector_test_snapshot();
+        let err = shared_folder_bind_provision_selectors(&["01".to_string()], &snap).unwrap_err();
+
+        assert_eq!(
+            err,
+            SharedFolderBindSelectorError::AmbiguousNumeric("01".to_string())
+        );
+    }
+
+    #[test]
+    fn shared_folder_bind_rejects_unknown_or_injection_selectors() {
+        let snap = selector_test_snapshot();
+        assert_eq!(
+            shared_folder_bind_provision_selectors(&["no-such-route".to_string()], &snap)
+                .unwrap_err(),
+            SharedFolderBindSelectorError::Unknown("no-such-route".to_string())
+        );
+        assert_eq!(
+            shared_folder_bind_provision_selectors(&["01;rm -rf /".to_string()], &snap)
+                .unwrap_err(),
+            SharedFolderBindSelectorError::Invalid("01;rm -rf /".to_string())
+        );
+    }
+
     #[test]
     fn shared_folder_direct_answer_respects_agent_targets() {
         let home = HomeOverrideGuard::new();
@@ -16575,6 +17397,19 @@ mod tests {
         assert!(!valid_sharing_bucket("shared-"));
         assert!(!valid_sharing_bucket("sh"));
         assert!(!valid_sharing_bucket("shared_bucket"));
+    }
+
+    #[test]
+    fn shared_alias_validation_rejects_workspace_path_injection() {
+        assert!(valid_shared_slug("shared"));
+        assert!(valid_shared_slug("team-shared-2"));
+        assert!(!valid_shared_slug(""));
+        assert!(!valid_shared_slug("Team"));
+        assert!(!valid_shared_slug("-shared"));
+        assert!(!valid_shared_slug("shared-"));
+        assert!(!valid_shared_slug("shared_folder"));
+        assert!(!valid_shared_slug("../secrets"));
+        assert!(!valid_shared_slug("shared/local"));
     }
 
     #[test]

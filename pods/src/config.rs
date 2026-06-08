@@ -63,7 +63,28 @@ pub async fn download_config_for_pod(
     client: &TytusClient,
     pod_id: &str,
 ) -> atomek_core::Result<WireGuardConfig> {
-    let path = format!("/pod/config/download?pod_id={}", pod_id);
+    download_config_for_pod_route(client, pod_id, None).await
+}
+
+/// Download config for a specific route-scoped pod.
+/// Backend: GET /pod/config/download?pod_id=XX&route_id=<opaque-route>
+pub async fn download_config_for_pod_route(
+    client: &TytusClient,
+    pod_id: &str,
+    route_id: Option<&str>,
+) -> atomek_core::Result<WireGuardConfig> {
+    let path = match route_id {
+        Some(route) if !route.is_empty() => {
+            if !is_safe_route_id(route) {
+                return Err(AtomekError::Other(format!(
+                    "invalid route_id {:?} (expected safe route identifier)",
+                    route
+                )));
+            }
+            format!("/pod/config/download?pod_id={}&route_id={}", pod_id, route)
+        }
+        _ => format!("/pod/config/download?pod_id={}", pod_id),
+    };
     let max_attempts = 10;
     for attempt in 1..=max_attempts {
         let resp = client.get_with_retry(&path).await;
@@ -90,6 +111,14 @@ pub async fn download_config_for_pod(
     }
 
     Err(AtomekError::ConfigNotReady)
+}
+
+fn is_safe_route_id(route_id: &str) -> bool {
+    !route_id.is_empty()
+        && route_id.len() <= 32
+        && route_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn parse_wireguard_config(conf: &str) -> atomek_core::Result<WireGuardConfig> {

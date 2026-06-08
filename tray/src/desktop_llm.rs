@@ -795,7 +795,19 @@ fn open_design_status(
             .and_then(|v| v.as_str())
             == Some(provider.api_key.as_str());
 
-    let configured = env_base_ok && env_key_ok && model_ok && media_chat_ok && media_image_ok;
+    let agent_selected_ok = app_config.get("agentId").and_then(|v| v.as_str()) == Some("codex");
+    let onboarding_ok = app_config
+        .get("onboardingCompleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let configured = env_base_ok
+        && env_key_ok
+        && model_ok
+        && agent_selected_ok
+        && onboarding_ok
+        && media_chat_ok
+        && media_image_ok;
     Ok(LlmConfigStatus {
         app_id: app_id.to_string(),
         supported: true,
@@ -814,11 +826,11 @@ fn open_design_status(
         },
         restart_required: true,
         message: if configured {
-            "Tytus AIL is configured for Open Design Codex agent env plus OpenAI-compatible media providers."
+            "Tytus AIL is configured as the default Open Design runtime."
         } else if !root_exists {
             "Install or launch Open Design once, then Tytus can add the Tytus AIL provider."
         } else {
-            "Open Design can be configured with Tytus AIL for Codex agent runs and OpenAI-compatible media."
+            "Open Design can be configured with Tytus AIL as the default Codex runtime and media provider."
         }
         .to_string(),
     })
@@ -850,6 +862,8 @@ fn configure_open_design(
             "model": provider.model.clone(),
         }),
     );
+    app_config["agentId"] = json!("codex");
+    app_config["onboardingCompleted"] = json!(true);
 
     object_mut(&mut media_config, "providers").insert(
         "openai".to_string(),
@@ -884,7 +898,7 @@ fn configure_open_design(
         backup_path: app_backup.or(media_backup).map(|p| p.display().to_string()),
         restart_required: true,
         message:
-            "Tytus AIL is configured for Open Design. Restart Open Design if it is already open."
+            "Tytus AIL is now the default runtime for Open Design. Restart Open Design if it is already open."
                 .to_string(),
     })
 }

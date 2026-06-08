@@ -9,6 +9,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::pod_selector::{resolve_pod_selector, ResolvedPodTarget};
 use crate::state::CliState;
 
 // ── Constants ───────────────────────────────────────────────
@@ -55,8 +56,10 @@ pub enum TransferError {
     SizeCeiling(u64),
     #[error("no pods connected. Run: tytus connect")]
     NoPods,
-    #[error("multiple pods connected ({0:?}); specify --pod NN")]
+    #[error("multiple pod routes connected ({0:?}); specify --pod <display-name-or-route-id>")]
     AmbiguousPod(Vec<String>),
+    #[error("{0}")]
+    PodSelector(String),
     #[error("local path does not exist: {0}")]
     LocalMissing(String),
 }
@@ -122,17 +125,17 @@ pub fn enforce_size_ceiling(bytes: u64) -> Result<(), TransferError> {
 /// If the caller gave `--pod`, return it verbatim. Otherwise
 /// auto-pick when there's exactly one connected pod, else
 /// surface the list so the user knows which to pick.
-pub fn resolve_pod(explicit: Option<&str>, state: &CliState) -> Result<String, TransferError> {
-    if let Some(p) = explicit {
-        return Ok(p.to_string());
-    }
-    match state.pods.len() {
-        0 => Err(TransferError::NoPods),
-        1 => Ok(state.pods[0].pod_id.clone()),
-        _ => Err(TransferError::AmbiguousPod(
-            state.pods.iter().map(|p| p.pod_id.clone()).collect(),
-        )),
-    }
+pub fn resolve_pod(
+    explicit: Option<&str>,
+    state: &CliState,
+) -> Result<ResolvedPodTarget, TransferError> {
+    resolve_pod_selector(explicit, state).map_err(|e| match e {
+        crate::pod_selector::PodSelectorError::NoPods => TransferError::NoPods,
+        crate::pod_selector::PodSelectorError::Ambiguous { candidates, .. } => {
+            TransferError::AmbiguousPod(candidates.into_iter().map(|p| p.label()).collect())
+        }
+        other => TransferError::PodSelector(other.to_string()),
+    })
 }
 
 // ── Transfer log (JSONL, flock-serialised) ─────────────────

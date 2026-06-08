@@ -1,3 +1,9 @@
+## 0.7.39 - 2026-06-08
+
+- Embed TytusOS `v1.0.77-shared-folder-route-refresh`: route-aware shared-folder binding, live Files/Settings refresh after bind/settings/remove jobs, longer bind-job recovery for slow final save, desktop app runtime state, and external app logos.
+- Fix shared-folder binding for agents whose durable pod id is duplicated but whose route id is unique; CLI/tray selectors now accept route id, display name, or unambiguous pod id and fail closed on ambiguous numeric pod selectors.
+- Add regression coverage for route-aware pod selectors, shared-folder bind validation, job-stream recovery, and daemon shared-folder state refresh.
+
 ## 0.7.36 - 2026-06-06
 
 - Embeds `tytus-os` `v1.0.75-tytus-ail-setup`, adding one-click Tytus AIL provider setup in the App Store for OpenCode, OpenWork, and Pi.

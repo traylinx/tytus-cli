@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 
+use crate::pod_selector::ResolvedPodTarget;
 use crate::state::CliState;
 use crate::transfer::{
     append_transfer_log, enforce_size_ceiling, resolve_pod, resolve_push_destination, shell_escape,
@@ -41,11 +42,12 @@ async fn bootstrap_client(
 
 async fn pod_exec(
     client: &atomek_pods::TytusClient,
-    pod_id: &str,
+    target: &ResolvedPodTarget,
     command: &str,
     timeout: u32,
 ) -> Result<atomek_pods::ExecResult, String> {
-    atomek_pods::exec_in_agent(client, pod_id, command, timeout)
+    let agent_target = atomek_pods::AgentTarget::new(&target.pod_id, target.route_id.as_deref());
+    atomek_pods::exec_in_agent_target(client, agent_target, command, timeout)
         .await
         .map_err(|e| e.to_string())
 }
@@ -102,7 +104,7 @@ pub async fn cmd_push(
     let Some((state, client)) = bootstrap_client(http).await else {
         std::process::exit(1);
     };
-    let pod_id = match resolve_pod(pod.as_deref(), &state) {
+    let pod_target = match resolve_pod(pod.as_deref(), &state) {
         Ok(p) => p,
         Err(e) => log_and_exit(
             "push",
@@ -115,6 +117,7 @@ pub async fn cmd_push(
             json,
         ),
     };
+    let pod_id = pod_target.pod_id.clone();
 
     // If directory, pack to a local tarball and treat it as file
     // transfer with a tar extract on the remote finaliser.
@@ -199,8 +202,14 @@ pub async fn cmd_push(
     let remote_tmp = format!("/app/workspace/.tytus-push-{}.b64", nonce);
     let pb = make_progress(size, quiet);
 
-    let upload_result =
-        upload_chunked(&client, &pod_id, &payload_path, &remote_tmp, pb.as_ref()).await;
+    let upload_result = upload_chunked(
+        &client,
+        &pod_target,
+        &payload_path,
+        &remote_tmp,
+        pb.as_ref(),
+    )
+    .await;
     if let Some(ref p) = pb {
         p.finish_and_clear();
     }
@@ -212,7 +221,7 @@ pub async fn cmd_push(
     if let Err(e) = upload_result {
         let _ = pod_exec(
             &client,
-            &pod_id,
+            &pod_target,
             &format!("rm -f {}", shell_escape(&remote_tmp)),
             30,
         )
@@ -246,7 +255,7 @@ pub async fn cmd_push(
         )
     };
 
-    match pod_exec(&client, &pod_id, &finalise_cmd, 120).await {
+    match pod_exec(&client, &pod_target, &finalise_cmd, 120).await {
         Ok(r) if r.exit_code == 0 => {
             let _ = append_transfer_log(&TransferEvent::now(
                 "push",
@@ -305,7 +314,7 @@ pub async fn cmd_push(
 
 async fn upload_chunked(
     client: &atomek_pods::TytusClient,
-    pod_id: &str,
+    target: &ResolvedPodTarget,
     local: &Path,
     remote_tmp: &str,
     pb: Option<&indicatif::ProgressBar>,
@@ -327,7 +336,7 @@ async fn upload_chunked(
             redir = redirect,
             tmp = shell_escape(remote_tmp),
         );
-        let r = pod_exec(client, pod_id, &cmd, 120).await?;
+        let r = pod_exec(client, target, &cmd, 120).await?;
         if r.exit_code != 0 {
             return Err(format!(
                 "chunk write failed (exit {}): {}",
@@ -432,17 +441,18 @@ pub async fn cmd_pull(
     let Some((state, client)) = bootstrap_client(http).await else {
         std::process::exit(1);
     };
-    let pod_id = match resolve_pod(pod.as_deref(), &state) {
+    let pod_target = match resolve_pod(pod.as_deref(), &state) {
         Ok(p) => p,
         Err(e) => log_and_exit("pull", "?", &remote, None, 0, false, &e.to_string(), json),
     };
+    let pod_id = pod_target.pod_id.clone();
 
     // Step 1: figure out whether the remote is a file or dir.
     let stat_cmd = format!(
         "if [ -d {r} ]; then echo dir; elif [ -f {r} ]; then echo file; else echo missing; fi",
         r = shell_escape(&remote),
     );
-    let kind = match pod_exec(&client, &pod_id, &stat_cmd, 30).await {
+    let kind = match pod_exec(&client, &pod_target, &stat_cmd, 30).await {
         Ok(r) if r.exit_code == 0 => r.stdout.unwrap_or_default().trim().to_string(),
         Ok(r) => log_and_exit(
             "pull",
@@ -493,10 +503,10 @@ pub async fn cmd_pull(
             tmp = shell_escape(&remote_tmp),
         )
     };
-    if let Err(e) = run_ok(&client, &pod_id, &pack_cmd, 300).await {
+    if let Err(e) = run_ok(&client, &pod_target, &pack_cmd, 300).await {
         let _ = pod_exec(
             &client,
-            &pod_id,
+            &pod_target,
             &format!("rm -f {}", shell_escape(&remote_tmp)),
             30,
         )
@@ -506,7 +516,7 @@ pub async fn cmd_pull(
 
     // Size-check the base64 blob; raw size = b64 * 3/4 approx.
     let size_cmd = format!("wc -c < {}", shell_escape(&remote_tmp));
-    let b64_bytes: u64 = match pod_exec(&client, &pod_id, &size_cmd, 30).await {
+    let b64_bytes: u64 = match pod_exec(&client, &pod_target, &size_cmd, 30).await {
         Ok(r) if r.exit_code == 0 => r.stdout.unwrap_or_default().trim().parse().unwrap_or(0),
         _ => 0,
     };
@@ -514,7 +524,7 @@ pub async fn cmd_pull(
     if let Err(e) = enforce_size_ceiling(raw_estimate) {
         let _ = pod_exec(
             &client,
-            &pod_id,
+            &pod_target,
             &format!("rm -f {}", shell_escape(&remote_tmp)),
             30,
         )
@@ -579,12 +589,12 @@ pub async fn cmd_pull(
             bs = chunk_b64,
             i = i,
         );
-        let r = match pod_exec(&client, &pod_id, &cmd, 120).await {
+        let r = match pod_exec(&client, &pod_target, &cmd, 120).await {
             Ok(r) => r,
             Err(e) => {
                 let _ = pod_exec(
                     &client,
-                    &pod_id,
+                    &pod_target,
                     &format!("rm -f {}", shell_escape(&remote_tmp)),
                     30,
                 )
@@ -604,7 +614,7 @@ pub async fn cmd_pull(
         if r.exit_code != 0 {
             let _ = pod_exec(
                 &client,
-                &pod_id,
+                &pod_target,
                 &format!("rm -f {}", shell_escape(&remote_tmp)),
                 30,
             )
@@ -632,7 +642,7 @@ pub async fn cmd_pull(
             Err(e) => {
                 let _ = pod_exec(
                     &client,
-                    &pod_id,
+                    &pod_target,
                     &format!("rm -f {}", shell_escape(&remote_tmp)),
                     30,
                 )
@@ -652,7 +662,7 @@ pub async fn cmd_pull(
         if let Err(e) = out_file.write_all(&decoded) {
             let _ = pod_exec(
                 &client,
-                &pod_id,
+                &pod_target,
                 &format!("rm -f {}", shell_escape(&remote_tmp)),
                 30,
             )
@@ -693,7 +703,7 @@ pub async fn cmd_pull(
             Ok(s) => {
                 let _ = pod_exec(
                     &client,
-                    &pod_id,
+                    &pod_target,
                     &format!("rm -f {}", shell_escape(&remote_tmp)),
                     30,
                 )
@@ -712,7 +722,7 @@ pub async fn cmd_pull(
             Err(e) => {
                 let _ = pod_exec(
                     &client,
-                    &pod_id,
+                    &pod_target,
                     &format!("rm -f {}", shell_escape(&remote_tmp)),
                     30,
                 )
@@ -734,7 +744,7 @@ pub async fn cmd_pull(
     // Cleanup remote tmp.
     let _ = pod_exec(
         &client,
-        &pod_id,
+        &pod_target,
         &format!("rm -f {}", shell_escape(&remote_tmp)),
         30,
     )
@@ -797,11 +807,11 @@ fn resolve_pull_target(remote: &str, to: Option<&str>, is_dir: bool) -> PathBuf 
 
 async fn run_ok(
     client: &atomek_pods::TytusClient,
-    pod_id: &str,
+    target: &ResolvedPodTarget,
     cmd: &str,
     timeout: u32,
 ) -> Result<(), String> {
-    let r = pod_exec(client, pod_id, cmd, timeout).await?;
+    let r = pod_exec(client, target, cmd, timeout).await?;
     if r.exit_code != 0 {
         return Err(format!(
             "remote command failed (exit {}): {}",
@@ -829,13 +839,14 @@ pub async fn cmd_ls(
     let Some((state, client)) = bootstrap_client(http).await else {
         std::process::exit(1);
     };
-    let pod_id = match resolve_pod(pod.as_deref(), &state) {
+    let pod_target = match resolve_pod(pod.as_deref(), &state) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("tytus ls: {}", e);
             std::process::exit(1);
         }
     };
+    let pod_id = pod_target.pod_id.clone();
 
     // Use a machine-parseable format: mode|size|mtime-epoch|name
     // `find -printf` isn't in BusyBox on all pods, but dash pods
@@ -854,7 +865,7 @@ pub async fn cmd_ls(
          fi",
         t = shell_escape(&target),
     );
-    match pod_exec(&client, &pod_id, &list_cmd, 30).await {
+    match pod_exec(&client, &pod_target, &list_cmd, 30).await {
         Ok(r) if r.exit_code == 0 => {
             let out = r.stdout.unwrap_or_default();
             if out.trim() == "missing" {
@@ -939,17 +950,18 @@ pub async fn cmd_rm(
     let Some((state, client)) = bootstrap_client(http).await else {
         std::process::exit(1);
     };
-    let pod_id = match resolve_pod(pod.as_deref(), &state) {
+    let pod_target = match resolve_pod(pod.as_deref(), &state) {
         Ok(p) => p,
         Err(e) => log_and_exit("rm", "?", &remote, None, 0, false, &e.to_string(), json),
     };
+    let pod_id = pod_target.pod_id.clone();
 
     // Check if directory. If so, require --recursive.
     let kind_cmd = format!(
         "if [ -d {r} ]; then echo dir; elif [ -e {r} ]; then echo other; else echo missing; fi",
         r = shell_escape(&remote),
     );
-    let kind = match pod_exec(&client, &pod_id, &kind_cmd, 30).await {
+    let kind = match pod_exec(&client, &pod_target, &kind_cmd, 30).await {
         Ok(r) if r.exit_code == 0 => r.stdout.unwrap_or_default().trim().to_string(),
         Ok(r) => log_and_exit(
             "rm",
@@ -994,7 +1006,7 @@ pub async fn cmd_rm(
         format!("rm -f {}", shell_escape(&remote))
     };
 
-    match pod_exec(&client, &pod_id, &cmd, 60).await {
+    match pod_exec(&client, &pod_target, &cmd, 60).await {
         Ok(r) if r.exit_code == 0 => {
             let _ = append_transfer_log(&TransferEvent::now(
                 "rm", &pod_id, &remote, None, 0, true, None,

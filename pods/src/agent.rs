@@ -19,6 +19,54 @@ fn validate_pod_id(pod_id: &str) -> Result<(), AtomekError> {
     Ok(())
 }
 
+fn validate_route_id(route_id: &str) -> Result<(), AtomekError> {
+    let valid = route_id.len() == 10
+        && route_id.chars().all(
+            |c| matches!(c, '0'..='9' | 'a'..='h' | 'j'..='k' | 'm'..='n' | 'p'..='t' | 'v'..='z'),
+        );
+    if !valid {
+        return Err(AtomekError::Other(format!(
+            "invalid route_id {:?} (expected 10 lowercase Crockford-like chars)",
+            route_id
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AgentTarget<'a> {
+    pub pod_id: &'a str,
+    pub route_id: Option<&'a str>,
+}
+
+impl<'a> AgentTarget<'a> {
+    pub fn new(pod_id: &'a str, route_id: Option<&'a str>) -> Self {
+        Self { pod_id, route_id }
+    }
+
+    pub fn pod(pod_id: &'a str) -> Self {
+        Self {
+            pod_id,
+            route_id: None,
+        }
+    }
+}
+
+fn validate_target(target: AgentTarget<'_>) -> Result<(), AtomekError> {
+    validate_pod_id(target.pod_id)?;
+    if let Some(route_id) = target.route_id {
+        validate_route_id(route_id)?;
+    }
+    Ok(())
+}
+
+fn append_route_query(path: &mut String, target: AgentTarget<'_>) {
+    if let Some(route_id) = target.route_id {
+        path.push_str("&route_id=");
+        path.push_str(route_id);
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AgentStatus {
     pub pod_num: Option<u32>,
@@ -51,10 +99,17 @@ pub async fn get_agent_status(
     client: &TytusClient,
     pod_id: &str,
 ) -> atomek_core::Result<AgentStatus> {
-    validate_pod_id(pod_id)?;
-    let resp = client
-        .get_with_retry(&format!("/pod/agent/status?pod_id={}", pod_id))
-        .await?;
+    get_agent_status_target(client, AgentTarget::pod(pod_id)).await
+}
+
+pub async fn get_agent_status_target(
+    client: &TytusClient,
+    target: AgentTarget<'_>,
+) -> atomek_core::Result<AgentStatus> {
+    validate_target(target)?;
+    let mut path = format!("/pod/agent/status?pod_id={}", target.pod_id);
+    append_route_query(&mut path, target);
+    let resp = client.get_with_retry(&path).await?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
@@ -99,9 +154,18 @@ pub async fn deploy_agent(
 }
 
 pub async fn restart_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Result<AgentStatus> {
+    restart_agent_target(client, AgentTarget::pod(pod_id)).await
+}
+
+pub async fn restart_agent_target(
+    client: &TytusClient,
+    target: AgentTarget<'_>,
+) -> atomek_core::Result<AgentStatus> {
+    validate_target(target)?;
+    let body = agent_target_body(target);
     let resp = client
         .post("/pod/agent/restart")
-        .json(&serde_json::json!({ "pod_id": pod_id }))
+        .json(&body)
         .send()
         .await
         .map_err(|e| AtomekError::Network(e.to_string()))?;
@@ -134,13 +198,19 @@ pub async fn exec_in_agent(
     command: &str,
     timeout: u32,
 ) -> atomek_core::Result<ExecResult> {
+    exec_in_agent_target(client, AgentTarget::pod(pod_id), command, timeout).await
+}
+
+pub async fn exec_in_agent_target(
+    client: &TytusClient,
+    target: AgentTarget<'_>,
+    command: &str,
+    timeout: u32,
+) -> atomek_core::Result<ExecResult> {
+    let body = exec_body(target, command, timeout)?;
     let resp = client
         .post("/pod/agent/exec")
-        .json(&serde_json::json!({
-            "pod_id": pod_id,
-            "command": command,
-            "timeout": timeout,
-        }))
+        .json(&body)
         .send()
         .await
         .map_err(|e| AtomekError::Network(e.to_string()))?;
@@ -171,9 +241,18 @@ pub async fn agent_logs(
     pod_id: &str,
     tail: u32,
 ) -> atomek_core::Result<AgentLogs> {
-    validate_pod_id(pod_id)?;
+    agent_logs_target(client, AgentTarget::pod(pod_id), tail).await
+}
+
+pub async fn agent_logs_target(
+    client: &TytusClient,
+    target: AgentTarget<'_>,
+    tail: u32,
+) -> atomek_core::Result<AgentLogs> {
+    validate_target(target)?;
     let tail = tail.clamp(1, 500);
-    let path = format!("/pod/agent/logs?pod_id={}&tail={}", pod_id, tail);
+    let mut path = format!("/pod/agent/logs?pod_id={}&tail={}", target.pod_id, tail);
+    append_route_query(&mut path, target);
     let resp = client.get_with_retry(&path).await?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -186,6 +265,26 @@ pub async fn agent_logs(
     resp.json()
         .await
         .map_err(|e| AtomekError::Other(format!("Failed to parse agent logs: {}", e)))
+}
+
+fn agent_target_body(target: AgentTarget<'_>) -> serde_json::Value {
+    let mut body = serde_json::json!({ "pod_id": target.pod_id });
+    if let Some(route_id) = target.route_id {
+        body["route_id"] = serde_json::Value::String(route_id.to_string());
+    }
+    body
+}
+
+fn exec_body(
+    target: AgentTarget<'_>,
+    command: &str,
+    timeout: u32,
+) -> Result<serde_json::Value, AtomekError> {
+    validate_target(target)?;
+    let mut body = agent_target_body(target);
+    body["command"] = serde_json::Value::String(command.to_string());
+    body["timeout"] = serde_json::Value::Number(serde_json::Number::from(timeout));
+    Ok(body)
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,7 +351,7 @@ pub async fn stop_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Resu
 
 #[cfg(test)]
 mod tests {
-    use super::validate_pod_id;
+    use super::{exec_body, validate_pod_id, validate_route_id, AgentTarget};
 
     #[test]
     fn validate_pod_id_accepts_canonical_forms() {
@@ -282,5 +381,38 @@ mod tests {
         // and the reserved block tops out at 99 in any plausible future.
         assert!(validate_pod_id("0099").is_err());
         assert!(validate_pod_id("12345").is_err());
+    }
+
+    #[test]
+    fn validate_route_id_accepts_provider_shape() {
+        assert!(validate_route_id("0e0ah755r3").is_ok());
+        assert!(validate_route_id("eb2qvn3t4s").is_ok());
+        assert!(validate_route_id("12gy79s7g0").is_ok());
+    }
+
+    #[test]
+    fn validate_route_id_rejects_query_injection_shapes() {
+        assert!(validate_route_id("0e0ah755r3&x=1").is_err());
+        assert!(validate_route_id("0e0ah755").is_err());
+        assert!(validate_route_id("0E0AH755R3").is_err());
+        assert!(validate_route_id("../escape").is_err());
+    }
+
+    #[test]
+    fn exec_body_includes_route_id_when_present() {
+        let body = exec_body(AgentTarget::new("01", Some("0e0ah755r3")), "whoami", 10).unwrap();
+        assert_eq!(body["pod_id"], "01");
+        assert_eq!(body["route_id"], "0e0ah755r3");
+        assert_eq!(body["command"], "whoami");
+        assert_eq!(body["timeout"], 10);
+    }
+
+    #[test]
+    fn exec_body_omits_route_id_when_absent() {
+        let body = exec_body(AgentTarget::pod("02"), "true", 5).unwrap();
+        assert_eq!(body["pod_id"], "02");
+        assert!(body.get("route_id").is_none());
+        assert_eq!(body["command"], "true");
+        assert_eq!(body["timeout"], 5);
     }
 }

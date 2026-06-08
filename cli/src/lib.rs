@@ -14,4 +14,5 @@ pub mod tunnel_pidfile;
 pub mod tunnel_reap;
 
 pub mod account;
+pub mod pod_selector;
 pub mod state;

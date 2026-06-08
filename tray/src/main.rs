@@ -328,8 +328,9 @@ fn menu_signature(s: &TrayState) -> String {
         parts.push("busy=0".into());
     }
     for p in &s.pods {
-        let fwd_live = existing_ui_forwarder(&p.pod_id).is_some();
-        let tun_live = tunnel_reaches_pod(&p.pod_id);
+        let selector = p.selector_id();
+        let fwd_live = existing_ui_forwarder(&selector).is_some();
+        let tun_live = tunnel_reaches_pod(&selector);
         parts.push(format!(
             "{}:{}:{}:{}:{}:{}",
             p.route_id.as_deref().unwrap_or(&p.pod_id),
@@ -1400,8 +1401,8 @@ fn build_menu(state: &TrayState) -> Menu {
                 // copies the API base for OpenAI-shaped clients (Cursor,
                 // SDKs, curl) which speak Bearer.
                 let p_public_ui = p.public_ui_url();
-                let forwarder_live = existing_ui_forwarder(&p.pod_id).is_some();
-                let tunnel_live = tunnel_reaches_pod(&p.pod_id);
+                let forwarder_live = existing_ui_forwarder(&selector).is_some();
+                let tunnel_live = tunnel_reaches_pod(&selector);
 
                 // Phase C.2 reorder: surface Chat (Open in Browser) at the
                 // top of the per-pod block, then Files, then Channels —
@@ -2338,8 +2339,8 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                     notify("Tytus", &format!("Opening {} via public edge", label));
                 }
                 None => {
-                    let pod_id = pod.map(|p| p.pod_id).unwrap_or(selector);
-                    open_pod_via_forwarder(&pod_id);
+                    let pod_selector = pod.map(|p| p.selector_id()).unwrap_or(selector);
+                    open_pod_via_forwarder(&pod_selector);
                 }
             }
         }
@@ -2593,7 +2594,7 @@ fn pod_for_selector(state: &Arc<Mutex<TrayState>>, selector: &str) -> Option<Pod
 
 fn cli_pod_id_for_selector(state: &Arc<Mutex<TrayState>>, selector: &str) -> String {
     pod_for_selector(state, selector)
-        .map(|p| p.pod_id)
+        .map(|p| p.selector_id())
         .unwrap_or_else(|| selector.to_string())
 }
 

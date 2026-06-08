@@ -532,7 +532,7 @@ tytus llm-docs                     Print THIS document.
 
 ### 6b. Local Cortex (opt-in, current public beta)
 
-By default, chat with a pod routes through the cloud Cortex on Strato. Users
+By default, chat with a pod routes through Tytus Cloud Cortex. Users
 who want chat memory to stay on their Mac can run Cortex locally instead.
 Cloud remains the default for everyone; nothing flips until the user
 explicitly switches in Settings → AI or via `tytus cortex up`.

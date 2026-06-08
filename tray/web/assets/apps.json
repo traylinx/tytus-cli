@@ -85,7 +85,24 @@
         "label": "Install for Windows ARM64",
         "command": "npm install -g opencode-ai"
       }
-    ]
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "opencode"
+        ]
+      },
+      "linux": {
+        "process_names": [
+          "opencode"
+        ]
+      },
+      "windows": {
+        "process_names": [
+          "opencode"
+        ]
+      }
+    }
   },
   {
     "id": "pi",
@@ -172,7 +189,24 @@
         "label": "Install for Windows ARM64",
         "command": "npm install -g @earendil-works/pi-coding-agent --min-release-age=0"
       }
-    ]
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "pi"
+        ]
+      },
+      "linux": {
+        "process_names": [
+          "pi"
+        ]
+      },
+      "windows": {
+        "process_names": [
+          "pi"
+        ]
+      }
+    }
   },
   {
     "id": "ghostty",
@@ -232,7 +266,19 @@
         "label": "Choose Linux ARM64 package",
         "url": "https://ghostty.org/download"
       }
-    ]
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "Ghostty"
+        ]
+      },
+      "linux": {
+        "process_names": [
+          "ghostty"
+        ]
+      }
+    }
   },
   {
     "id": "ail",
@@ -309,7 +355,24 @@
         "label": "Install for Windows ARM64",
         "url": "https://ail.traylinx.com/introduction"
       }
-    ]
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "ail"
+        ]
+      },
+      "linux": {
+        "process_names": [
+          "ail"
+        ]
+      },
+      "windows": {
+        "process_names": [
+          "ail"
+        ]
+      }
+    }
   },
   {
     "id": "telegram",
@@ -411,7 +474,24 @@
         "disabled": true,
         "disabled_reason": "Telegram Desktop Windows ARM64 installer is not evidenced by the current official/catalog install surface. Use the official site only if it offers a matching ARM64 build for your machine."
       }
-    ]
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "Telegram"
+        ]
+      },
+      "linux": {
+        "process_names": [
+          "telegram-desktop"
+        ]
+      },
+      "windows": {
+        "process_names": [
+          "Telegram"
+        ]
+      }
+    }
   },
   {
     "id": "discord",
@@ -503,7 +583,24 @@
         "disabled": true,
         "disabled_reason": "Discord Linux ARM64 desktop installer is not evidenced by the current official/catalog install surface. Use a supported x64 Linux package or the web app."
       }
-    ]
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "Discord"
+        ]
+      },
+      "linux": {
+        "process_names": [
+          "discord"
+        ]
+      },
+      "windows": {
+        "process_names": [
+          "Discord"
+        ]
+      }
+    }
   },
   {
     "id": "warp",
@@ -595,7 +692,24 @@
         "label": "Download Linux ARM64 package",
         "url": "https://www.warp.dev/download"
       }
-    ]
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "Warp"
+        ]
+      },
+      "linux": {
+        "process_names": [
+          "warp-terminal"
+        ]
+      },
+      "windows": {
+        "process_names": [
+          "warp"
+        ]
+      }
+    }
   },
   {
     "id": "openwork",
@@ -696,7 +810,24 @@
         "repo": "different-ai/openwork",
         "asset_regex": "^openwork-linux-arm64-[0-9]+\\.[0-9]+\\.[0-9]+\\.AppImage$"
       }
-    ]
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "OpenWork"
+        ]
+      },
+      "linux": {
+        "process_names": [
+          "openwork"
+        ]
+      },
+      "windows": {
+        "process_names": [
+          "OpenWork"
+        ]
+      }
+    }
   },
   {
     "id": "open-design",
@@ -803,7 +934,24 @@
         "disabled": true,
         "disabled_reason": "The latest stable Open Design release does not publish Linux ARM64 desktop assets. Use Docker/source from the Open Design docs until an ARM64 desktop artifact is published."
       }
-    ]
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "Open Design"
+        ]
+      },
+      "linux": {
+        "process_names": [
+          "open-design"
+        ]
+      },
+      "windows": {
+        "process_names": [
+          "Open Design"
+        ]
+      }
+    }
   },
   {
     "id": "odysseus",
@@ -892,6 +1040,23 @@
         "label": "Install Odysseus for Windows ARM64",
         "repo": "pewdiepie-archdaemon/odysseus"
       }
-    ]
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "Odysseus"
+        ]
+      },
+      "linux": {
+        "process_names": [
+          "odysseus"
+        ]
+      },
+      "windows": {
+        "process_names": [
+          "odysseus"
+        ]
+      }
+    }
   }
 ]
