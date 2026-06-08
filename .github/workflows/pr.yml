@@ -11,14 +11,14 @@ on:
       tytus_os_ref:
         description: 'tytus-os ref to build for dist embedding checks'
         required: false
-        default: 'v1.0.72-shared-folder-bind-recovery'
+        default: 'v1.0.77-shared-folder-route-refresh'
         type: string
 
 permissions:
   contents: read
 
 env:
-  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || 'v1.0.72-shared-folder-bind-recovery' }}
+  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || 'v1.0.77-shared-folder-route-refresh' }}
 
 jobs:
   installer-contract:
