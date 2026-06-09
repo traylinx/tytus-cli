@@ -1,3 +1,9 @@
+## 0.7.44 - 2026-06-09
+
+- Fixes TytusOS selected-agent chat so Lisa, Claus, and Hermie carry the same stable agent identity across Chat, Atomek, local tray routes, and Provider/Cortex fallback paths.
+- Refreshes the embedded TytusOS bundle from `v1.0.79-agent-identity` with route-aware pod selectors and `agent_identity_id` forwarding.
+- Makes local tray state expose a stable selected-agent identity even before Scalesys backfills explicit `aid_*` ids, using the unique route id as the safe compatibility fallback.
+
 ## 0.7.43 - 2026-06-09
 
 - Supersede failed v0.7.42 release attempt: fix Linux ARM64 Rust portability by using `libc::c_char` for `gethostname` instead of assuming signed `i8` chars.
