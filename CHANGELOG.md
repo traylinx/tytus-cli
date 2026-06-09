@@ -1,3 +1,11 @@
+## 0.7.42 - 2026-06-09
+
+- Release the upstreamed shared-folder baseline hardening instead of relying on a local `/usr/local/bin` patch:
+  - Pin garagetytus `04cdeeeb` so upgrades keep the 300s poll timeout and separate 1800s initial `rclone bisync --resync` timeout.
+  - Add Linux ARM64 and Windows ARM64 release jobs so installers only request artifacts the release can actually ship.
+  - Build unsigned Linux `.deb` previews for both amd64 and arm64.
+  - Embed TytusOS `v1.0.78-atomek-worker-origin`, which points the App Store at Atomek `v0.4.36` and fixes Monaco worker loading from localhost shells.
+
 ## 0.7.41 - 2026-06-09
 
 - Production shared-folder hotfix for paid Tytus users:

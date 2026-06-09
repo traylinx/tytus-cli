@@ -33,7 +33,7 @@ env:
   TYTUS_OS_REF: ${{ inputs.tytus_os_ref }}
   # Pinned so public Tytus releases are deterministic. Update only after
   # garagetytus CI is green and helper scripts have been reviewed.
-  GARAGETYTUS_REF: 5befaee3cf0f9c5db9097f0e7f088dd36413c23c
+  GARAGETYTUS_REF: 04cdeeebf11302aa5b2816a73364c30108482abd
 
 jobs:
   check-nonproduction-release-policy:
@@ -231,9 +231,17 @@ jobs:
             os: ubuntu-22.04
             name: tytus-linux-x86_64
             archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            name: tytus-linux-aarch64
+            archive: tar.gz
           - target: x86_64-pc-windows-msvc
             os: windows-2025-vs2026
             name: tytus-windows-x86_64
+            archive: zip
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            name: tytus-windows-aarch64
             archive: zip
 
     runs-on: ${{ matrix.os }}
@@ -349,7 +357,7 @@ jobs:
         shell: bash
 
       - name: Build unsigned Linux deb dry-run
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu'
         working-directory: tytus-cli
         env:
           TARGET_TRIPLE: ${{ matrix.target }}
@@ -390,7 +398,7 @@ jobs:
           retention-days: 7
 
       - name: Upload unsigned Linux deb dry-run artifact
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu'
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.name }}-unsigned-DO-NOT-DISTRIBUTE-deb

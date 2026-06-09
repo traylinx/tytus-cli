@@ -110,6 +110,10 @@ jobs:
           assert "unsigned-DO-NOT-DISTRIBUTE-deb" in release
           assert "Assert native package public-release policy" in release
           assert "ubuntu-22.04" in release
+          assert "ubuntu-24.04-arm" in release
+          assert "windows-11-arm" in release
+          assert "tytus-linux-aarch64" in release
+          assert "tytus-windows-aarch64" in release
           assert "Check production signing secrets" in release
           assert "Check non-production release policy" in release
           assert "environment: release-production" in release
