@@ -12944,11 +12944,15 @@ fn handle_pod_refresh_creds(request: Request, registry: &Registry, query: &str) 
     };
     let bin = resolve_garagetytus_helper("garagetytus-pod-refresh");
     let (job_id, job) = registry.create();
-    spawn_external_command(job, bin, vec![pod_id.clone()]);
+    // Pass the original route selector through when the UI supplied one.
+    // Numeric pod ids are only DAM-local; in a multi-droplet Strato fleet,
+    // converting `route_id -> "01"` here makes the helper refresh the wrong
+    // droplet. The helper now resolves route_id -> pod_id + droplet itself.
+    spawn_external_command(job, bin, vec![selector.clone()]);
     respond_json(
         request,
         202,
-        &serde_json::json!({"job_id": job_id, "pod": pod_id}),
+        &serde_json::json!({"job_id": job_id, "pod": pod_id, "selector": selector}),
     );
 }
 

@@ -33,7 +33,7 @@ env:
   TYTUS_OS_REF: ${{ inputs.tytus_os_ref }}
   # Pinned so public Tytus releases are deterministic. Update only after
   # garagetytus CI is green and helper scripts have been reviewed.
-  GARAGETYTUS_REF: 8dd59b8a7185bb9a8d41595bd6c4066e3508c4ef
+  GARAGETYTUS_REF: 5d4636e9a2c0bff55b60683d29133603b8b67daa
 
 jobs:
   check-nonproduction-release-policy:

@@ -1,3 +1,11 @@
+## 0.7.40 - 2026-06-09
+
+- Production shared-folder hotfix for paid Tytus users:
+  - Bundle garagetytus helper fixes for macOS `/bin/bash` 3.2 (`mapfile` removed from launchd-run helpers).
+  - Bundle route-aware shared-folder provisioning/refresh/deprovision helpers so opaque route IDs resolve to the correct pod and droplet in distributed Strato fleets.
+  - Bundle robust pod command quoting for helper writes, avoiding launchd/Bash 3.2 failures during prompt overlay updates.
+  - Preserve route selectors for pod credential refresh in the TytusOS daemon instead of collapsing to ambiguous numeric `01` in multi-droplet fleets.
+
 ## 0.7.39 - 2026-06-08
 
 - Embed TytusOS `v1.0.77-shared-folder-route-refresh`: route-aware shared-folder binding, live Files/Settings refresh after bind/settings/remove jobs, longer bind-job recovery for slow final save, desktop app runtime state, and external app logos.
