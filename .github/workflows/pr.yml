@@ -11,14 +11,14 @@ on:
       tytus_os_ref:
         description: 'tytus-os ref to build for dist embedding checks'
         required: false
-        default: 'v1.0.77-shared-folder-route-refresh'
+        default: 'v1.0.79-agent-identity'
         type: string
 
 permissions:
   contents: read
 
 env:
-  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || 'v1.0.77-shared-folder-route-refresh' }}
+  TYTUS_OS_REF: ${{ inputs.tytus_os_ref || 'v1.0.79-agent-identity' }}
 
 jobs:
   installer-contract:
