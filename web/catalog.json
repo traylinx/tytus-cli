@@ -1,6 +1,6 @@
 {
-  "version": "0.7.41",
-  "release_tag": "v0.7.41",
+  "version": "0.7.43",
+  "release_tag": "v0.7.43",
   "updated_at": "2026-06-09",
   "platforms": {
     "macos": {
@@ -17,7 +17,7 @@
     },
     "linux": {
       "label": "Linux",
-      "subLabel": "x86_64 + aarch64",
+      "subLabel": "x86_64 + aarch64 public beta",
       "primary": {
         "command": "curl -fsSL https://get.traylinx.com/install.sh | bash"
       },
@@ -29,17 +29,17 @@
     },
     "windows": {
       "label": "Windows",
-      "subLabel": "x86_64 public beta",
+      "subLabel": "x86_64 + arm64 public beta",
       "primary": {
         "command": "powershell -c \"irm https://get.traylinx.com/install.ps1 | iex\""
       },
       "alternative": {
         "available": true,
         "kind": "zip",
-        "url": "https://github.com/traylinx/tytus-cli/releases/download/v0.7.41/tytus-windows-x86_64.zip",
-        "sha256": "22aa2d2ab9df9753ebf1ab4c0449175a6349c25db0c5e5eaccdd72fcb9f2109a"
+        "url": "https://github.com/traylinx/tytus-cli/releases/download/v0.7.43/tytus-windows-x86_64.zip",
+        "sha256": "eb429ca04c6926cae4b11889afd6a1b47dbce18f336775b1d746d30a4b355d74"
       },
-      "extra": "PowerShell installer first; zip fallback for locked-down machines"
+      "extra": "PowerShell installer first; x86_64 and arm64 zip fallbacks are on the GitHub release for locked-down machines"
     }
   },
   "tytusos": {
