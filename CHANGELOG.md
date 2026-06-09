@@ -1,5 +1,6 @@
-## 0.7.42 - 2026-06-09
+## 0.7.43 - 2026-06-09
 
+- Supersede failed v0.7.42 release attempt: fix Linux ARM64 Rust portability by using `libc::c_char` for `gethostname` instead of assuming signed `i8` chars.
 - Release the upstreamed shared-folder baseline hardening instead of relying on a local `/usr/local/bin` patch:
   - Pin garagetytus `04cdeeeb` so upgrades keep the 300s poll timeout and separate 1800s initial `rclone bisync --resync` timeout.
   - Add Linux ARM64 and Windows ARM64 release jobs so installers only request artifacts the release can actually ship.
