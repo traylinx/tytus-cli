@@ -130,6 +130,11 @@ pub struct PodEntry {
     pub route_id: Option<String>,
     #[serde(default)]
     pub droplet_id: String,
+    /// Stable selected-agent identity used to unify memory across channels.
+    /// Falls back to route_id in newer tray surfaces when older Provider
+    /// status snapshots do not yet emit this field.
+    #[serde(default)]
+    pub agent_identity_id: Option<String>,
     #[serde(default)]
     pub droplet_ip: Option<String>,
     #[serde(default)]

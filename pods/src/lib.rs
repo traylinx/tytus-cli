@@ -23,5 +23,5 @@ pub use default_pod::{request_default_pod, DefaultPodAllocation};
 pub use rename::{rename_pod, RenameResult};
 pub use request::{request_pod, request_pod_with_agent, PodAllocation};
 pub use revoke::{revoke_all_pods, revoke_pod};
-pub use status::{get_pod_status, PodEntry, PodStatus};
+pub use status::{get_pod_status, get_pod_status_raw, PodEntry, PodStatus};
 pub use user_key::{get_user_key, get_user_key_full, UserKey};

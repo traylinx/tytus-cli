@@ -398,7 +398,11 @@ enum Commands {
         action: AccountAction,
     },
     /// Show current status: plan, pods, tunnels
-    Status,
+    Status {
+        /// Include debug routing metadata such as droplet_id. Does not expose droplet IPs.
+        #[arg(long)]
+        raw: bool,
+    },
     /// Activate the WireGuard tunnel. With no flags, uses your default pod
     /// (agent-less, AIL-only) — allocating it if needed. Use `--pod` to
     /// connect to a specific slot, or `--agent` as a deprecated shim for
@@ -861,7 +865,7 @@ async fn main() {
         Some(Commands::Configure) => cmd_configure(&http, cli.json).await,
         Some(Commands::Login) => cmd_account_add(&http, cli.json).await,
         Some(Commands::Account { action }) => cmd_account(&http, action, cli.json).await,
-        Some(Commands::Status) => cmd_status(&http, cli.json).await,
+        Some(Commands::Status { raw }) => cmd_status(&http, cli.json, raw).await,
         Some(Commands::Connect { pod, agent }) => {
             // `--agent X` is a shim for `tytus agent install X` + tunnel-up
             // (see SPRINT §6 B2). Pre-sprint, `tytus connect --agent X` did
@@ -1623,7 +1627,7 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
                 let default_msg = ensure_default_pod(&mut state, http).await;
                 state.save();
                 if json {
-                    print_json_status(&state);
+                    print_json_status(&state, false);
                 } else {
                     println!("✓ Logged in as {}", state.email.as_deref().unwrap_or("?"));
                     if let Some(msg) = default_msg {
@@ -1692,7 +1696,7 @@ async fn cmd_login(http: &atomek_core::HttpClient, json: bool) {
     state.save();
 
     if json {
-        print_json_status(&state);
+        print_json_status(&state, false);
     } else {
         println!("✓ Logged in as {}", result.user.email);
         if let Some(ref tier) = state.tier {
@@ -1754,6 +1758,7 @@ async fn ensure_default_pod(
                 pod_id: alloc.pod_id.clone(),
                 route_id: alloc.route_id.clone(),
                 droplet_id: alloc.droplet_id.clone(),
+                agent_identity_id: None,
                 droplet_ip: alloc.droplet_ip.clone(),
                 ai_endpoint: alloc.ai_endpoint.clone(),
                 pod_api_key: alloc.pod_api_key.clone(),
@@ -1798,7 +1803,7 @@ async fn ensure_default_pod(
 
 // ── Status ───────────────────────────────────────────────────
 
-async fn cmd_status(http: &atomek_core::HttpClient, json: bool) {
+async fn cmd_status(http: &atomek_core::HttpClient, json: bool, raw: bool) {
     let mut state = CliState::load();
 
     if !state.is_logged_in() {
@@ -1812,13 +1817,16 @@ async fn cmd_status(http: &atomek_core::HttpClient, json: bool) {
 
     let token_error = ensure_token(&mut state, http).await.err();
     sync_tytus(&mut state, http).await;
+    if raw {
+        hydrate_raw_status(&mut state, http).await;
+    }
 
     // Detect stale tunnels: state says tunnel is up but interface/daemon is dead
     reap_dead_tunnels(&mut state);
     state.save();
 
     if json {
-        print_json_status(&state);
+        print_json_status(&state, raw);
     } else {
         if let Some(e) = token_error {
             eprintln!(
@@ -1826,7 +1834,7 @@ async fn cmd_status(http: &atomek_core::HttpClient, json: bool) {
                 e
             );
         }
-        print_human_status(&state);
+        print_human_status(&state, raw);
     }
 }
 
@@ -1990,6 +1998,7 @@ async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
                     pod_id: a.pod_id.clone(),
                     route_id: a.route_id.clone(),
                     droplet_id: a.droplet_id.clone(),
+                    agent_identity_id: None,
                     droplet_ip: a.droplet_ip.clone(),
                     ai_endpoint: a.ai_endpoint.clone(),
                     pod_api_key: a.pod_api_key.clone(),
@@ -3205,6 +3214,7 @@ async fn cmd_agent_install(
                         pod_id: a.pod_id.clone(),
                         route_id: a.route_id.clone(),
                         droplet_id: a.droplet_id.clone(),
+                        agent_identity_id: a.agent_identity_id.clone(),
                         droplet_ip: a.droplet_ip.clone(),
                         ai_endpoint: a.ai_endpoint.clone(),
                         pod_api_key: a.pod_api_key.clone(),
@@ -3835,17 +3845,23 @@ async fn cmd_disconnect(pod_id: Option<String>, json: bool) {
         //    asked to tear down. If the daemon is still alive after this,
         //    state.json lies briefly, but the next disconnect will see
         //    the pidfile and retry.
-        if let Some(pod) = state
+        let route_forwarder_key = if let Some(pod) = state
             .pods
             .iter_mut()
             .find(|p| p.pod_id == *pod_num || p.route_id.as_deref() == Some(pod_num.as_str()))
         {
             pod.tunnel_iface = None;
-        }
+            pod.route_id.clone()
+        } else {
+            None
+        };
         // A2: tear down any UI forwarder for this pod too. Without this,
         // a Disconnect leaves localhost:3000 bound to a dead upstream,
         // and the next browser click errors silently.
         stop_ui_forwarder(pod_num);
+        if let Some(route) = route_forwarder_key.as_deref().filter(|r| *r != pod_num) {
+            stop_ui_forwarder(route);
+        }
         // Intentionally do NOT wipe /tmp/tytus/ui-<pod>-cache here —
         // every disconnect+reconnect cycle would then force a 2–3 minute
         // full bundle re-download through the slow tunnel. Vite-built
@@ -10046,6 +10062,7 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
                     pod_id: pod.pod_id.clone(),
                     route_id: pod.route_id.clone(),
                     droplet_id: pod.droplet_id.clone().unwrap_or_default(),
+                    agent_identity_id: pod.agent_identity_id.clone(),
                     droplet_ip: None,
                     ai_endpoint: None,
                     pod_api_key: None,
@@ -10087,6 +10104,9 @@ fn merge_status_pod(local: &mut PodEntry, remote: &atomek_pods::PodEntry) {
     }
     if let Some(did) = remote.droplet_id.clone() {
         local.droplet_id = did;
+    }
+    if remote.agent_identity_id.is_some() {
+        local.agent_identity_id = remote.agent_identity_id.clone();
     }
     local.agent_type = remote.agent_type.clone();
     if remote.agent_units.is_some() {
@@ -10130,24 +10150,58 @@ fn hydrate_status_pod_from_user_key(local: &mut PodEntry, user_key: Option<&atom
     }
 }
 
-fn print_json_status(state: &CliState) {
-    // SECURITY: Only expose user-facing fields. Never leak infrastructure details
-    // (droplet_id, droplet_ip, internal pod IPs, raw per-pod keys).
-    // Use `tytus env --raw` for debugging (explicit opt-in).
+async fn hydrate_raw_status(state: &mut CliState, http: &atomek_core::HttpClient) {
+    let (Some(sk), Some(auid)) = (state.secret_key.clone(), state.agent_user_id.clone()) else {
+        return;
+    };
+    let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+    let Ok(status) = atomek_pods::get_pod_status_raw(&client).await else {
+        return;
+    };
+    for remote in &status.pods {
+        if let Some(existing) = state
+            .pods
+            .iter_mut()
+            .find(|local| cli_pod_matches_status(local, remote))
+        {
+            merge_status_pod(existing, remote);
+        }
+    }
+}
+
+fn print_json_status(state: &CliState, raw: bool) {
+    // SECURITY: default status exposes only user-facing fields. `--raw`
+    // is an explicit debug opt-in for route metadata; it still does not
+    // expose droplet IPs, internal pod IPs, or raw per-pod keys.
     let pods: Vec<_> = state
         .pods
         .iter()
         .map(|p| {
-            serde_json::json!({
+            let mut pod = serde_json::json!({
                 "pod_id": p.pod_id,
                 "route_id": p.route_id,
+                "agent_identity_id": p.agent_identity_id,
                 "agent_type": p.agent_type,
                 "agent_units": p.agent_units,
                 "display_name": p.display_name,
                 "tunnel_iface": p.tunnel_iface,
                 "stable_ai_endpoint": p.stable_ai_endpoint,
                 "stable_user_key": p.stable_user_key,
-            })
+            });
+            if raw {
+                if let Some(obj) = pod.as_object_mut() {
+                    obj.insert("droplet_id".to_string(), serde_json::json!(p.droplet_id));
+                    obj.insert(
+                        "pod_public_url".to_string(),
+                        serde_json::json!(p.pod_public_url),
+                    );
+                    obj.insert(
+                        "edge_public_url".to_string(),
+                        serde_json::json!(p.edge_public_url),
+                    );
+                }
+            }
+            pod
         })
         .collect();
 
@@ -10160,7 +10214,7 @@ fn print_json_status(state: &CliState) {
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
 }
 
-fn print_human_status(state: &CliState) {
+fn print_human_status(state: &CliState, raw: bool) {
     println!("Tytus — {}", state.email.as_deref().unwrap_or("?"));
     if let Some(ref tier) = state.tier {
         println!("Plan: {}", tier);
@@ -10190,6 +10244,17 @@ fn print_human_status(state: &CliState) {
             }
             if let Some(ref iface) = pod.tunnel_iface {
                 println!("  Tunnel:        {}", iface);
+            }
+            if raw {
+                if let Some(ref route) = pod.route_id {
+                    println!("  Route ID:      {}", route);
+                }
+                if !pod.droplet_id.is_empty() {
+                    println!("  Droplet:       {}", pod.droplet_id);
+                }
+                if let Some(ref url) = pod.pod_public_url {
+                    println!("  Public URL:    {}", url);
+                }
             }
         }
     }

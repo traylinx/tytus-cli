@@ -20,6 +20,8 @@ pub struct PodEntry {
     pub route_id: Option<String>,
     #[serde(default)]
     pub droplet_id: Option<String>,
+    #[serde(default)]
+    pub agent_identity_id: Option<String>,
     pub agent_type: Option<String>,
     pub agent_units: Option<u32>,
     #[serde(default)]
@@ -43,4 +45,11 @@ pub async fn get_pod_status(client: &TytusClient) -> atomek_core::Result<PodStat
     resp.json()
         .await
         .map_err(|e| atomek_core::AtomekError::Other(format!("Failed to parse pod status: {}", e)))
+}
+
+pub async fn get_pod_status_raw(client: &TytusClient) -> atomek_core::Result<PodStatus> {
+    let resp = client.get_with_retry("/pod/status?raw=1").await?;
+    resp.json().await.map_err(|e| {
+        atomek_core::AtomekError::Other(format!("Failed to parse raw pod status: {}", e))
+    })
 }

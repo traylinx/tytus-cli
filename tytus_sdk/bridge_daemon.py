@@ -238,7 +238,19 @@ def start_http_server(token: str) -> tuple[socketserver.TCPServer, threading.Thr
 # ── Outbox pollers (per pod) ───────────────────────────────────────────────
 
 
-def _pod_is_connected(pod_id: str) -> bool:
+def _pod_matches_selector(pod: dict[str, Any], selector: str) -> bool:
+    return (
+        str(pod.get("route_id") or "") == str(selector)
+        or str(pod.get("pod_id") or "") == str(selector)
+    )
+
+
+def _pod_selector(pod: dict[str, Any]) -> str:
+    """Route-aware local identity. Falls back to pod_id for old CLIs."""
+    return str(pod.get("route_id") or pod.get("pod_id") or "")
+
+
+def _pod_is_connected(pod_selector: str) -> bool:
     """True if the pod is reachable.
 
     `tytus status --json` can report `tunnel_iface: null` even when the WG
@@ -247,18 +259,16 @@ def _pod_is_connected(pod_id: str) -> bool:
     answers, the tunnel + agent are live regardless of what state.json says.
     """
     import socket
-    try:
-        num = int(pod_id)
-    except ValueError:
-        return False
-    port = 18700 + num
-    # TCP probe — 1 s timeout, loopback only
-    try:
-        s = socket.create_connection(("127.0.0.1", port), timeout=1.0)
-        s.close()
-        return True
-    except (OSError, ConnectionError):
-        pass
+    if str(pod_selector).isdigit():
+        port = 18700 + int(pod_selector)
+        # TCP probe — 1 s timeout, loopback only. Only safe for numeric
+        # legacy selectors; route_id-based forwarders use marker files.
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+            s.close()
+            return True
+        except (OSError, ConnectionError):
+            pass
     # Fallback: trust tytus state.json if forwarder isn't up yet
     try:
         out = subprocess.check_output(["tytus", "status", "--json"], timeout=10)
@@ -267,18 +277,19 @@ def _pod_is_connected(pod_id: str) -> bool:
             subprocess.TimeoutExpired, json.JSONDecodeError):
         return False
     for pod in data.get("pods", []):
-        if str(pod.get("pod_id")) == str(pod_id):
+        if _pod_matches_selector(pod, pod_selector):
             return bool(pod.get("tunnel_iface"))
     return False
 
 
-def _state_file(pod_id: str) -> Path:
+def _state_file(pod_selector: str) -> Path:
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    return STATE_DIR / f"outbox-{pod_id}.state"
+    safe = "".join(c for c in str(pod_selector) if c.isalnum() or c in "-_") or "unknown"
+    return STATE_DIR / f"outbox-{safe}.state"
 
 
-def _load_offset(pod_id: str) -> int:
-    p = _state_file(pod_id)
+def _load_offset(pod_selector: str) -> int:
+    p = _state_file(pod_selector)
     if not p.exists():
         return 0
     try:
@@ -287,11 +298,11 @@ def _load_offset(pod_id: str) -> int:
         return 0
 
 
-def _save_offset(pod_id: str, offset: int) -> None:
-    _state_file(pod_id).write_text(str(offset))
+def _save_offset(pod_selector: str, offset: int) -> None:
+    _state_file(pod_selector).write_text(str(offset))
 
 
-def _read_pod_outbox_tail(pod_id: str, offset: int) -> tuple[list[str], int]:
+def _read_pod_outbox_tail(pod_selector: str, offset: int) -> tuple[list[str], int]:
     """Return (new lines, new offset). Uses `wc -c` + `tail -c +N` pattern.
 
     We avoid relying on `python3` / `node` on the pod — plain POSIX shell.
@@ -302,7 +313,7 @@ def _read_pod_outbox_tail(pod_id: str, offset: int) -> tuple[list[str], int]:
         f"[ -f {POD_OUTBOX_PATH} ] && wc -c < {POD_OUTBOX_PATH} || echo 0"
     )
     size_out = subprocess.run(
-        ["tytus", "exec", "--pod", pod_id, "--timeout", "10", cmd_size],
+        ["tytus", "exec", "--pod", pod_selector, "--timeout", "10", cmd_size],
         capture_output=True, text=True, timeout=20,
     )
     if size_out.returncode != 0:
@@ -318,7 +329,7 @@ def _read_pod_outbox_tail(pod_id: str, offset: int) -> tuple[list[str], int]:
     start_byte = offset + 1
     cmd_tail = f"tail -c +{start_byte} {POD_OUTBOX_PATH}"
     tail_out = subprocess.run(
-        ["tytus", "exec", "--pod", pod_id, "--timeout", "20", cmd_tail],
+        ["tytus", "exec", "--pod", pod_selector, "--timeout", "20", cmd_tail],
         capture_output=True, text=True, timeout=30,
     )
     if tail_out.returncode != 0:
@@ -376,7 +387,7 @@ def _post_to_bridge(token: str, line: str) -> bool:
         conn.close()
 
 
-def poll_pod_outbox(pod_id: str, token: str, stop_event: threading.Event) -> None:
+def poll_pod_outbox(pod_selector: str, token: str, stop_event: threading.Event) -> None:
     """Long-running poller for one pod. Terminates when stop_event is set or
     the pod disconnects (lifecycle guard per gemini's critique).
 
@@ -385,20 +396,20 @@ def poll_pod_outbox(pod_id: str, token: str, stop_event: threading.Event) -> Non
     death leaves the bridge looking healthy (HTTP listener is fine) but
     delivering nothing.
     """
-    log.info("outbox poller started for pod %s", pod_id)
-    offset = _load_offset(pod_id)
+    log.info("outbox poller started for pod %s", pod_selector)
+    offset = _load_offset(pod_selector)
     tick = 0
     while not stop_event.is_set():
         tick += 1
         try:
-            log.debug("pod %s poll tick %d (offset=%s)", pod_id, tick, offset)
-            if not _pod_is_connected(pod_id):
-                log.info("pod %s no longer connected — poller exiting", pod_id)
+            log.debug("pod %s poll tick %d (offset=%s)", pod_selector, tick, offset)
+            if not _pod_is_connected(pod_selector):
+                log.info("pod %s no longer connected — poller exiting", pod_selector)
                 return
             try:
-                lines, new_offset = _read_pod_outbox_tail(pod_id, offset)
+                lines, new_offset = _read_pod_outbox_tail(pod_selector, offset)
             except (subprocess.TimeoutExpired, RuntimeError) as e:
-                log.warning("pod %s outbox read failed: %s", pod_id, e)
+                log.warning("pod %s outbox read failed: %s", pod_selector, e)
                 stop_event.wait(POLL_INTERVAL_S)
                 continue
             log.debug("pod %s tick %d: lines=%d new_offset=%s", pod_id, tick, len(lines), new_offset)
@@ -407,26 +418,26 @@ def poll_pod_outbox(pod_id: str, token: str, stop_event: threading.Event) -> Non
                 for line in lines:
                     if _post_to_bridge(token, line):
                         delivered += 1
-                log.info("pod %s: delivered %d/%d notifies", pod_id, delivered, len(lines))
+                log.info("pod %s: delivered %d/%d notifies", pod_selector, delivered, len(lines))
             if new_offset != offset:
-                _save_offset(pod_id, new_offset)
+                _save_offset(pod_selector, new_offset)
                 offset = new_offset
         except Exception as e:  # noqa: BLE001 — last-resort catch
-            log.exception("pod %s poller iteration error: %s", pod_id, e)
+            log.exception("pod %s poller iteration error: %s", pod_selector, e)
         stop_event.wait(POLL_INTERVAL_S)
 
 
 def connected_pod_ids() -> list[str]:
-    """Return pod ids whose forwarder port is accepting TCP connections."""
+    """Return route-aware pod selectors whose forwarder/tunnel is active."""
     try:
         out = subprocess.check_output(["tytus", "status", "--json"], timeout=10)
         data = json.loads(out)
     except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
         return []
     return [
-        str(p["pod_id"])
+        _pod_selector(p)
         for p in data.get("pods", [])
-        if _pod_is_connected(str(p["pod_id"]))
+        if _pod_selector(p) and _pod_is_connected(_pod_selector(p))
     ]
 
 

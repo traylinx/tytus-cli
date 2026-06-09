@@ -35,7 +35,8 @@ mod hostname {
         {
             use std::ffi::CStr;
             let mut buf = [0u8; 256];
-            let ret = unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
+            let ret =
+                unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
             if ret == 0 {
                 let cstr = unsafe { CStr::from_ptr(buf.as_ptr().cast::<libc::c_char>()) };
                 Ok(std::ffi::OsString::from(

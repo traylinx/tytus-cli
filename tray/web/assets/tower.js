@@ -818,6 +818,7 @@
     for (const a of agents) {
       const card = document.createElement('section');
       card.className = 'files-tab-card';
+      const podSelector = a.id || a.route_id || a.pod_id;
       const name = (DISPLAY[a.agent_type] && DISPLAY[a.agent_type].display_name) || a.agent_type || 'AI assistant';
       card.innerHTML = `
         <header class="files-tab-card-head">
@@ -835,7 +836,7 @@
         out.classList.remove('hidden');
         out.textContent = 'Listing inbox…';
         try {
-          const res = await fetch(`/api/pod/${encodeURIComponent(a.pod_id)}/run-streamed`, {
+          const res = await fetch(`/api/pod/${encodeURIComponent(podSelector)}/run-streamed`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({action: 'ls-inbox'}),
@@ -859,7 +860,7 @@
       });
       card.querySelector('.files-tab-downloads').addEventListener('click', async () => {
         try {
-          const res = await fetch(`/api/files/open-downloads?pod=${encodeURIComponent(a.pod_id)}`, { method: 'POST' });
+          const res = await fetch(`/api/files/open-downloads?pod=${encodeURIComponent(podSelector)}`, { method: 'POST' });
           const j = await res.json();
           if (!res.ok || !j.ok) {
             showToast('Couldn\'t open downloads: ' + (j.error || `HTTP ${res.status}`), 'err');
@@ -937,7 +938,7 @@
     function findPod(pod) {
       const s = budgetState || {};
       const list = (s.agents || []).concat(s.included || []);
-      return list.find((a) => a.pod_id === pod) || null;
+      return list.find((a) => (a.id || a.route_id || a.pod_id) === pod || a.pod_id === pod) || null;
     }
     function renderHeader(pod) {
       const a = findPod(pod);
@@ -1448,6 +1449,7 @@
     const name = override.display_name || a.agent_type;
     const icon = override.icon || null;
     const apiUrlDisplay = a.api_url || a.public_url || '— provisioning —';
+    const podSelector = a.id || a.route_id || a.pod_id;
 
     const panel = document.createElement('div');
     panel.className = 'pod-panel';
@@ -1507,7 +1509,7 @@
     const podIdEl = panel.querySelector('.pod-id');
     podIdEl.textContent = '';
     const activeMap = (budgetState && budgetState.active_jobs_per_pod) || {};
-    if (activeMap[a.pod_id]) {
+    if (activeMap[podSelector]) {
       const dot = document.createElement('span');
       dot.className = 'pod-running-job-dot';
       dot.title = 'Action streaming…';
@@ -1528,7 +1530,7 @@
     openBtn.addEventListener('click', async () => {
       try {
         const res = await fetch(
-          `/api/pod/open?pod=${encodeURIComponent(a.pod_id)}`,
+          `/api/pod/open?pod=${encodeURIComponent(podSelector)}`,
           { method: 'POST' },
         );
         if (!res.ok) flashErr(openBtn, 'Failed');
@@ -1561,7 +1563,7 @@
       restartBtn.innerHTML = '<span class="icon">⟳</span> Restarting…';
       try {
         const res = await fetch(
-          `/api/pod/restart?pod=${encodeURIComponent(a.pod_id)}`,
+          `/api/pod/restart?pod=${encodeURIComponent(podSelector)}`,
           { method: 'POST' },
         );
         if (res.status === 202) {
@@ -1586,7 +1588,7 @@
     // OpenCode, Codex, …). Uses launcher.rs on the backend so the list
     // is identical to the tray's "Open in ▸" submenu.
     panel.querySelector('.pod-actions')
-      .appendChild(buildOpenInDropdown(a.pod_id));
+      .appendChild(buildOpenInDropdown(podSelector));
 
     // Revoke Pod — destructive. Ports the tray's per-pod Revoke item
     // (main.rs: `pod_NN_revoke`). Two-step confirm: the second one
@@ -1614,7 +1616,7 @@
       revokeBtn.innerHTML = '<span class="icon">⟳</span> Revoking…';
       try {
         const res = await fetch(
-          `/api/pod/revoke?pod=${encodeURIComponent(a.pod_id)}`,
+          `/api/pod/revoke?pod=${encodeURIComponent(podSelector)}`,
           { method: 'POST' }
         );
         if (!res.ok) {
@@ -1638,14 +1640,14 @@
     // forwarder is actually running (state.forwarders carries the
     // pod_id list). Populated on render from the /api/state snapshot.
     const stopFwdBtn = panel.querySelector('.pod-stop-forwarder');
-    if (POD_FORWARDERS.has(a.pod_id)) {
+    if (POD_FORWARDERS.has(podSelector) || POD_FORWARDERS.has(a.pod_id)) {
       stopFwdBtn.classList.remove('hidden');
     }
     stopFwdBtn.addEventListener('click', async () => {
       stopFwdBtn.disabled = true;
       try {
         await fetch(
-          `/api/pod/stop-forwarder?pod=${encodeURIComponent(a.pod_id)}`,
+          `/api/pod/stop-forwarder?pod=${encodeURIComponent(podSelector)}`,
           { method: 'POST' }
         );
         showToast(`Forwarder for pod ${a.pod_id} stopping…`);
@@ -1666,7 +1668,7 @@
     const channelsHost = document.createElement('div');
     channelsHost.className = 'pod-channels';
     panel.appendChild(channelsHost);
-    renderPodChannels(channelsHost, a.pod_id);
+    renderPodChannels(channelsHost, podSelector);
 
     const uninstallBtn = panel.querySelector('.pod-uninstall');
     uninstallBtn.addEventListener('click', async () => {
@@ -1680,13 +1682,13 @@
       uninstallBtn.innerHTML = '<span class="icon">⟳</span> Uninstalling…';
       try {
         const res = await fetch(
-          `/api/pod/uninstall?pod=${encodeURIComponent(a.pod_id)}`,
+          `/api/pod/uninstall?pod=${encodeURIComponent(podSelector)}`,
           { method: 'POST' },
         );
         if (res.status === 202) {
           // Uninstall is async — poll /api/state until the pod
           // disappears from the agents list (~5–15 s typically).
-          pollUntilGone(a.pod_id, () => {
+          pollUntilGone(podSelector, () => {
             loadBudget();
             loadCatalog(true);
           });
@@ -1967,7 +1969,7 @@
       await new Promise((r) => setTimeout(r, 1200));
       try {
         const s = await (await fetch('/api/state')).json();
-        const still = (s.agents || []).some((x) => x.pod_id === pod_id);
+        const still = (s.agents || []).some((x) => (x.id || x.route_id || x.pod_id) === pod_id || x.pod_id === pod_id);
         if (!still) { done(); return; }
       } catch {}
     }

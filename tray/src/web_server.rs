@@ -7137,7 +7137,7 @@ struct StateSnapshot {
     /// True when /Applications/Tytus.app exists. Page uses this to
     /// decide whether to surface the "Install in Applications" row.
     app_bundle_installed: bool,
-    /// Pod IDs that currently have a live localhost UI forwarder — the
+    /// Pod selectors that currently have a live localhost UI forwarder — the
     /// user has run "Open in Browser" through the WG fallback. Page
     /// uses this to show a "Stop Forwarder" button on the matching
     /// running-pod panel.
@@ -7163,6 +7163,10 @@ struct AgentSlot {
     id: String,
     pod_id: String,
     route_id: Option<String>,
+    /// Stable selected-agent identity for cross-channel memory.
+    /// New Provider snapshots emit `agent_identity_id`; older ones fall back
+    /// to route_id because route_id is already server-assigned and unique.
+    agent_identity_id: Option<String>,
     /// User-facing label. Prefer display_name; fall back to "Pod NN".
     display_label: String,
     display_name: Option<String>,
@@ -7709,6 +7713,9 @@ struct LocalAgentChatBody {
     message: String,
     session_id: Option<String>,
     route_id: Option<String>,
+    agent_identity_id: Option<String>,
+    thread_id: Option<String>,
+    channel: Option<String>,
     app_id: Option<String>,
     agent_mode: Option<String>,
     model_preference: Option<String>,
@@ -7948,6 +7955,19 @@ fn safe_route_id(raw: Option<String>) -> Option<String> {
     })
 }
 
+fn safe_channel_token(raw: String) -> Option<String> {
+    let t = raw.trim();
+    if !t.is_empty()
+        && t.len() <= 64
+        && t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+    {
+        Some(t.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
 fn safe_app_id(raw: Option<String>) -> String {
     raw.and_then(|v| {
         let t = v.trim();
@@ -8115,6 +8135,14 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
 
     let stream_flag = body.stream.unwrap_or(true);
     let session_id = safe_session_id(body.session_id);
+    let thread_id = safe_session_id(body.thread_id).or_else(|| session_id.clone());
+    let channel = body
+        .channel
+        .clone()
+        .and_then(safe_channel_token)
+        .or_else(|| Some("tytus-os-chat".to_string()));
+    let agent_identity_id =
+        safe_route_id(body.agent_identity_id.clone()).or_else(|| slot.agent_identity_id.clone());
     let agent_mode = safe_agent_mode(body.agent_mode);
     let app_id = safe_app_id(body.app_id);
     let model_preference = safe_model_preference(body.model_preference);
@@ -8139,6 +8167,9 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
                 "message": message,
                 "session_id": session_id,
                 "route_id": effective_route_id.clone(),
+                "agent_identity_id": agent_identity_id.clone(),
+                "thread_id": thread_id.clone(),
+                "channel": channel.clone(),
                 "chat_target": "agent",
                 "agent_mode": agent_mode,
                 "app_id": app_id,
@@ -8184,6 +8215,9 @@ fn handle_pod_cortex_chat(request: Request, pod_id: String) {
                 "pod_id": cli_pod_id,
                 "route_id": effective_route_id.unwrap_or(synthesized_route_id),
                 "agent_type": slot.agent_type.clone(),
+                "agent_identity_id": agent_identity_id.clone(),
+                "thread_id": thread_id.clone(),
+                "channel": channel.clone(),
                 "session_id": session_id,
                 "message": message,
                 "stream": stream_flag,
@@ -8672,10 +8706,23 @@ fn handle_pod_agent_chat(request: Request, pod_id: String) {
             return;
         }
     };
+    let session_id = safe_session_id(body.session_id);
+    let thread_id = safe_session_id(body.thread_id).or_else(|| session_id.clone());
+    let channel = body
+        .channel
+        .clone()
+        .and_then(safe_channel_token)
+        .or_else(|| Some("tytus-os-chat".to_string()));
+    let agent_identity_id =
+        safe_route_id(body.agent_identity_id.clone()).or_else(|| slot.agent_identity_id.clone());
     let payload = serde_json::json!({
         "model": "ail-compound",
         "app_id": safe_app_id(body.app_id),
         "route_id": route_id,
+        "agent_identity_id": agent_identity_id,
+        "thread_id": thread_id,
+        "channel": channel,
+        "session_id": session_id,
         "messages": messages,
         "stream": false,
         "target": "agent",
@@ -8983,6 +9030,12 @@ fn compute_state_snapshot() -> StateSnapshot {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
+            let agent_identity_id = p
+                .get("agent_identity_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| route_id.clone());
             let display_name = p
                 .get("display_name")
                 .and_then(|v| v.as_str())
@@ -9084,6 +9137,7 @@ fn compute_state_snapshot() -> StateSnapshot {
                 id: slot_id,
                 pod_id,
                 route_id,
+                agent_identity_id,
                 display_label,
                 display_name,
                 agent_type,
@@ -9106,17 +9160,20 @@ fn compute_state_snapshot() -> StateSnapshot {
 
     // Per-pod forwarder presence — populate for each pod we already
     // built so the UI can show a "Stop Forwarder" button when it
-    // applies. Only true when /tmp/tytus/ui-forwarder-NN.pid points at
-    // a live process.
+    // applies. Route ids are preferred because DAM-local pod ids can repeat.
     let mut forwarders: Vec<String> = Vec::new();
     for a in &agents {
-        if crate::existing_ui_forwarder(&a.pod_id).is_some() {
-            forwarders.push(a.pod_id.clone());
+        if crate::existing_ui_forwarder(&a.id).is_some()
+            || (a.id != a.pod_id && crate::existing_ui_forwarder(&a.pod_id).is_some())
+        {
+            forwarders.push(a.id.clone());
         }
     }
     for i in &included {
-        if crate::existing_ui_forwarder(&i.pod_id).is_some() {
-            forwarders.push(i.pod_id.clone());
+        if crate::existing_ui_forwarder(&i.id).is_some()
+            || (i.id != i.pod_id && crate::existing_ui_forwarder(&i.pod_id).is_some())
+        {
+            forwarders.push(i.id.clone());
         }
     }
 
@@ -9316,13 +9373,21 @@ fn parse_pod_selector(query: &str) -> Option<String> {
 }
 
 fn agent_matches_selector(agent: &AgentSlot, selector: &str) -> bool {
-    agent.id == selector || agent.route_id.as_deref() == Some(selector) || agent.pod_id == selector
+    agent.id == selector
+        || agent.route_id.as_deref() == Some(selector)
+        || agent.pod_id == selector
+        || agent.display_label.trim().eq_ignore_ascii_case(selector)
+        || agent
+            .display_name
+            .as_deref()
+            .is_some_and(|name| name.trim().eq_ignore_ascii_case(selector))
 }
 
 fn included_matches_selector(included: &IncludedSlot, selector: &str) -> bool {
     included.id == selector
         || included.route_id.as_deref() == Some(selector)
         || included.pod_id == selector
+        || included.display_label.trim().eq_ignore_ascii_case(selector)
 }
 
 /// Confirm the pod id exists in local state (defense-in-depth — parse_pod_id
@@ -9400,6 +9465,24 @@ fn cli_pod_id_for_selector(selector: &str) -> Option<String> {
                 .iter()
                 .find(|i| included_matches_selector(i, selector))
                 .map(|i| i.pod_id.clone())
+        })
+}
+
+fn cli_route_selector_for_selector(selector: &str) -> Option<String> {
+    let snap = compute_state_snapshot();
+    route_selector_for_selector_in_snapshot(&snap, selector)
+}
+
+fn route_selector_for_selector_in_snapshot(snap: &StateSnapshot, selector: &str) -> Option<String> {
+    snap.agents
+        .iter()
+        .find(|a| agent_matches_selector(a, selector))
+        .map(|a| a.id.clone())
+        .or_else(|| {
+            snap.included
+                .iter()
+                .find(|i| included_matches_selector(i, selector))
+                .map(|i| i.id.clone())
         })
 }
 
@@ -9538,7 +9621,7 @@ fn handle_pod_restart(request: Request, query: &str) {
             return;
         }
     };
-    let Some(pod_id) = cli_pod_id_for_selector(&selector) else {
+    let Some(pod_id) = cli_route_selector_for_selector(&selector) else {
         respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
         return;
     };
@@ -9580,7 +9663,7 @@ fn handle_pod_revoke(request: Request, query: &str) {
             return;
         }
     };
-    let Some(pod_id) = cli_pod_id_for_selector(&selector) else {
+    let Some(pod_id) = cli_route_selector_for_selector(&selector) else {
         respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
         return;
     };
@@ -9822,17 +9905,13 @@ fn handle_pod_run_streamed(mut request: Request, registry: &Registry, pod_id: St
             return;
         }
     };
-    let pod_id = match cli_pod_id_for_selector(&selector) {
+    let pod_id = match cli_route_selector_for_selector(&selector) {
         Some(v) => v,
         None => {
             respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
             return;
         }
     };
-    if !valid_pod_id(&pod_id) {
-        respond_json(request, 400, &serde_json::json!({"error":"invalid pod id"}));
-        return;
-    }
     let mut raw = String::new();
     if request.as_reader().read_to_string(&mut raw).is_err() {
         respond_json(request, 400, &serde_json::json!({"error":"read failed"}));
@@ -13421,7 +13500,7 @@ fn handle_pod_env(request: Request, query: &str) {
             return;
         }
     };
-    let Some(pod_id) = cli_pod_id_for_selector(&selector) else {
+    let Some(pod_id) = cli_route_selector_for_selector(&selector) else {
         respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
         return;
     };
@@ -14349,6 +14428,7 @@ fn merge_pod_status(root: &mut serde_json::Value, server_pods: Vec<atomek_pods::
             .unwrap_or_else(|| serde_json::json!({}));
         pod["pod_id"] = serde_json::json!(sp.pod_id);
         pod["route_id"] = serde_json::json!(sp.route_id);
+        pod["agent_identity_id"] = serde_json::json!(sp.agent_identity_id);
         if let Some(droplet_id) = sp.droplet_id {
             pod["droplet_id"] = serde_json::json!(droplet_id);
         } else if pod.get("droplet_id").is_none() {
@@ -17181,6 +17261,7 @@ mod tests {
                     id: "0e0ah755r3".to_string(),
                     pod_id: "01".to_string(),
                     route_id: Some("0e0ah755r3".to_string()),
+                    agent_identity_id: Some("0e0ah755r3".to_string()),
                     display_label: "Lisa".to_string(),
                     display_name: Some("Lisa".to_string()),
                     agent_type: "nemoclaw".to_string(),
@@ -17196,6 +17277,7 @@ mod tests {
                     id: "eb2qvn3t4s".to_string(),
                     pod_id: "01".to_string(),
                     route_id: Some("eb2qvn3t4s".to_string()),
+                    agent_identity_id: Some("eb2qvn3t4s".to_string()),
                     display_label: "Claus".to_string(),
                     display_name: Some("Claus".to_string()),
                     agent_type: "nemoclaw".to_string(),
@@ -17211,6 +17293,7 @@ mod tests {
                     id: "12gy79s7g0".to_string(),
                     pod_id: "01".to_string(),
                     route_id: Some("12gy79s7g0".to_string()),
+                    agent_identity_id: Some("12gy79s7g0".to_string()),
                     display_label: "Hermie".to_string(),
                     display_name: Some("Hermie".to_string()),
                     agent_type: "hermes".to_string(),
@@ -17285,6 +17368,27 @@ mod tests {
             shared_folder_bind_provision_selectors(&["01;rm -rf /".to_string()], &snap)
                 .unwrap_err(),
             SharedFolderBindSelectorError::Invalid("01;rm -rf /".to_string())
+        );
+    }
+
+    #[test]
+    fn route_selector_preserves_unique_identity_for_duplicate_pod_ids() {
+        let snap = selector_test_snapshot();
+
+        assert_eq!(
+            route_selector_for_selector_in_snapshot(&snap, "Lisa").as_deref(),
+            Some("0e0ah755r3")
+        );
+        assert_eq!(
+            route_selector_for_selector_in_snapshot(&snap, "eb2qvn3t4s").as_deref(),
+            Some("eb2qvn3t4s")
+        );
+        // Numeric duplicate still resolves to first match in this low-level
+        // helper; callers that accept user input must reject ambiguous numeric
+        // selectors before using it. This pins the route-id preservation path.
+        assert_eq!(
+            route_selector_for_selector_in_snapshot(&snap, "02").as_deref(),
+            Some("t3n7s69day")
         );
     }
 

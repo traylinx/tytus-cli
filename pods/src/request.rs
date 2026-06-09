@@ -9,6 +9,8 @@ pub struct PodAllocation {
     #[serde(default)]
     pub route_id: Option<String>,
     pub droplet_id: String,
+    #[serde(default)]
+    pub agent_identity_id: Option<String>,
     pub droplet_ip: Option<String>,
     pub wireguard_port: Option<u16>,
     pub subnet: Option<String>,
