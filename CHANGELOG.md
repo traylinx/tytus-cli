@@ -1,4 +1,4 @@
-## 0.7.40 - 2026-06-09
+## 0.7.41 - 2026-06-09
 
 - Production shared-folder hotfix for paid Tytus users:
   - Bundle garagetytus helper fixes for macOS `/bin/bash` 3.2 (`mapfile` removed from launchd-run helpers).
