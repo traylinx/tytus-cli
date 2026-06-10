@@ -1,3 +1,11 @@
+## 0.7.45 - 2026-06-10
+
+- Embedded TytusOS `v1.0.81-atomek-route-fs` and Atomek `v0.4.37`.
+- Fixes Atomek route-scoped pod-agent chat falsely reporting offline when the shell daemon snapshot is briefly stale.
+- Fixes Lisa/Claus/Hermie identity bleed by forcing route-scoped agents onto clean per-route Atomek session storage instead of old pod-only `01` sessions.
+- Changes the TytusOS FS health probe to use `source=tytus-home`, avoiding macOS Documents-permission 400 spam and false `FS degraded` state.
+- Preserves selected-agent `route_id` through the host chat bridge; local daemon and Provider remain the trust boundary for invalid routes.
+
 ## 0.7.44 - 2026-06-09
 
 - Fixes TytusOS selected-agent chat so Lisa, Claus, and Hermie carry the same stable agent identity across Chat, Atomek, local tray routes, and Provider/Cortex fallback paths.
