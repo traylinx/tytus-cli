@@ -1,3 +1,7 @@
+## 0.7.48 - 2026-06-10
+
+- Fixed Settings → Check for Updates so manual checks always show a native result dialog: up-to-date, update available, or check failed. This removes the silent-success path when macOS notifications are hidden.
+
 ## 0.7.47 - 2026-06-10
 
 - Fixed tray/TytusOS Disconnect when sudo credentials expired. Disconnect now opens a Terminal prompt instead of failing silently with `sudo -n`.
