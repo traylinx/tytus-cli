@@ -1,3 +1,7 @@
+## 0.7.49 - 2026-06-10
+
+- Hardened shared-folder agent chat so Mac-side policy selection is no longer treated as proof of pod access. Tytus now verifies the selected route's pod-side Garage grant before telling Lisa, Claus, or Hermie that a shared folder is available; missing credentials fail closed with a re-provisioning instruction.
+
 ## 0.7.48 - 2026-06-10
 
 - Fixed Settings → Check for Updates so manual checks always show a native result dialog: up-to-date, update available, or check failed. This removes the silent-success path when macOS notifications are hidden.

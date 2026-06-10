@@ -21,7 +21,7 @@
 //!   tears down the listener.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -13028,6 +13028,154 @@ fn all_known_shared_buckets() -> Vec<String> {
     buckets.into_iter().collect()
 }
 
+#[derive(Clone, Debug)]
+struct SharedGrantCacheEntry {
+    grants: HashSet<String>,
+    checked_at: u64,
+    error: Option<String>,
+}
+
+static SHARED_GRANT_CACHE: OnceLock<Mutex<HashMap<String, SharedGrantCacheEntry>>> =
+    OnceLock::new();
+
+fn shared_grant_cache() -> &'static Mutex<HashMap<String, SharedGrantCacheEntry>> {
+    SHARED_GRANT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+static SHARED_GRANT_TEST_OVERRIDES: OnceLock<Mutex<HashMap<String, SharedGrantCacheEntry>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn shared_grant_test_overrides() -> &'static Mutex<HashMap<String, SharedGrantCacheEntry>> {
+    SHARED_GRANT_TEST_OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn shared_grant_cache_key(selector: &str) -> String {
+    selector.trim().to_ascii_lowercase()
+}
+
+fn shared_folder_actual_grants_script() -> String {
+    r#"python3 - <<'PY'
+import json, pathlib, sys
+cred_path = pathlib.Path('/app/workspace/.garagetytus/credentials.json')
+try:
+    creds = json.loads(cred_path.read_text())
+except FileNotFoundError:
+    print('credentials.json missing', file=sys.stderr)
+    sys.exit(31)
+except Exception as exc:
+    print('credentials.json unreadable: %s' % type(exc).__name__, file=sys.stderr)
+    sys.exit(32)
+grants = set()
+for grant in creds.get('buckets') or []:
+    if not isinstance(grant, dict):
+        continue
+    for field in ('name', 'folder_slug', 'folder_id'):
+        value = grant.get(field)
+        if isinstance(value, str) and value:
+            grants.add(value)
+print(json.dumps(sorted(grants)))
+PY"#
+    .to_string()
+}
+
+fn shared_folder_load_actual_grants(selector: &str) -> Result<HashSet<String>, String> {
+    let key = shared_grant_cache_key(selector);
+
+    #[cfg(test)]
+    {
+        if let Some(entry) = shared_grant_test_overrides()
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&key).cloned())
+        {
+            if let Some(error) = entry.error {
+                return Err(error);
+            }
+            return Ok(entry.grants);
+        }
+    }
+
+    let now = now_secs();
+    if let Some(entry) = shared_grant_cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&key).cloned())
+    {
+        if now.saturating_sub(entry.checked_at) <= 60 {
+            if let Some(error) = entry.error {
+                return Err(error);
+            }
+            return Ok(entry.grants);
+        }
+    }
+
+    let script = shared_folder_actual_grants_script();
+    let result = run_tytus_exec_shell(selector, &script, Duration::from_secs(5));
+    let loaded: Result<HashSet<String>, String> = match result {
+        Ok((true, stdout, _, false)) => {
+            let values = serde_json::from_str::<Vec<String>>(stdout.trim())
+                .map_err(|e| format!("grant verification returned malformed bucket list: {}", e));
+            values.map(|items| {
+                items
+                    .into_iter()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .collect::<HashSet<_>>()
+            })
+        }
+        Ok((_ok, _stdout, _stderr, true)) => Err("grant verification timed out".to_string()),
+        Ok((false, stdout, stderr, false)) => {
+            let msg = stderr
+                .lines()
+                .last()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| stdout.lines().last())
+                .unwrap_or("grant verification failed")
+                .trim()
+                .to_string();
+            Err(msg)
+        }
+        Err(e) => Err(e),
+    };
+
+    if let Ok(mut map) = shared_grant_cache().lock() {
+        match &loaded {
+            Ok(grants) => {
+                map.insert(
+                    key,
+                    SharedGrantCacheEntry {
+                        grants: grants.clone(),
+                        checked_at: now,
+                        error: None,
+                    },
+                );
+            }
+            Err(error) => {
+                map.insert(
+                    key,
+                    SharedGrantCacheEntry {
+                        grants: HashSet::new(),
+                        checked_at: now,
+                        error: Some(error.clone()),
+                    },
+                );
+            }
+        }
+    }
+
+    loaded
+}
+
+fn shared_folder_verify_actual_grant(selector: &str, bucket: &str) -> (bool, Option<String>) {
+    match shared_folder_load_actual_grants(selector) {
+        Ok(grants) if grants.contains(bucket) => (true, None),
+        Ok(_) => (false, Some(format!("bucket not granted: {}", bucket))),
+        Err(e) => (false, Some(e)),
+    }
+}
+
 fn shared_binding_provisioned_for_runtime(binding: &serde_json::Value, canonical: &str) -> bool {
     binding
         .get("pods_provisioned")
@@ -13181,12 +13329,23 @@ fn shared_folders_agent_chat_context(
             selected_labels.join(", ")
         };
         if shared_binding_enabled_for_agent(&binding, &canonical, route_id, display_label) {
-            lines.push(format!(
-                "- {bucket}: AVAILABLE to this agent. Mac `{local_path}` is mounted at `/app/workspace/Shared/{slug}/` (also `/app/workspace/shared/{slug}/`). Selected agents on this runtime: {selected_text}."
-            ));
-            let samples = shared_folder_sample_files(local_path, slug, 8);
-            if !samples.is_empty() {
-                lines.push(format!("  sample files: {}", samples.join(", ")));
+            let verify_selector = route_id.unwrap_or(pod_id);
+            let (grant_ok, grant_error) =
+                shared_folder_verify_actual_grant(verify_selector, bucket);
+            if grant_ok {
+                lines.push(format!(
+                    "- {bucket}: AVAILABLE to this agent and pod-side grant VERIFIED. Mac `{local_path}` is mounted at `/app/workspace/Shared/{slug}/` (also `/app/workspace/shared/{slug}/`). Selected agents on this runtime: {selected_text}."
+                ));
+                let samples = shared_folder_sample_files(local_path, slug, 8);
+                if !samples.is_empty() {
+                    lines.push(format!("  sample files: {}", samples.join(", ")));
+                }
+            } else {
+                let err = grant_error.as_deref().unwrap_or("pod-side grant missing");
+                let agent = display_label.unwrap_or("this agent");
+                lines.push(format!(
+                    "- {bucket}: NOT available to {agent}. The Mac-side policy selects this agent, but pod-side Garage credentials are not verified for `{bucket}` ({err}). Re-provision this shared folder for route `{verify_selector}` before using `/app/workspace/Shared/{slug}/`."
+                ));
             }
         } else {
             let agent = display_label.unwrap_or("this agent");
@@ -13262,6 +13421,16 @@ fn shared_folders_direct_chat_answer(
             ));
             continue;
         }
+        let verify_selector = route_id.unwrap_or(pod_id);
+        let (grant_ok, grant_error) = shared_folder_verify_actual_grant(verify_selector, bucket);
+        if !grant_ok {
+            let agent = display_label.unwrap_or("this agent");
+            let err = grant_error.as_deref().unwrap_or("pod-side grant missing");
+            sections.push(format!(
+                "No. `{bucket}` is selected for {agent} in the Mac-side sharing policy, but this pod route does not currently have a verified Garage grant for `{bucket}`.\n\nVerification error: {err}\n\nRe-provision the shared folder for route `{verify_selector}` before asking this agent to use `/app/workspace/Shared/{slug}/`."
+            ));
+            continue;
+        }
         let samples = shared_folder_sample_files(local_path, slug, 5);
         let sample_text = if samples.is_empty() {
             "No sample files found in the local binding index.".to_string()
@@ -13274,7 +13443,7 @@ fn shared_folders_direct_chat_answer(
                 .join("\n")
         };
         sections.push(format!(
-            "Yes. `{bucket}` is shared with this runtime pod.\n\nExact path: `/app/workspace/Shared/{slug}/`\nAlias: `/app/workspace/shared/{slug}/`\nMac source: `{local_path}`\n\nSample files:\n{sample_text}"
+            "Yes. `{bucket}` is shared with this runtime pod and pod-side grant is verified.\n\nExact path: `/app/workspace/Shared/{slug}/`\nAlias: `/app/workspace/shared/{slug}/`\nMac source: `{local_path}`\n\nSample files:\n{sample_text}"
         ));
     }
     if sections.is_empty() {
@@ -17410,6 +17579,19 @@ mod tests {
         assert!(hermie.contains("Hermie is not selected"));
         assert!(hermie.contains("Claus, Lisa"));
 
+        {
+            let mut overrides = shared_grant_test_overrides().lock().unwrap();
+            overrides.clear();
+            overrides.insert(
+                shared_grant_cache_key("claus-route"),
+                SharedGrantCacheEntry {
+                    grants: HashSet::from(["marketing".to_string()]),
+                    checked_at: now_secs(),
+                    error: None,
+                },
+            );
+        }
+
         let claus = shared_folders_direct_chat_answer(
             "Can you access the marketing shared folder?",
             "01",
@@ -17420,6 +17602,67 @@ mod tests {
         assert!(claus.starts_with("Yes."));
         assert!(claus.contains("/app/workspace/Shared/marketing/"));
         assert!(claus.contains("HANDOFF.md"));
+    }
+
+    #[test]
+    fn shared_folder_direct_answer_fails_closed_when_selected_but_grant_missing() {
+        let home = HomeOverrideGuard::new();
+        let shared = home.root.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let cache_dir = home.root.join(".cache/garagetytus/bisync");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let binding = serde_json::json!({
+            "schema_version": 2,
+            "bucket": "shared",
+            "slug": "shared",
+            "local_path": shared.to_string_lossy(),
+            "pods_provisioned": ["wannolot-01"],
+            "targets": [{
+                "runtime_id": "01",
+                "kind": "agent",
+                "target_id": "agent:01:lisa-route:lisa",
+                "labels": ["Lisa"],
+                "enabled": true
+            }]
+        });
+        std::fs::write(
+            cache_dir.join("shared.bindings.json"),
+            serde_json::to_string(&binding).unwrap(),
+        )
+        .unwrap();
+        {
+            let mut overrides = shared_grant_test_overrides().lock().unwrap();
+            overrides.clear();
+            overrides.insert(
+                shared_grant_cache_key("lisa-route"),
+                SharedGrantCacheEntry {
+                    grants: HashSet::new(),
+                    checked_at: now_secs(),
+                    error: None,
+                },
+            );
+        }
+
+        let lisa = shared_folders_direct_chat_answer(
+            "Do I have the shared folder?",
+            "01",
+            Some("lisa-route"),
+            Some("Lisa"),
+        )
+        .unwrap();
+
+        assert!(lisa.starts_with("No."));
+        assert!(lisa.contains("does not currently have a verified Garage grant"));
+        assert!(lisa.contains("bucket not granted: shared"));
+    }
+
+    #[test]
+    fn shared_folder_actual_grants_script_lists_only_grant_names() {
+        let script = shared_folder_actual_grants_script();
+        assert!(script.contains("for field in ('name', 'folder_slug', 'folder_id')"));
+        assert!(!script.contains("access_key"));
+        assert!(!script.contains("secret_key"));
+        assert!(!script.contains("session_token"));
     }
 
     #[test]
