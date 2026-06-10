@@ -36,7 +36,7 @@ fn write_launch_script(command: &str) -> io::Result<PathBuf> {
 
 fn random_nonce_hex() -> io::Result<String> {
     let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    getrandom::fill(&mut bytes).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(hex::encode(bytes))
 }
 

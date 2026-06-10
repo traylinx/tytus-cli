@@ -780,6 +780,7 @@
     for (const a of agents) {
       const card = document.createElement('section');
       card.className = 'channels-tab-card';
+      const selector = a.id || a.route_id || a.pod_id;
       const name = (DISPLAY[a.agent_type] && DISPLAY[a.agent_type].display_name) || a.agent_type || 'AI assistant';
       const header = document.createElement('header');
       header.className = 'channels-tab-card-head';
@@ -795,7 +796,7 @@
       // renderPodChannels does its own loading state, fetch, and
       // re-render (12-20s polling on add/remove). It's idempotent —
       // safe to re-call whenever budgetState changes.
-      renderPodChannels(inner, a.pod_id);
+      renderPodChannels(inner, selector);
     }
   }
 

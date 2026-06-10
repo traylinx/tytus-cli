@@ -41,19 +41,18 @@ pub fn write_control_file(path: &Path, control: &ControlFile) -> io::Result<()> 
     if let Some(parent) = path.parent() {
         paths::ensure_private_dir(parent)?;
     }
-    let body =
-        serde_json::to_vec_pretty(control).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let body = serde_json::to_vec_pretty(control).map_err(io::Error::other)?;
     fs::write(path, body)
 }
 
 pub fn read_control_file(path: &Path) -> io::Result<ControlFile> {
     let body = fs::read(path)?;
-    serde_json::from_slice(&body).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    serde_json::from_slice(&body).map_err(io::Error::other)
 }
 
 pub fn generate_control_token() -> io::Result<String> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    getrandom::fill(&mut bytes).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 

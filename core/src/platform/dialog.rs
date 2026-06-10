@@ -38,11 +38,11 @@ fn show_dialog(title: &str, message: &str, icon: &str) -> io::Result<DialogAnswe
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?;
-        return Ok(if status.success() {
+        Ok(if status.success() {
             DialogAnswer::Accepted
         } else {
             DialogAnswer::Cancelled
-        });
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -65,11 +65,11 @@ pub fn ask_permission(title: &str, message: &str) -> io::Result<DialogAnswer> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?;
-        return Ok(if status.success() {
+        Ok(if status.success() {
             DialogAnswer::Accepted
         } else {
             DialogAnswer::Cancelled
-        });
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -92,11 +92,11 @@ pub fn notify(title: &str, message: &str) -> io::Result<DialogAnswer> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?;
-        return Ok(if status.success() {
+        Ok(if status.success() {
             DialogAnswer::Accepted
         } else {
             DialogAnswer::Cancelled
-        });
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -141,7 +141,7 @@ button returned of r",
             return Ok(None);
         }
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok(if value.is_empty() { None } else { Some(value) });
+        Ok(if value.is_empty() { None } else { Some(value) })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -178,7 +178,7 @@ text returned of r",
             return Ok(None);
         }
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok(if value.is_empty() { None } else { Some(value) });
+        Ok(if value.is_empty() { None } else { Some(value) })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -210,7 +210,7 @@ pub fn pick_path(kind: PickKind, prompt: &str) -> io::Result<Option<String>> {
             return Ok(None);
         }
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok(if value.is_empty() { None } else { Some(value) });
+        Ok(if value.is_empty() { None } else { Some(value) })
     }
     #[cfg(not(target_os = "macos"))]
     {

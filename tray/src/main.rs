@@ -136,9 +136,9 @@ static LAST_KEYCHAIN_HEALTHY: std::sync::OnceLock<Arc<std::sync::Mutex<Option<bo
 /// `latest_version` appears while still in the available state (i.e.,
 /// user dismissed v0.7.8 and v0.7.9 lands — they should get a fresh
 /// banner pointing at v0.7.9).
-static LAST_UPDATE_AVAILABLE: std::sync::OnceLock<
-    Arc<std::sync::Mutex<Option<(bool, Option<String>)>>>,
-> = std::sync::OnceLock::new();
+type UpdateAvailabilityState = Arc<std::sync::Mutex<Option<(bool, Option<String>)>>>;
+static LAST_UPDATE_AVAILABLE: std::sync::OnceLock<UpdateAvailabilityState> =
+    std::sync::OnceLock::new();
 
 fn observe_keychain_health(current: bool) {
     let cell = LAST_KEYCHAIN_HEALTHY.get_or_init(|| Arc::new(std::sync::Mutex::new(None)));
@@ -2043,29 +2043,28 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             );
         }
         "disconnect" => {
-            // Disconnect is fast (<1s) and doesn't need sudo — it
-            // reads the tunnel pidfile and sends SIGTERM. Run
-            // detached, surface the result via notification.
+            // Stopping the WireGuard helper may need sudo once the cached
+            // credential expires. Running this detached made the menu look
+            // clickable while `sudo -n` failed invisibly. Use Terminal, same
+            // as Connect, so macOS can ask for Touch ID/password when needed.
             busy_set("Disconnecting tunnel…");
             std::thread::spawn(|| {
-                let _ = std::process::Command::new("tytus")
-                    .arg("disconnect")
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
                 // Probe for up to 10s for the tunnel to actually drop.
                 use gateway_probe::probe_gateway;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 while std::time::Instant::now() < deadline {
                     if !probe_gateway() {
-                        break;
+                        notify("Tytus", "Disconnected.");
+                        busy_clear();
+                        return;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
-                notify("Tytus", "Disconnected.");
                 busy_clear();
             });
+            open_in_terminal_simple(
+                "TYTUS_SUDO_INTERACTIVE=1 tytus disconnect && exit; echo; echo 'Disconnect failed — see above.'; echo 'Press Enter to close…'; read _"
+            );
         }
         "login" | "login_keychain" => {
             // `tytus login` opens a browser — must run in terminal so the user
@@ -2095,7 +2094,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             spawn_detached("tytus", &["daemon", "stop"]);
         }
         "daemon_restart" => {
-            let _ = std::process::Command::new("tytus")
+            let _ = std::process::Command::new(resolve_tytus_bin())
                 .args(["daemon", "stop"])
                 .status();
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -2450,7 +2449,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         // the user's default browser (SPRINT §6 E). The per-agent
         // terminal shortcuts below are legacy + fallback when the
         // localhost server isn't bound (rare).
-        "install_agent" | "open_os" => {
+        "install_agent" | "open_os" | "open_tytusos" => {
             web_server::open_os();
         }
         // Phase C tray simplification — top-level Chat/Files/Channels
@@ -2741,12 +2740,55 @@ fn spawn_detached_ui(pod_id: &str) {
         Ok(f) => Stdio::from(f),
         Err(_) => Stdio::null(),
     };
-    let _ = std::process::Command::new("tytus")
+    let _ = std::process::Command::new(resolve_tytus_bin())
         .args(["ui", "--pod", pod_id, "--no-open"])
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
         .spawn();
+}
+
+pub(crate) fn resolve_tytus_bin() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("TYTUS_BIN") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.is_file() {
+            return pb;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("tytus");
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates = [
+        std::path::PathBuf::from("/usr/local/bin/tytus"),
+        std::path::PathBuf::from("/opt/homebrew/bin/tytus"),
+        std::path::PathBuf::from(&home).join("bin/tytus"),
+        std::path::PathBuf::from(&home).join(".cargo/bin/tytus"),
+    ];
+    for c in candidates {
+        if c.is_file() {
+            return c;
+        }
+    }
+    std::path::PathBuf::from("tytus")
+}
+
+fn tytus_terminal_env_prefix() -> String {
+    let bin = resolve_tytus_bin();
+    let bin_dir = bin
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "/usr/local/bin".to_string());
+    format!(
+        "export TYTUS_BIN={}; export PATH={}:\"/usr/local/bin:/opt/homebrew/bin:$HOME/bin:$HOME/.cargo/bin:$PATH\"; ",
+        shell_escape(&bin.display().to_string()),
+        shell_escape(&bin_dir),
+    )
 }
 
 fn shell_escape(s: &str) -> String {
@@ -2763,7 +2805,12 @@ fn shell_escape(s: &str) -> String {
 }
 
 fn spawn_detached(program: &str, args: &[&str]) {
-    let _ = std::process::Command::new(program)
+    let mut cmd = if program == "tytus" {
+        std::process::Command::new(resolve_tytus_bin())
+    } else {
+        std::process::Command::new(program)
+    };
+    let _ = cmd
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -3200,7 +3247,7 @@ fn tytus_update_terminal_command() -> String {
 fn parse_tytus_version_parts(v: &str) -> Vec<u64> {
     v.trim()
         .trim_start_matches('v')
-        .split(|c: char| c == '.' || c == '-' || c == '+')
+        .split(['.', '-', '+'])
         .take_while(|part| part.chars().all(|c| c.is_ascii_digit()))
         .filter_map(|part| part.parse::<u64>().ok())
         .collect()
@@ -3432,7 +3479,8 @@ fn fetch_latest_tytus_version() -> Result<(String, Option<String>), String> {
 
 /// Open a shell command in a new terminal window.
 pub(crate) fn open_in_terminal_simple(cmd: &str) {
-    let _ = atomek_core::platform::terminal::open_shell_command(cmd);
+    let wrapped = format!("{}{}", tytus_terminal_env_prefix(), cmd);
+    let _ = atomek_core::platform::terminal::open_shell_command(&wrapped);
 }
 
 /// Get the current pod connection info from the daemon.

@@ -5,9 +5,10 @@
 //!
 //! The catalog is embedded at compile time so the command works without a
 //! running daemon. Launch dispatch mirrors the daemon's `/api/apps/open`:
-//!   - `kind:"app"`      → launch the GUI app by name (macOS `open -a`,
-//!                          Linux/Windows spawn the binary).
-//!   - `kind:"terminal"` → open a new terminal running the CLI.
+//! - `kind:"app"`      → launch the GUI app by name (macOS `open -a`,
+//!   Linux/Windows spawn the binary).
+//! - `kind:"terminal"` → open a new terminal running the CLI.
+//!
 //! Only embedded catalog data reaches the launcher — never arbitrary input.
 
 /// Single source of truth: the same file the tray daemon embeds + serves.

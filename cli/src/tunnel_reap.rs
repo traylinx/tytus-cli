@@ -414,6 +414,30 @@ fn cleanup_files(pod_num: &str) {
 /// even if the PID is recycled between our `is_alive` check and its `kill()`,
 /// the helper will refuse to signal and we surface `ReapFailed`.
 #[cfg(unix)]
+fn sudo_tunnel_down_args(self_exe: &str, pid: i32, allow_prompt: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if allow_prompt {
+        args.push("-p".to_string());
+        args.push("Tytus needs admin permission to stop the tunnel: ".to_string());
+    } else {
+        args.push("-n".to_string());
+    }
+    args.push(self_exe.to_string());
+    args.push("tunnel-down".to_string());
+    args.push(pid.to_string());
+    args
+}
+
+#[cfg(unix)]
+fn sudo_prompt_allowed() -> bool {
+    use std::io::IsTerminal;
+    std::env::var("TYTUS_SUDO_INTERACTIVE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+        || std::io::stdin().is_terminal()
+}
+
+#[cfg(unix)]
 fn invoke_tunnel_down(pid: i32) -> Result<(), String> {
     if pid <= 1 {
         return Err(format!("refusing to signal PID {}", pid));
@@ -421,9 +445,22 @@ fn invoke_tunnel_down(pid: i32) -> Result<(), String> {
     let self_exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "tytus".into());
+    let allow_prompt = sudo_prompt_allowed();
+    let args = sudo_tunnel_down_args(&self_exe, pid, allow_prompt);
+
+    if allow_prompt {
+        let status = std::process::Command::new("sudo")
+            .args(&args)
+            .status()
+            .map_err(|e| format!("failed to spawn sudo: {}", e))?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err(format!("tunnel-down exited with {}", status));
+    }
 
     let output = std::process::Command::new("sudo")
-        .args(["-n", &self_exe, "tunnel-down", &pid.to_string()])
+        .args(&args)
         .output()
         .map_err(|e| format!("failed to spawn sudo: {}", e))?;
 
@@ -731,6 +768,33 @@ mod tests {
         // Cleanup for other tests.
         let _ = std::fs::remove_file(pidfile_path(&pod_a));
         let _ = std::fs::remove_file(pidfile_path(&pod_b));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sudo_tunnel_down_args_noninteractive_uses_n_flag() {
+        let args = sudo_tunnel_down_args("/bin/tytus", 1234, false);
+        assert_eq!(
+            args,
+            vec![
+                "-n".to_string(),
+                "/bin/tytus".to_string(),
+                "tunnel-down".to_string(),
+                "1234".to_string(),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sudo_tunnel_down_args_interactive_allows_prompt() {
+        let args = sudo_tunnel_down_args("/bin/tytus", 1234, true);
+        assert!(!args.iter().any(|arg| arg == "-n"));
+        assert_eq!(args[0], "-p");
+        assert!(args[1].contains("Tytus needs admin permission"));
+        assert_eq!(args[2], "/bin/tytus");
+        assert_eq!(args[3], "tunnel-down");
+        assert_eq!(args[4], "1234");
     }
 
     #[test]

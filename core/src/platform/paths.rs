@@ -74,7 +74,7 @@ pub fn runtime_dir() -> PathBuf {
         // Migration compatibility: existing macOS/Linux daemons, pid files,
         // and tray port files live here. Keep as runtime fallback until the
         // localhost-control-plane migration is complete.
-        return legacy_runtime_dir();
+        legacy_runtime_dir()
     }
     #[cfg(windows)]
     {

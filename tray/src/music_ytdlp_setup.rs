@@ -158,7 +158,7 @@ fn probe_version(path: &PathBuf) -> Option<String> {
 
 fn ytdlp_binary_path() -> PathBuf {
     let base = dirs::data_dir()
-        .unwrap_or_else(|| std::env::temp_dir())
+        .unwrap_or_else(std::env::temp_dir)
         .join("tytus")
         .join("ytdlp");
     let file = if cfg!(target_os = "windows") {

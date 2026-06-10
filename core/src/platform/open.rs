@@ -21,14 +21,14 @@ pub fn open_path(path: &Path) -> io::Result<()> {
 pub fn open_app(name: &str) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return Command::new("open")
+        Command::new("open")
             .arg("-a")
             .arg(name)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map(|_| ());
+            .map(|_| ())
     }
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
@@ -54,14 +54,14 @@ pub fn open_app(name: &str) -> io::Result<()> {
 pub fn reveal_path(path: &Path) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return Command::new("open")
+        Command::new("open")
             .arg("-R")
             .arg(path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map(|_| ());
+            .map(|_| ())
     }
     #[cfg(target_os = "windows")]
     {

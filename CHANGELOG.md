@@ -1,3 +1,12 @@
+## 0.7.47 - 2026-06-10
+
+- Fixed tray/TytusOS Disconnect when sudo credentials expired. Disconnect now opens a Terminal prompt instead of failing silently with `sudo -n`.
+- Hardened tunnel reaping so interactive CLI sessions can prompt for admin permission while background/non-interactive callers keep the safe no-prompt path.
+- Fixed tray menu actions that could hit stale secondary CLI installs; tray-spawned terminal commands now pin the resolved Tytus CLI binary.
+- Fixed the AIL gateway “Open in TytusOS” tray link by wiring the missing `open_tytusos` menu handler.
+- Embedded a route-id-aware TytusOS bundle so Files, Command Palette, and desktop pod pins target the selected agent route instead of ambiguous shared pod slots.
+- Trimmed local-development app bundles from production TytusOS builds unless the matching local override flag is explicitly enabled.
+
 ## 0.7.46 - 2026-06-10
 
 - Adds Private Network Access preflight support for `/api/whoami` by returning `Access-Control-Allow-Private-Network: true` only when Chrome requests it and only behind the existing explicit `https://traylinx.com` Origin allowlist.

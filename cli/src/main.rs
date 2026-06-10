@@ -35,7 +35,6 @@ use state::{CliState, PodEntry};
 /// doesn't natively group subcommand variants under headings, so we
 /// prepend a curated TLDR via `before_help`. Power users still get
 /// clap's full alphabetical Commands: list below it.
-
 fn process_alive_cross(pid: i32) -> bool {
     u32::try_from(pid).ok().is_some_and(process::process_exists)
 }
@@ -4218,8 +4217,8 @@ async fn cmd_app_catalog(url_override: Option<&str>, json: bool) {
         return;
     }
     println!(
-        "{:<20} {:<24} {:<14} {}",
-        "ID", "NAME", "CATEGORY", "MANIFEST URL"
+        "{:<20} {:<24} {:<14} MANIFEST URL",
+        "ID", "NAME", "CATEGORY"
     );
     println!("{}", "─".repeat(80));
     for a in &apps {
@@ -7042,7 +7041,7 @@ fn cmd_tray(action: TrayAction, json: bool) {
             let running = std::fs::read_to_string(tray_pid_path)
                 .ok()
                 .and_then(|s| s.trim().parse::<i32>().ok())
-                .map(|pid| process_alive_cross(pid))
+                .map(process_alive_cross)
                 .unwrap_or(false);
             if json {
                 println!(

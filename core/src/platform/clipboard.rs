@@ -12,7 +12,7 @@ pub fn read_text() -> io::Result<String> {
             return String::from_utf8(output.stdout)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
         }
-        return Err(io::Error::other("pbpaste failed"));
+        Err(io::Error::other("pbpaste failed"))
     }
     #[cfg(target_os = "linux")]
     {
@@ -63,7 +63,7 @@ pub fn read_text() -> io::Result<String> {
 pub fn write_text(text: &str) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return write_to_command("pbcopy", &[], text);
+        write_to_command("pbcopy", &[], text)
     }
     #[cfg(target_os = "linux")]
     {

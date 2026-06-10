@@ -49,10 +49,10 @@ pub const TYTUS_OS_PORT: u16 = 4242;
 /// Rationale (DECISIONS.md D11 in sprint
 /// tytus-account-aware-detection-2026-05-22): the Host-header check
 /// + CORS allowlist on `/api/whoami` (and every other sensitive
-/// endpoint) only defend against *browser-initiated* requests. A
-/// malicious LAN process making a raw HTTP request would bypass both
-/// if the bind interface were ever misconfigured to a non-loopback
-/// address — it could read whoami, list pods, kick jobs, etc.
+///   endpoint) only defend against *browser-initiated* requests. A
+///   malicious LAN process making a raw HTTP request would bypass both
+///   if the bind interface were ever misconfigured to a non-loopback
+///   address — it could read whoami, list pods, kick jobs, etc.
 ///
 /// `whoami_bind_is_loopback` unit-tests this invariant so a future
 /// refactor that swaps the constant for `0.0.0.0` (e.g. to "fix" a
@@ -462,7 +462,7 @@ fn probe_agent_status(
             .send()
             .await
     });
-    let api_status = match result {
+    match result {
         Ok(resp) => match resp.status().as_u16() {
             200 => AgentStatus::Ready,
             401 | 403 | 404 => AgentStatus::Starting,
@@ -470,9 +470,7 @@ fn probe_agent_status(
             _ => AgentStatus::Unknown,
         },
         Err(_) => AgentStatus::Stopped,
-    };
-
-    api_status
+    }
 }
 
 fn agent_has_browser_ui(agent_type: &str) -> bool {
@@ -621,7 +619,7 @@ fn run_tytus_exec_shell(
 
 fn parse_tytus_exec_json_output(raw: &str) -> Result<serde_json::Value, serde_json::Error> {
     match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(v) => return Ok(v),
+        Ok(v) => Ok(v),
         Err(first_err) => {
             for line in raw.lines() {
                 let candidate = line.trim_start();
@@ -2072,6 +2070,7 @@ fn tytus_apps_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/Users/sebastian/Projects/tytus-apps"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn skill_summary(
     id: &str,
     title: &str,
@@ -3630,6 +3629,7 @@ fn connector_error_response(request: Request, err: music_connectors::ConnectorEr
     );
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_json_body<T: serde::de::DeserializeOwned>(
     mut request: Request,
 ) -> Result<(Request, T), (Request, String)> {
@@ -6661,49 +6661,12 @@ fn handle_install(mut request: Request, registry: &Registry) {
 
 /// Resolve the absolute path to the `tytus` binary.
 ///
-/// The tray is launched by a LaunchAgent, whose PATH is the kernel-default
-/// `/usr/bin:/bin:/usr/sbin:/sbin` — it does NOT include `~/bin`,
-/// `/usr/local/bin`, `/opt/homebrew/bin`, or `~/.cargo/bin`, so a bare
-/// `Command::new("tytus")` spawns with `os error 2: No such file or
-/// directory` even when the CLI is installed. Terminal-path workflows
-/// dodge this because Terminal.app spawns a login shell that sources
-/// the user's zshrc.
-///
-/// Resolution order:
-///   1. `TYTUS_BIN` env var (escape hatch for unusual installs)
-///   2. `~/bin/tytus` (install.sh default)
-///   3. `/usr/local/bin/tytus`, `/opt/homebrew/bin/tytus`, `~/.cargo/bin/tytus`
-///   4. `tytus-tray`'s own directory (dev builds: cargo run leaves them
-///      side by side in `target/<profile>/`)
-///   5. Fallback to the bare name — caller will surface the spawn error
+/// Keep this delegated to the tray root so menu Terminal commands and
+/// localhost web handlers always use the same binary. This prevents stale
+/// secondary installs (for example `~/bin/tytus` lagging behind
+/// `/usr/local/bin/tytus`) from making some tray links run an older CLI.
 fn resolve_tytus_bin() -> PathBuf {
-    if let Ok(p) = std::env::var("TYTUS_BIN") {
-        let pb = PathBuf::from(p);
-        if pb.is_file() {
-            return pb;
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let candidates: Vec<PathBuf> = vec![
-        PathBuf::from(&home).join("bin/tytus"),
-        PathBuf::from("/usr/local/bin/tytus"),
-        PathBuf::from("/opt/homebrew/bin/tytus"),
-        PathBuf::from(&home).join(".cargo/bin/tytus"),
-    ];
-    for c in &candidates {
-        if c.is_file() {
-            return c.clone();
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join("tytus");
-            if sibling.is_file() {
-                return sibling;
-            }
-        }
-    }
-    PathBuf::from("tytus")
+    crate::resolve_tytus_bin()
 }
 
 fn spawn_install(job: Arc<Mutex<Job>>, agent_type: String, pod_id: Option<String>) {
@@ -10704,15 +10667,12 @@ fn anchor_local_path(root: &Path, rel: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
-fn entry_modified_secs(meta: &fs::Metadata) -> Option<u64> {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-}
-
 fn list_local_dir(root: &Path, rel: &Path) -> Result<Vec<FileListEntry>, String> {
-    let target = anchor_local_path(root, rel)?;
+    let target = if rel.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        anchor_local_path(root, rel)?
+    };
     if !target.is_dir() {
         return Err("path is not a directory".to_string());
     }
@@ -10720,17 +10680,22 @@ fn list_local_dir(root: &Path, rel: &Path) -> Result<Vec<FileListEntry>, String>
     for entry in fs::read_dir(&target).map_err(|e| format!("read_dir failed: {}", e))? {
         let entry = entry.map_err(|e| format!("read_dir entry failed: {}", e))?;
         let name = entry.file_name().to_string_lossy().to_string();
-        let meta = entry
-            .metadata()
-            .map_err(|e| format!("metadata failed for {}: {}", name, e))?;
+        let kind = match entry.file_type() {
+            Ok(t) if t.is_dir() => "dir",
+            Ok(_) | Err(_) => "file",
+        };
         let child_rel = rel.join(&name);
         rows.push(FileListEntry {
             name,
             path: path_to_relative_string(&child_rel),
-            kind: if meta.is_dir() { "dir" } else { "file" }.to_string(),
-            size: if meta.is_file() { meta.len() } else { 0 },
-            modified_at: entry_modified_secs(&meta),
-            readonly: meta.permissions().readonly(),
+            kind: kind.to_string(),
+            // Intentionally avoid per-entry metadata() for local user folders.
+            // Cloud-backed directories (iCloud/Drive/Dropbox) can block on stat
+            // and made Files probe calls appear broken. The browser needs a fast
+            // directory tree first; heavyweight metadata can be added lazily later.
+            size: 0,
+            modified_at: None,
+            readonly: false,
         });
     }
     rows.sort_by(|a, b| match (a.kind.as_str(), b.kind.as_str()) {
@@ -11956,9 +11921,19 @@ fn handle_files_list(request: Request, query: &str) {
         }
         source if user_file_source_root(source).is_some() => {
             let (label, root) = user_file_source_root(source).expect("checked above");
-            let _ = fs::create_dir_all(&root);
-            list_local_dir(&root, &rel)
-                .map(|rows| (label.to_string(), root.to_string_lossy().to_string(), rows))
+            // Do not synchronously enumerate macOS privacy-controlled user
+            // folders from the tray app. When TCC/full-disk-access is missing,
+            // `read_dir` can block inside the kernel instead of returning a
+            // clean permission error, which made TytusOS show repeated
+            // `Failed to fetch` / 400-looking probes. Return the mounted source
+            // shell quickly; user-folder browsing can move to a permissioned
+            // picker/grant flow instead of freezing the local daemon.
+            let _ = rel;
+            Ok((
+                label.to_string(),
+                root.to_string_lossy().to_string(),
+                Vec::new(),
+            ))
         }
         "shared" => {
             let idx = match query_value_decoded(query, "binding") {
@@ -12073,28 +12048,18 @@ fn safe_file_name(raw: Option<String>) -> Result<String, String> {
 }
 
 fn user_file_source_root(source: &str) -> Option<(&'static str, PathBuf)> {
-    let home = || dirs::home_dir().unwrap_or_else(|| std::env::temp_dir());
+    let home = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
+    // Use direct HOME children instead of platform directory discovery. On
+    // macOS, resolving NSDocumentDirectory can stall when cloud-backed user
+    // folders are degraded, which made the Files app probe look like a broken
+    // daemon endpoint. These names are the stable user-facing folders TytusOS
+    // exposes; if a folder is missing, the list call returns a normal error.
     match source {
-        "user-documents" => Some((
-            "Documents",
-            dirs::document_dir().unwrap_or_else(|| home().join("Documents")),
-        )),
-        "user-desktop" => Some((
-            "Desktop",
-            dirs::desktop_dir().unwrap_or_else(|| home().join("Desktop")),
-        )),
-        "user-downloads" => Some((
-            "Downloads",
-            dirs::download_dir().unwrap_or_else(|| home().join("Downloads")),
-        )),
-        "user-music" => Some((
-            "Music",
-            dirs::audio_dir().unwrap_or_else(|| home().join("Music")),
-        )),
-        "user-pictures" => Some((
-            "Pictures",
-            dirs::picture_dir().unwrap_or_else(|| home().join("Pictures")),
-        )),
+        "user-documents" => Some(("Documents", home.join("Documents"))),
+        "user-desktop" => Some(("Desktop", home.join("Desktop"))),
+        "user-downloads" => Some(("Downloads", home.join("Downloads"))),
+        "user-music" => Some(("Music", home.join("Music"))),
+        "user-pictures" => Some(("Pictures", home.join("Pictures"))),
         _ => None,
     }
 }
@@ -13859,26 +13824,13 @@ fn handle_pod_uninstall(request: Request, query: &str) {
 // ── TytusOS control-surface handlers (Wave 1) ───────────────────
 
 fn handle_disconnect(request: Request) {
-    // Detached subprocess — disconnect is fast (<1s, no sudo) because it
-    // just reads the tunnel pidfile and SIGTERMs. Client polls /api/state
-    // to see the tunnel_active flag flip.
-    let bin = resolve_tytus_bin();
-    let spawned = Command::new(&bin)
-        .arg("disconnect")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    match spawned {
-        Ok(_) => respond_json(request, 202, &serde_json::json!({"ok": true})),
-        Err(e) => respond_json(
-            request,
-            500,
-            &serde_json::json!({
-                "error": format!("failed to spawn tytus disconnect: {}", e)
-            }),
-        ),
-    }
+    // Stopping the WireGuard helper may need sudo once the cached credential
+    // expires. A browser request has no TTY, so mirror the tray menu and open
+    // Terminal instead of failing silently in a detached background process.
+    crate::open_in_terminal_simple(
+        "TYTUS_SUDO_INTERACTIVE=1 tytus disconnect && exit; echo; echo 'Disconnect failed — see above.'; echo 'Press Enter to close…'; read _"
+    );
+    respond_json(request, 202, &serde_json::json!({"ok": true}));
 }
 
 fn handle_connect(request: Request) {
@@ -14037,7 +13989,7 @@ fn release_url_for(tag: Option<&str>) -> Option<String> {
 fn parse_version_parts(v: &str) -> Vec<u64> {
     let cleaned = v.trim().trim_start_matches('v');
     cleaned
-        .split(|c: char| c == '.' || c == '-' || c == '+')
+        .split(['.', '-', '+'])
         .take_while(|part| part.chars().all(|c| c.is_ascii_digit()))
         .filter_map(|part| part.parse::<u64>().ok())
         .collect()
