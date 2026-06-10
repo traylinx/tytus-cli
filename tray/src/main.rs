@@ -2132,6 +2132,7 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         }
         "check_updates" => {
             busy_set("Checking for updates…");
+            notify("Tytus", "Checking for updates…");
             std::thread::spawn(|| {
                 match fetch_latest_tytus_version() {
                     Ok((latest, release_tag)) => {
@@ -2139,7 +2140,6 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                         write_cached_update_prefs(&latest, release_tag.as_deref());
                         trigger_refresh();
                         if is_newer_tytus_version(&latest, current) {
-                            let release = release_tag.unwrap_or_else(|| format!("v{}", latest));
                             notify(
                                 "Tytus update available",
                                 &format!(
@@ -2147,24 +2147,30 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
                                     latest
                                 ),
                             );
-                            let msg = format!(
-                                "Tytus {} is available (installed: {}).\n\nUse Settings → Update Tytus… or run:\n{}",
-                                release,
+                            let msg = update_available_dialog_message(
+                                &latest,
                                 current,
-                                tytus_install_command()
+                                release_tag.as_deref(),
                             );
-                            let _ = atomek_core::platform::dialog::show_info(
-                                "Tytus update available",
-                                &msg,
-                            );
+                            show_tray_info("Tytus update available", &msg);
                         } else {
                             notify("Tytus", &format!("Tytus {} is up to date.", current));
+                            let msg = update_current_dialog_message(
+                                current,
+                                &latest,
+                                release_tag.as_deref(),
+                            );
+                            show_tray_info("Tytus is up to date", &msg);
                         }
                     }
                     Err(e) => {
                         write_cached_update_error(&e);
                         trigger_refresh();
                         notify("Tytus", &format!("Update check failed: {}", e));
+                        show_tray_info(
+                            "Tytus update check failed",
+                            &update_error_dialog_message(&e),
+                        );
                     }
                 }
                 busy_clear();
@@ -3219,6 +3225,54 @@ fn log_file_with_legacy(
     }
 }
 
+fn show_tray_info(title: &str, message: &str) {
+    if atomek_core::platform::dialog::show_info(title, message)
+        .map(|a| a == atomek_core::platform::dialog::DialogAnswer::Unsupported)
+        .unwrap_or(true)
+    {
+        println!("{}\n\n{}", title, message);
+    }
+}
+
+fn update_available_dialog_message(
+    latest: &str,
+    current: &str,
+    release_tag: Option<&str>,
+) -> String {
+    let release = release_tag
+        .filter(|s| !s.trim().is_empty())
+        .map(str::trim)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("v{}", latest.trim().trim_start_matches('v')));
+    format!(
+        "A new Tytus version is available.\n\nInstalled: {}\nLatest: {} ({})\n\nUse Settings → Update Tytus… or run:\n{}",
+        current.trim(),
+        latest.trim(),
+        release,
+        tytus_install_command()
+    )
+}
+
+fn update_current_dialog_message(current: &str, latest: &str, release_tag: Option<&str>) -> String {
+    let release = release_tag
+        .filter(|s| !s.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("catalog release");
+    format!(
+        "No new update is available.\n\nInstalled: {}\nLatest catalog version: {} ({})\n\nYou're already running the newest Tytus release.",
+        current.trim(),
+        latest.trim(),
+        release
+    )
+}
+
+fn update_error_dialog_message(error: &str) -> String {
+    format!(
+        "Tytus could not check for updates.\n\nError: {}\n\nTry again from Settings → Check for Updates… or run:\ntytus doctor",
+        error.trim()
+    )
+}
+
 fn tytus_install_command() -> String {
     if cfg!(windows) {
         format!(
@@ -3572,5 +3626,22 @@ mod update_cache_tests {
         assert_eq!(body["latest_release_tag"], "v0.7.25");
         assert_eq!(body["last_checked_at"], 333);
         assert_eq!(body["last_check_error"], "catalog timeout");
+    }
+    #[test]
+    fn update_dialogs_make_manual_check_visible() {
+        let current = update_current_dialog_message("0.7.47", "0.7.47", Some("v0.7.47"));
+        assert!(current.contains("No new update is available."));
+        assert!(current.contains("Installed: 0.7.47"));
+        assert!(current.contains("Latest catalog version: 0.7.47 (v0.7.47)"));
+
+        let available = update_available_dialog_message("0.7.48", "0.7.47", Some("v0.7.48"));
+        assert!(available.contains("A new Tytus version is available."));
+        assert!(available.contains("Installed: 0.7.47"));
+        assert!(available.contains("Latest: 0.7.48 (v0.7.48)"));
+        assert!(available.contains("Update Tytus"));
+
+        let failed = update_error_dialog_message("catalog timeout");
+        assert!(failed.contains("Tytus could not check for updates."));
+        assert!(failed.contains("catalog timeout"));
     }
 }
