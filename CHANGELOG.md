@@ -1,3 +1,9 @@
+## 0.7.46 - 2026-06-10
+
+- Adds Private Network Access preflight support for `/api/whoami` by returning `Access-Control-Allow-Private-Network: true` only when Chrome requests it and only behind the existing explicit `https://traylinx.com` Origin allowlist.
+- Hardens tests for the `device_session_id` client contract: parse/persist when Sentinel returns it, preserve the previous value when refresh omits it, and surface the exact `state.json` key from `/api/whoami`.
+- Documents that this helps PNA-era Chrome preflights only; newer Local Network Access permission prompts and durable `device_sessions` row creation remain server-side Sentinel/authentication_ms work.
+
 ## 0.7.45 - 2026-06-10
 
 - Embedded TytusOS `v1.0.81-atomek-route-fs` and Atomek `v0.4.37`.

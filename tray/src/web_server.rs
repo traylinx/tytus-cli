@@ -7393,6 +7393,17 @@ fn whoami_host_allowed(headers: &[Header]) -> bool {
         .any(|allowed| host.eq_ignore_ascii_case(allowed))
 }
 
+/// Chrome Private Network Access preflights include this header before
+/// allowing HTTPS pages to read a loopback daemon. We only echo the
+/// corresponding allow header when explicitly requested; the fixed
+/// Origin allowlist remains the real read boundary.
+fn whoami_private_network_requested(headers: &[Header]) -> bool {
+    headers.iter().any(|h| {
+        h.field.equiv("Access-Control-Request-Private-Network")
+            && h.value.as_str().eq_ignore_ascii_case("true")
+    })
+}
+
 /// Build the JSON body for `/api/whoami` from a parsed state.json
 /// value (or `None` if state.json is missing/unreadable). Split out
 /// from `handle_whoami` so unit tests can pin the response shape
@@ -7559,8 +7570,13 @@ fn handle_whoami_preflight(request: Request) {
         let _ = request.respond(resp);
         return;
     }
-    let resp =
+
+    let private_network_requested = whoami_private_network_requested(request.headers());
+    let mut resp =
         with_whoami_cors_headers(Response::from_string("").with_status_code(StatusCode(204)));
+    if private_network_requested {
+        resp = resp.with_header(header("Access-Control-Allow-Private-Network", "true"));
+    }
     let _ = request.respond(resp);
 }
 
@@ -17918,6 +17934,31 @@ mod tests {
     }
 
     #[test]
+    fn whoami_reads_device_session_id_from_cli_state_key() {
+        // Pin the cross-crate contract: cli::CliState serializes this exact key,
+        // and the tray daemon must read the same key for account-aware detection.
+        let future_exp = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let parsed = serde_json::json!({
+            "access_token": "access-token",
+            "expires_at_ms": future_exp,
+            "agent_user_id": "agent-user-id",
+            "device_session_id": 98765,
+        });
+        let body = build_whoami_body(Some(&parsed));
+
+        assert_eq!(body["user_id"], serde_json::json!("agent-user-id"));
+        assert_eq!(body["device_session_id"], serde_json::json!(98765));
+        assert_eq!(body["status"], serde_json::json!("ready"));
+    }
+
+    #[test]
+    fn whoami_private_network_request_detection_is_case_insensitive() {
+        let header =
+            Header::from_bytes(b"Access-Control-Request-Private-Network", b"TRUE").unwrap();
+        assert!(whoami_private_network_requested(&[header]));
+    }
+
+    #[test]
     fn whoami_response_is_degraded_when_token_expired() {
         // Paired but the access token is past expiry — UI should
         // surface "running but needs refresh" rather than unpaired.
@@ -18060,6 +18101,62 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(body.trim()).expect("body is JSON");
         assert_eq!(parsed["status"], serde_json::json!("unpaired"));
         assert!(parsed["user_id"].is_null());
+    }
+
+    /// Wire-level: Chrome PNA preflight gets the private-network allow
+    /// header only after Host validation and with the fixed Origin allowlist.
+    #[test]
+    fn whoami_wire_options_allows_private_network_when_requested() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let _guard = StateOverrideGuard::set("/nonexistent/tytus-whoami-test.json");
+
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let port = server.server_addr().to_ip().expect("ip").port();
+        let registry = Registry::new();
+
+        let server_arc = Arc::new(server);
+        let server_for_thread = server_arc.clone();
+        let handler = thread::spawn(move || {
+            if let Some(req) = server_for_thread.incoming_requests().next() {
+                handle(req, registry);
+            }
+        });
+
+        let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s.write_all(
+            b"OPTIONS /api/whoami HTTP/1.1\r\n\
+              Host: 127.0.0.1:4242\r\n\
+              Origin: https://traylinx.com\r\n\
+              Access-Control-Request-Method: GET\r\n\
+              Access-Control-Request-Private-Network: true\r\n\
+              Connection: close\r\n\r\n",
+        )
+        .expect("write");
+        let mut resp = String::new();
+        s.read_to_string(&mut resp).expect("read");
+        handler.join().expect("handler thread panicked");
+
+        let status = resp.lines().next().unwrap_or("");
+        assert!(
+            status.starts_with("HTTP/1.1 204"),
+            "expected 204, got: {}\n{}",
+            status,
+            resp,
+        );
+        let origin = extract_header(&resp, "Access-Control-Allow-Origin")
+            .expect("Access-Control-Allow-Origin missing");
+        assert_eq!(origin, WHOAMI_ALLOWED_ORIGIN);
+        let private_network = extract_header(&resp, "Access-Control-Allow-Private-Network")
+            .expect("Access-Control-Allow-Private-Network missing");
+        assert_eq!(private_network, "true");
+        let allowed_methods = extract_header(&resp, "Access-Control-Allow-Methods")
+            .expect("Access-Control-Allow-Methods missing");
+        assert!(allowed_methods.contains("OPTIONS"));
+        assert!(allowed_methods.contains("GET"));
     }
 
     /// Wire-level: a bad Host header (DNS-rebinding shape) is rejected
