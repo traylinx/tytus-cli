@@ -9762,6 +9762,54 @@ fn update_tokens(
     }
 }
 
+#[cfg(test)]
+mod token_update_tests {
+    use super::*;
+
+    fn auth_result(device_session_id: Option<i64>) -> atomek_auth::DeviceAuthResult {
+        atomek_auth::DeviceAuthResult {
+            access_token: "access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            expires_in: 3600,
+            user: atomek_auth::DeviceAuthUser {
+                id: "agent-user-id".to_string(),
+                // Keep empty so update_tokens does not touch the OS keychain in tests.
+                email: String::new(),
+                first_name: None,
+                last_name: None,
+            },
+            device_session_id,
+        }
+    }
+
+    #[test]
+    fn update_tokens_persists_device_session_id_when_server_returns_it() {
+        let mut state = CliState::default();
+        let result = auth_result(Some(98_765));
+
+        update_tokens(&mut state, &result, &None);
+
+        assert_eq!(state.device_session_id, Some(98_765));
+        let serialized = serde_json::to_value(&state).expect("state serializes");
+        assert_eq!(serialized["device_session_id"], serde_json::json!(98_765));
+    }
+
+    #[test]
+    fn update_tokens_preserves_existing_device_session_id_when_refresh_omits_it() {
+        let mut state = CliState {
+            device_session_id: Some(12_345),
+            ..CliState::default()
+        };
+        let result = auth_result(None);
+
+        update_tokens(&mut state, &result, &None);
+
+        assert_eq!(state.device_session_id, Some(12_345));
+        let serialized = serde_json::to_value(&state).expect("state serializes");
+        assert_eq!(serialized["device_session_id"], serde_json::json!(12_345));
+    }
+}
+
 /// Cheap TCP-level probe of the stable dual-bound gateway endpoint.
 /// Returns true iff we got any HTTP response within 2s. Identical in
 /// spirit to `tray/src/gateway_probe.rs` but kept local so the CLI

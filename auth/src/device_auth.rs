@@ -313,3 +313,67 @@ pub async fn validate_token(
 
     Ok(TokenValidation { expires_in })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_status_response_parses_device_session_id_when_present() {
+        let body: DeviceStatusResponse = serde_json::from_str(
+            r#"{
+                "status":"authorized",
+                "access_token":"access-token",
+                "refresh_token":"refresh-token",
+                "expires_in":900,
+                "user":{"id":"agent-user-id","email":"user@example.com"},
+                "device_session_id":98765
+            }"#,
+        )
+        .expect("device status response parses");
+
+        assert_eq!(body.status, "authorized");
+        assert_eq!(body.device_session_id, Some(98_765));
+        assert_eq!(body.user.expect("user parsed").id, "agent-user-id");
+    }
+
+    #[test]
+    fn device_status_response_tolerates_missing_device_session_id() {
+        let body: DeviceStatusResponse = serde_json::from_str(
+            r#"{
+                "status":"pending"
+            }"#,
+        )
+        .expect("legacy device status response parses");
+
+        assert_eq!(body.status, "pending");
+        assert_eq!(body.device_session_id, None);
+    }
+
+    #[test]
+    fn refresh_response_parses_optional_device_session_id() {
+        let body: RefreshResponse = serde_json::from_str(
+            r#"{
+                "access_token":"access-token",
+                "refresh_token":"refresh-token",
+                "expires_in":900,
+                "device_session_id":12345
+            }"#,
+        )
+        .expect("refresh response parses");
+
+        assert_eq!(body.device_session_id, Some(12_345));
+    }
+
+    #[test]
+    fn refresh_response_tolerates_missing_device_session_id() {
+        let body: RefreshResponse = serde_json::from_str(
+            r#"{
+                "access_token":"access-token"
+            }"#,
+        )
+        .expect("legacy refresh response parses");
+
+        assert_eq!(body.device_session_id, None);
+    }
+}
