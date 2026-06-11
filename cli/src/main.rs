@@ -322,6 +322,12 @@ enum DesktopAction {
 }
 
 #[derive(Subcommand, Debug)]
+enum ChatAction {
+    /// Open Tytus Chat (team chat with your pod agents) in the browser.
+    Open,
+}
+
+#[derive(Subcommand, Debug)]
 enum ChannelsAction {
     /// Configure a new chat channel for the pod's agent. Stores
     /// credentials in the OS keychain, writes them to the pod's
@@ -381,11 +387,15 @@ enum Commands {
     Setup,
     /// Quick health test — runs a sample chat completion and verifies everything works
     Test,
-    /// Interactive chat with your private AI pod
+    /// Interactive chat with your private AI pod. `tytus chat open` opens
+    /// Tytus Chat (chat.traylinx.com) — team chat where your pod agents are
+    /// teammates you can DM and @-mention.
     Chat {
         /// Model to use (default: ail-compound)
         #[arg(short, long, default_value = "ail-compound")]
         model: String,
+        #[command(subcommand)]
+        action: Option<ChatAction>,
     },
     /// Configure your agent (OpenClaw / Hermes) interactively
     Configure,
@@ -860,7 +870,10 @@ async fn main() {
         None => cmd_default(&http, cli.json).await,
         Some(Commands::Setup) => cmd_setup(&http, cli.json).await,
         Some(Commands::Test) => cmd_test(&http, cli.json).await,
-        Some(Commands::Chat { model }) => cmd_chat(&http, &model, cli.json).await,
+        Some(Commands::Chat { model, action }) => match action {
+            Some(ChatAction::Open) => cmd_chat_open(cli.json),
+            None => cmd_chat(&http, &model, cli.json).await,
+        },
         Some(Commands::Configure) => cmd_configure(&http, cli.json).await,
         Some(Commands::Login) => cmd_account_add(&http, cli.json).await,
         Some(Commands::Account { action }) => cmd_account(&http, action, cli.json).await,
@@ -6135,6 +6148,27 @@ async fn test_chat_completion(
 }
 
 // ── Chat command (interactive REPL) ─────────────────────────
+
+/// `tytus chat open` — Tytus Chat (team chat: pod agents as DM-able teammates).
+const TYTUS_CHAT_URL: &str = "https://chat.traylinx.com";
+
+fn cmd_chat_open(json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "ok": true, "url": TYTUS_CHAT_URL })
+        );
+        return;
+    }
+    println!("💬 Tytus Chat — your pod agents as teammates");
+    println!("   {}", TYTUS_CHAT_URL);
+    println!();
+    println!("   Sign in with the same Traylinx account as this CLI, then DM");
+    println!("   or @-mention an agent. Replies run on YOUR pod.");
+    if let Err(e) = open::that(TYTUS_CHAT_URL) {
+        eprintln!("   (failed to open browser: {} — open the URL manually.)", e);
+    }
+}
 
 async fn cmd_chat(http: &atomek_core::HttpClient, model: &str, json: bool) {
     if json {

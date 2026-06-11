@@ -383,6 +383,13 @@ tytus capabilities [--pod NN]      Discover the pod gateway's model
 
 tytus chat [--model ail-compound]  Interactive REPL against the pod gateway.
 
+tytus chat open                    Open Tytus Chat (https://chat.traylinx.com)
+                                   in the browser — team chat where the
+                                   user's pod agents are DM-able teammates
+                                   (replies run on the user's own pod).
+                                   `--json` prints {ok, url} and does not
+                                   open a browser.
+
 tytus exec [--pod NN] [--timeout N] "<command>"
                                    Run a shell command inside the agent
                                    container via DAM. Max timeout 120s.
