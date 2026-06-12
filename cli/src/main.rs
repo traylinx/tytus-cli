@@ -3528,8 +3528,12 @@ async fn cmd_agent_uninstall(http: &atomek_core::HttpClient, pod_id: &str, json:
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
+    // B1: accept route_ids like exec/restart/doctor — resolve to the slot id.
+    let target = resolve_pod_target_or_exit(Some(pod_id), &state, json);
+    let pod_id = target.pod_id.as_str();
+
     if !json {
-        eprintln!("Stopping agent on pod {}...", pod_id);
+        eprintln!("Stopping agent on pod {}...", target.label());
     }
     match atomek_pods::stop_agent(&client, pod_id).await {
         Ok(()) => {
@@ -3656,8 +3660,12 @@ async fn cmd_revoke(http: &atomek_core::HttpClient, pod_id: &str, json: bool) {
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
+    // B1: accept route_ids — resolve to the slot id before the provider call.
+    let target = resolve_pod_target_or_exit(Some(pod_id), &state, json);
+    let pod_id = target.pod_id.as_str();
+
     if !json {
-        println!("Revoking pod {}...", pod_id);
+        println!("Revoking pod {}...", target.label());
     }
 
     // FIX-3: Reap the root-owned tunnel daemon BEFORE calling the Provider
@@ -3992,6 +4000,45 @@ async fn cmd_restart(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
             }
         }
         Err(e) => {
+            // B2: a recreate (AGENT_RESTART_RECREATE) can outlive the HTTP
+            // timeout while the action still fires server-side. A network/
+            // timeout error is therefore not a verdict — poll agent status
+            // briefly and judge by what the droplet actually reports.
+            if matches!(e, atomek_core::AtomekError::Network(_)) {
+                pb.set_message("Restart request timed out — checking agent status");
+                let mut confirmed: Option<atomek_pods::AgentStatus> = None;
+                for _ in 0..6 {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    if let Ok(status) =
+                        atomek_pods::get_agent_status_target(&client, agent_target_from_resolved(&target)).await
+                    {
+                        let up = status.uptime_seconds.unwrap_or(u64::MAX);
+                        if status.healthy == Some(true) || up < 120 {
+                            confirmed = Some(status);
+                            break;
+                        }
+                    }
+                }
+                if let Some(status) = confirmed {
+                    wizard::finish_ok(&pb, "Agent restarted (confirmed via status poll)");
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "pod_id": target.pod_id,
+                                "route_id": target.route_id,
+                                "agent_type": status.agent_type,
+                                "container_status": status.container_status,
+                                "healthy": status.healthy,
+                                "confirmed_via": "status_poll",
+                            })
+                        );
+                    } else {
+                        wizard::print_hint("Config file changes are now applied.");
+                    }
+                    return;
+                }
+            }
             wizard::finish_fail(&pb, &format!("Restart failed: {}", e));
             std::process::exit(1);
         }
@@ -4910,7 +4957,11 @@ async fn cmd_env(
     let mut state = CliState::load();
 
     let pod_idx = if let Some(ref pid) = pod_id {
-        state.pods.iter().position(|p| p.pod_id == *pid)
+        // B1: a route_id addresses the pod as well as the slot id does.
+        state
+            .pods
+            .iter()
+            .position(|p| p.pod_id == *pid || p.route_id.as_deref() == Some(pid.as_str()))
     } else {
         // First connected pod, or first pod
         state
@@ -5050,7 +5101,11 @@ async fn cmd_capabilities(http: &atomek_core::HttpClient, pod_id: Option<String>
     let mut state = CliState::load();
 
     let pod_idx = if let Some(ref pid) = pod_id {
-        state.pods.iter().position(|p| p.pod_id == *pid)
+        // B1: a route_id addresses the pod as well as the slot id does.
+        state
+            .pods
+            .iter()
+            .position(|p| p.pod_id == *pid || p.route_id.as_deref() == Some(pid.as_str()))
     } else {
         state
             .pods
@@ -8993,13 +9048,19 @@ async fn cmd_doctor_pod(http: &atomek_core::HttpClient, pod_id: String, json: bo
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
-    match atomek_pods::get_agent_status(&client, &pod_id).await {
+    // Accept route_ids exactly like exec/restart/logs do (files-handsfree B1)
+    // — the raw value used to hit the digits-only validator and reject
+    // `tytus doctor --pod eb2qvn3t4s` even though 3 pods share slot 01.
+    let target = resolve_pod_target_or_exit(Some(&pod_id), &state, json);
+
+    match atomek_pods::get_agent_status_target(&client, agent_target_from_resolved(&target)).await {
         Ok(status) => {
             if json {
                 println!(
                     "{}",
                     serde_json::json!({
-                        "pod_id": pod_id,
+                        "pod_id": target.pod_id,
+                        "route_id": target.route_id,
                         "pod_num": status.pod_num,
                         "agent_type": status.agent_type,
                         "container_status": status.container_status,
@@ -9018,7 +9079,7 @@ async fn cmd_doctor_pod(http: &atomek_core::HttpClient, pod_id: String, json: bo
             // surfaces them as individual log events.
             println!(
                 "Pod {} — {}",
-                pod_id,
+                target.label(),
                 status.agent_type.as_deref().unwrap_or("?")
             );
             println!(
