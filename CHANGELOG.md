@@ -1,3 +1,8 @@
+## 0.7.50 - 2026-06-12
+
+- `tytus doctor --pod`, `tytus agent uninstall`, `tytus revoke`, `tytus env --pod`, and `tytus capabilities --pod` now accept route ids (e.g. `eb2qvn3t4s`) exactly like exec/restart/logs — required since multiple agents can share one pod slot.
+- `tytus restart` no longer reports a cosmetic "Network error" when a container recreate outlives the HTTP timeout: it polls agent status and reports success once the droplet confirms a healthy or freshly-started container.
+
 ## 0.7.49 - 2026-06-10
 
 - Hardened shared-folder agent chat so Mac-side policy selection is no longer treated as proof of pod access. Tytus now verifies the selected route's pod-side Garage grant before telling Lisa, Claus, or Hermie that a shared folder is available; missing credentials fail closed with a re-provisioning instruction.
