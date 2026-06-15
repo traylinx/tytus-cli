@@ -52,6 +52,7 @@ PUBLIC_CATALOG_URL="${TYTUS_CATALOG_URL:-https://get.traylinx.com/catalog.json}"
 BRAND="Tytus"
 CLI_NAME="tytus"
 MCP_NAME="tytus-mcp"
+SUDOERS_FILE="/etc/sudoers.d/tytus"
 
 # ── Colors ──────────────────────────────────────────────────
 if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
@@ -120,6 +121,33 @@ read_reply() {
         _reply="$_default"
     fi
     printf "%s" "$_reply"
+}
+
+root_group() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        printf "wheel"
+    else
+        printf "root"
+    fi
+}
+
+privileged_helper_path() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        printf "/Library/PrivilegedHelperTools/com.traylinx.tytus/tytus"
+    else
+        printf "/usr/local/libexec/tytus/tytus"
+    fi
+}
+
+run_as_root() {
+    if [ "$(id -u)" = "0" ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        err "Admin permission is required, but sudo is not available."
+        exit 1
+    fi
 }
 
 # ── Detection ───────────────────────────────────────────────
@@ -402,8 +430,10 @@ install_from_source() {
 setup_sudoers() {
     [ "${TYTUS_SKIP_SUDOERS:-}" = "1" ] && { ok "Skipping sudoers setup (TYTUS_SKIP_SUDOERS=1)"; return 0; }
 
-    SUDOERS_FILE="/etc/sudoers.d/tytus"
     CURRENT_USER="${SUDO_USER:-$(whoami)}"
+    HELPER_BIN_PATH="$(privileged_helper_path)"
+    HELPER_DIR="$(dirname "$HELPER_BIN_PATH")"
+    ROOT_GROUP="$(root_group)"
     # Tight sudoers entry: only the tytus binary, only the two subcommands
     # needed for tunnel lifecycle, and tunnel-up is restricted to config files
     # under /tmp/tytus/tunnel-*.json so attackers can't point it at arbitrary
@@ -411,32 +441,82 @@ setup_sudoers() {
     # the target PID against /tmp/tytus/tunnel-*.pid so it cannot be used to
     # SIGTERM arbitrary system processes — that mistake from the previous
     # design (`/bin/kill -TERM *`) was a real privilege escalation vector.
-    ENTRY="${CURRENT_USER} ALL=(root) NOPASSWD: ${BIN_PATH} tunnel-up /tmp/tytus/tunnel-*.json, ${BIN_PATH} tunnel-down *"
+    # Security rule: sudoers must NOT point at /usr/local/bin/tytus on macOS.
+    # Homebrew commonly makes /usr/local/bin user-writable; NOPASSWD to a
+    # user-replaceable binary is privilege escalation. Instead copy the exact
+    # installed binary to a root-owned privileged helper path and scope sudoers
+    # to that immutable copy.
+    ENTRY="${CURRENT_USER} ALL=(root) NOPASSWD: ${HELPER_BIN_PATH} tunnel-up /tmp/tytus/tunnel-*.json, ${HELPER_BIN_PATH} tunnel-down *"
 
-    msg "Configuring passwordless tunnel (optional)..."
+    msg "Configuring secure tunnel permissions..."
     if [ -f "$SUDOERS_FILE" ] && grep -qF "$ENTRY" "$SUDOERS_FILE" 2>/dev/null; then
-        ok "Passwordless tunnel already configured"
-        return 0
+        if [ -x "$HELPER_BIN_PATH" ]; then
+            ok "Passwordless tunnel already configured"
+            return 0
+        fi
+        warn "Sudoers entry exists but privileged helper is missing; repairing."
     fi
 
-    write_entry() {
-        echo "$ENTRY" > "$SUDOERS_FILE"
-        chmod 440 "$SUDOERS_FILE"
-    }
+    if [ -z "${BIN_PATH:-}" ] || [ ! -x "$BIN_PATH" ]; then
+        err "${CLI_NAME} binary missing at ${BIN_PATH:-<unset>}; cannot configure tunnel permissions."
+        exit 1
+    fi
 
-    if [ "$(id -u)" = "0" ]; then
-        write_entry && ok "Passwordless tunnel configured for ${CURRENT_USER}"
-    elif command -v sudo >/dev/null 2>&1; then
-        if sudo -n true 2>/dev/null; then
-            sudo sh -c "echo '$ENTRY' > '$SUDOERS_FILE' && chmod 440 '$SUDOERS_FILE'" \
-                && ok "Passwordless tunnel configured for ${CURRENT_USER}"
-        else
-            warn "Passwordless tunnel not configured — you'll be prompted for sudo on 'tytus connect'."
-            warn "To configure later, run: sudo ${BIN_PATH} install-sudoers (coming soon)"
+    case "$HELPER_BIN_PATH" in
+        *[[:space:]]*)
+            err "Privileged helper path contains whitespace; refusing sudoers install: $HELPER_BIN_PATH"
+            exit 1
+            ;;
+    esac
+
+    TMP_SUDOERS=$(mktemp "${TMPDIR:-/tmp}/tytus-sudoers.XXXXXX")
+    trap 'rm -f "$TMP_SUDOERS"; rm -rf "${TMP:-}"' EXIT
+    printf "%s\n" "$ENTRY" > "$TMP_SUDOERS"
+
+    if command -v visudo >/dev/null 2>&1; then
+        if ! visudo -cf "$TMP_SUDOERS" >/dev/null 2>&1; then
+            err "Generated sudoers entry failed validation:"
+            cat "$TMP_SUDOERS" >&2
+            exit 1
+        fi
+    elif [ -x /usr/sbin/visudo ]; then
+        if ! /usr/sbin/visudo -cf "$TMP_SUDOERS" >/dev/null 2>&1; then
+            err "Generated sudoers entry failed validation:"
+            cat "$TMP_SUDOERS" >&2
+            exit 1
         fi
     else
-        warn "sudo not available; passwordless tunnel not configured."
+        warn "visudo not found before install; will rely on root install command."
     fi
+
+    msg "Admin permission may be requested once to install the secure tunnel helper."
+    run_as_root install -d -m 0755 -o root -g "$ROOT_GROUP" "$HELPER_DIR"
+    run_as_root install -m 0755 -o root -g "$ROOT_GROUP" "$BIN_PATH" "$HELPER_BIN_PATH"
+    if command -v visudo >/dev/null 2>&1; then
+        run_as_root visudo -cf "$TMP_SUDOERS" >/dev/null
+    elif [ -x /usr/sbin/visudo ]; then
+        run_as_root /usr/sbin/visudo -cf "$TMP_SUDOERS" >/dev/null
+    fi
+    run_as_root install -m 0440 -o root -g "$ROOT_GROUP" "$TMP_SUDOERS" "$SUDOERS_FILE"
+    rm -f "$TMP_SUDOERS"
+
+    if [ ! -x "$HELPER_BIN_PATH" ]; then
+        err "Privileged helper was not installed at $HELPER_BIN_PATH"
+        exit 1
+    fi
+    if [ "$(id -u)" = "0" ]; then
+        if [ ! -f "$SUDOERS_FILE" ] || ! grep -qF "$ENTRY" "$SUDOERS_FILE" 2>/dev/null; then
+            err "Tunnel sudoers entry was not installed at $SUDOERS_FILE"
+            exit 1
+        fi
+    elif ! sudo -n -l "$HELPER_BIN_PATH" tunnel-up /tmp/tytus/tunnel-check.json >/dev/null 2>&1; then
+        err "Tunnel sudoers entry did not validate with sudo -n -l."
+        err "Try again, or run: sudo rm -f $SUDOERS_FILE && tytus install-sudoers"
+        exit 1
+    fi
+
+    ok "Secure tunnel helper installed at ${HELPER_BIN_PATH}"
+    ok "Passwordless tunnel configured for ${CURRENT_USER}"
 }
 
 # ── Verify ─────────────────────────────────────────────────

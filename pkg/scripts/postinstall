@@ -62,10 +62,16 @@ fi
 # sudoers entry for `tytus connect` is set up by the install.sh path.
 # For .pkg installs we ship the same tightly-scoped wrapper entry directly
 # so the user never has to type their password to bring the tunnel up.
-# The entry must stay narrower than direct raw network-tool access:
-# root elevation goes through `/usr/local/bin/tytus`, whose `tunnel-up`
-# validates the config path and whose `tunnel-down` validates PID files.
+# Security: do NOT point sudoers at /usr/local/bin/tytus. On many macOS
+# systems /usr/local/bin is user-writable via Homebrew, and NOPASSWD to a
+# user-replaceable binary is privilege escalation. Copy the exact CLI binary
+# into a root-owned privileged-helper path and scope sudoers to that copy.
 # The /etc/sudoers.d file is owned by root:wheel mode 0440 per macOS rules.
+HELPER_DIR=/Library/PrivilegedHelperTools/com.traylinx.tytus
+HELPER_BIN=$HELPER_DIR/tytus
+install -d -m 0755 -o root -g wheel "$HELPER_DIR"
+install -m 0755 -o root -g wheel /usr/local/bin/tytus "$HELPER_BIN"
+
 SUDOERS_FILE=/etc/sudoers.d/tytus
 TMP_SUDOERS=/tmp/tytus-sudoers.$$
 cat > "$TMP_SUDOERS" <<EOF
@@ -73,7 +79,7 @@ cat > "$TMP_SUDOERS" <<EOF
 # \`tytus connect\` can bring the WireGuard tunnel up without a password
 # prompt. Same wrapper surface install.sh creates. Remove with:
 #   sudo rm /etc/sudoers.d/tytus
-$TARGET_USER ALL=(root) NOPASSWD: /usr/local/bin/tytus tunnel-up /tmp/tytus/tunnel-*.json, /usr/local/bin/tytus tunnel-down *
+$TARGET_USER ALL=(root) NOPASSWD: $HELPER_BIN tunnel-up /tmp/tytus/tunnel-*.json, $HELPER_BIN tunnel-down *
 EOF
 
 if command -v visudo >/dev/null 2>&1; then

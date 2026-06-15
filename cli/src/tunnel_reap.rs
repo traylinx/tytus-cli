@@ -437,6 +437,26 @@ fn sudo_prompt_allowed() -> bool {
         || std::io::stdin().is_terminal()
 }
 
+#[cfg(target_os = "macos")]
+fn privileged_helper_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/Library/PrivilegedHelperTools/com.traylinx.tytus/tytus")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn privileged_helper_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/usr/local/libexec/tytus/tytus")
+}
+
+#[cfg(unix)]
+fn preferred_tunnel_down_exe(self_exe: String) -> String {
+    let helper = privileged_helper_path();
+    if helper.exists() {
+        helper.display().to_string()
+    } else {
+        self_exe
+    }
+}
+
 #[cfg(unix)]
 fn invoke_tunnel_down(pid: i32) -> Result<(), String> {
     if pid <= 1 {
@@ -445,6 +465,7 @@ fn invoke_tunnel_down(pid: i32) -> Result<(), String> {
     let self_exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "tytus".into());
+    let self_exe = preferred_tunnel_down_exe(self_exe);
     let allow_prompt = sudo_prompt_allowed();
     let args = sudo_tunnel_down_args(&self_exe, pid, allow_prompt);
 

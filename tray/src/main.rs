@@ -1127,13 +1127,29 @@ fn build_menu(state: &TrayState) -> Menu {
     // appended to the top-level menu in one place, after TytusOS deep-links
     // and before Settings/Help. Empty when not logged in (we skip the
     // append).
-    let controls_sub = Submenu::new("Controls", true);
-
     let is_busy = busy_current().is_some();
+    let show_top_level_connect = state.logged_in && !state.tunnel_active;
+    let controls_sub = Submenu::new("Controls", true);
     if !state.logged_in {
         let _ = menu.append(&MenuItem::with_id("login", "Sign In…", !is_busy, None));
         let _ = menu.append(&PredefinedMenuItem::separator());
     } else {
+        if show_top_level_connect {
+            let label = if state.pods.is_empty() {
+                "🔌  Connect now — set up workspace…"
+            } else {
+                "🔌  Connect now…"
+            };
+            let _ = menu.append(&MenuItem::with_id("connect", label, !is_busy, None));
+            let _ = menu.append(&MenuItem::with_id(
+                "repair_connection_permissions",
+                "🛠  Repair connection permissions…",
+                true,
+                None,
+            ));
+            let _ = menu.append(&PredefinedMenuItem::separator());
+        }
+
         // Phase C top-level: three primary verbs (Chat / Files / Channels)
         // followed by the full TytusOS deep-link. The tray emits canonical
         // `/#/...` routes consumed by the TytusOS shell dispatcher.
@@ -1180,7 +1196,7 @@ fn build_menu(state: &TrayState) -> Menu {
                 !is_busy,
                 None,
             ));
-        } else {
+        } else if !show_top_level_connect {
             let _ = controls_sub.append(&MenuItem::with_id("connect", "Connect", !is_busy, None));
         }
 
@@ -2040,6 +2056,11 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
             // manually.
             open_in_terminal_simple(
                 "tytus connect && exit; echo; echo 'Connect failed — see above.'; echo 'Press Enter to close…'; read _"
+            );
+        }
+        "repair_connection_permissions" => {
+            open_in_terminal_simple(
+                "tytus install-sudoers && tytus autostart install; echo; echo 'Connection permissions repaired. Click Connect now.'; echo 'Press Enter to close…'; read _",
             );
         }
         "disconnect" => {
@@ -2970,13 +2991,13 @@ fn notify(title: &str, body: &str) {
 /// No tokens, no secrets — safe to paste into Discord / Telegram / email.
 #[cfg(target_os = "macos")]
 fn show_connect_failure_help() {
-    let body = "I can't tell if your tunnel came up within 60 seconds. This usually means one of:\n\n• Your network just changed (WiFi switch, VPN toggle)\n• The droplet is momentarily unreachable\n• A stale tunnel process is blocking a clean retry\n\nTry Again will disconnect cleanly and reconnect. Copy Diag puts a short diagnostic on your clipboard you can share.";
+    let body = "I can't tell if your tunnel came up within 60 seconds. Most reboot failures are caused by missing connection permissions, so the login auto-connect cannot ask macOS for an admin password.\n\nUse Repair Permissions once, then click Connect again.\n\nOther causes:\n• WiFi/VPN changed during connect\n• The pod is momentarily unreachable\n• A stale tunnel process is blocking a clean retry\n\nCopy Diag puts a short diagnostic on your clipboard.";
     let choice = atomek_core::platform::dialog::choose_button(
         "Tytus — connection trouble",
         body,
-        &["Copy Diag", "Cancel", "Try Again"],
+        &["Copy Diag", "Repair Permissions", "Try Again"],
         "Try Again",
-        Some("Cancel"),
+        None,
         "caution",
     )
     .ok()
@@ -2992,6 +3013,11 @@ fn show_connect_failure_help() {
             });
             open_in_terminal_simple(
                 "tytus disconnect 2>/dev/null; tytus connect && exit; echo; echo 'Retry failed — see above.'; echo 'Press Enter to close…'; read _"
+            );
+        }
+        Some("Repair Permissions") => {
+            open_in_terminal_simple(
+                "tytus install-sudoers && tytus autostart install; echo; echo 'Connection permissions repaired. Click Connect now.'; echo 'Press Enter to close…'; read _",
             );
         }
         Some("Copy Diag") => {

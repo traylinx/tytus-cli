@@ -1,3 +1,10 @@
+## 0.7.51 - 2026-06-15
+
+- Fixes macOS cold-boot auto-connect by installing a root-owned privileged tunnel helper and a validated, tightly scoped sudoers entry during install instead of silently skipping permissions when `sudo -n` is unavailable.
+- Adds `tytus install-sudoers` / `tytus repair-permissions`, autostart permission checks, and headless-connect failures that explain the exact repair instead of falling through to an impossible password prompt.
+- Promotes tray recovery UX: when disconnected, `Connect now` and `Repair connection permissions` are top-level actions; the connection-failure dialog points at the permission repair path.
+- Hardens doctor/connect/disconnect checks to use route-scoped pidfiles, parse structured tunnel pidfiles, avoid stale `state.json` tunnel positives, and prefer the stable user gateway key/endpoint for health tests.
+
 ## 0.7.50 - 2026-06-12
 
 - `tytus doctor --pod`, `tytus agent uninstall`, `tytus revoke`, `tytus env --pod`, and `tytus capabilities --pod` now accept route ids (e.g. `eb2qvn3t4s`) exactly like exec/restart/logs — required since multiple agents can share one pod slot.

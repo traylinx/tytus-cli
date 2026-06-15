@@ -72,6 +72,20 @@ fn daemon_alive_cross() -> bool {
     }
 }
 
+fn nonempty_str(v: Option<&str>) -> Option<&str> {
+    v.filter(|s| !s.trim().is_empty())
+}
+
+fn pod_gateway_endpoint(pod: &PodEntry) -> Option<&str> {
+    nonempty_str(pod.stable_ai_endpoint.as_deref())
+        .or_else(|| nonempty_str(pod.ai_endpoint.as_deref()))
+}
+
+fn pod_gateway_key(pod: &PodEntry) -> Option<&str> {
+    nonempty_str(pod.stable_user_key.as_deref())
+        .or_else(|| nonempty_str(pod.pod_api_key.as_deref()))
+}
+
 fn path_with_legacy_fallback(
     primary: std::path::PathBuf,
     legacy: std::path::PathBuf,
@@ -91,6 +105,235 @@ fn is_root_user() -> bool {
 #[cfg(windows)]
 fn is_root_user() -> bool {
     false
+}
+
+#[cfg(target_os = "macos")]
+fn privileged_helper_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/Library/PrivilegedHelperTools/com.traylinx.tytus/tytus")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn privileged_helper_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/usr/local/libexec/tytus/tytus")
+}
+
+#[cfg(unix)]
+fn preferred_elevated_exe(current: &std::path::Path) -> std::path::PathBuf {
+    let helper = privileged_helper_path();
+    if helper.exists() {
+        helper
+    } else {
+        current.to_path_buf()
+    }
+}
+
+#[cfg(unix)]
+fn sudoers_user() -> String {
+    std::env::var("SUDO_USER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            std::process::Command::new("whoami")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(unix)]
+fn sudoers_root_group() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "wheel"
+    } else {
+        "root"
+    }
+}
+
+#[cfg(unix)]
+fn visudo_program() -> &'static str {
+    if std::path::Path::new("/usr/sbin/visudo").exists() {
+        "/usr/sbin/visudo"
+    } else {
+        "visudo"
+    }
+}
+
+#[cfg(unix)]
+fn tytus_sudoers_entry(helper: &std::path::Path) -> Result<String, String> {
+    let helper_s = helper.display().to_string();
+    if helper_s.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "privileged helper path contains whitespace; refusing sudoers entry: {}",
+            helper_s
+        ));
+    }
+    let user = sudoers_user();
+    Ok(format!(
+        "{} ALL=(root) NOPASSWD: {} tunnel-up /tmp/tytus/tunnel-*.json, {} tunnel-down *",
+        user, helper_s, helper_s
+    ))
+}
+
+#[cfg(unix)]
+fn tunnel_permission_configured() -> (bool, String) {
+    let helper = privileged_helper_path();
+    if !helper.exists() {
+        return (
+            false,
+            format!(
+                "Missing privileged helper at {}. Run: tytus install-sudoers",
+                helper.display()
+            ),
+        );
+    }
+    if let Err(e) = tytus_sudoers_entry(&helper) {
+        return (false, e);
+    }
+
+    // /etc/sudoers.d/tytus is intentionally 0440 root:wheel, so a normal user
+    // cannot reliably read it. Ask sudo to list the exact allowed command
+    // without prompting. This is side-effect-free and catches both missing and
+    // stale entries.
+    let output = std::process::Command::new("sudo")
+        .arg("-n")
+        .arg("-l")
+        .arg(helper.display().to_string())
+        .arg("tunnel-up")
+        .arg("/tmp/tytus/tunnel-check.json")
+        .output();
+    match output {
+        Ok(o) if o.status.success() => (
+            true,
+            format!("Configured via root-owned helper {}", helper.display()),
+        ),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            let msg = if stderr.is_empty() {
+                "Sudoers entry is missing or stale. Run: tytus install-sudoers".to_string()
+            } else {
+                format!(
+                    "Sudoers check failed: {}. Run: tytus install-sudoers",
+                    stderr
+                )
+            };
+            (false, msg)
+        }
+        Err(e) => (
+            false,
+            format!(
+                "Could not run sudo check: {}. Run: tytus install-sudoers",
+                e
+            ),
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn run_root_command(program: &str, args: &[String]) -> Result<(), String> {
+    if !is_root_user() {
+        let mut c = std::process::Command::new("sudo");
+        c.arg(program);
+        let status = c
+            .args(args)
+            .status()
+            .map_err(|e| format!("failed to spawn sudo {}: {}", program, e))?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("sudo {} exited with {}", program, status))
+        };
+    }
+
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to spawn {}: {}", program, e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        Err(if detail.is_empty() {
+            format!("{} exited with {}", program, output.status)
+        } else {
+            format!("{} failed: {}", program, detail)
+        })
+    }
+}
+
+#[cfg(unix)]
+fn install_privileged_helper_and_sudoers() -> Result<std::path::PathBuf, String> {
+    let source = std::env::current_exe().map_err(|e| format!("current_exe failed: {}", e))?;
+    let helper = privileged_helper_path();
+    let helper_parent = helper
+        .parent()
+        .ok_or_else(|| format!("bad helper path: {}", helper.display()))?;
+    let entry = tytus_sudoers_entry(&helper)?;
+    let tmp = std::env::temp_dir().join(format!(
+        "tytus-sudoers-{}-{}.tmp",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::write(&tmp, format!("{}\n", entry))
+        .map_err(|e| format!("failed to write temp sudoers file: {}", e))?;
+
+    let group = sudoers_root_group().to_string();
+    let helper_parent_s = helper_parent.display().to_string();
+    let source_s = source.display().to_string();
+    let helper_s = helper.display().to_string();
+    let tmp_s = tmp.display().to_string();
+
+    let result = (|| {
+        run_root_command(
+            "install",
+            &[
+                "-d".to_string(),
+                "-m".to_string(),
+                "0755".to_string(),
+                "-o".to_string(),
+                "root".to_string(),
+                "-g".to_string(),
+                group.clone(),
+                helper_parent_s,
+            ],
+        )?;
+        run_root_command(
+            "install",
+            &[
+                "-m".to_string(),
+                "0755".to_string(),
+                "-o".to_string(),
+                "root".to_string(),
+                "-g".to_string(),
+                group.clone(),
+                source_s,
+                helper_s,
+            ],
+        )?;
+        run_root_command(visudo_program(), &["-cf".to_string(), tmp_s.clone()])?;
+        run_root_command(
+            "install",
+            &[
+                "-m".to_string(),
+                "0440".to_string(),
+                "-o".to_string(),
+                "root".to_string(),
+                "-g".to_string(),
+                group,
+                tmp_s,
+                "/etc/sudoers.d/tytus".to_string(),
+            ],
+        )?;
+        Ok::<(), String>(())
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result?;
+    Ok(helper)
 }
 
 const HELP_GROUPS: &str = "\
@@ -617,6 +860,11 @@ enum Commands {
         #[arg(value_enum, default_value = "status")]
         action: AutostartAction,
     },
+    /// Repair the admin permission used by `tytus connect` to open/close
+    /// the WireGuard tunnel. Installs a root-owned helper and a tightly
+    /// scoped sudoers rule. Safe to re-run.
+    #[command(name = "install-sudoers", alias = "repair-permissions")]
+    InstallSudoers,
     /// Open the OpenClaw control UI in your browser via a localhost forwarder.
     /// Browsers require HTTPS or localhost for WebCrypto / device identity
     /// APIs, so a direct `http://10.X.Y.1:3000` URL gets blocked. This command
@@ -936,6 +1184,7 @@ async fn main() {
             }
         }
         Some(Commands::Autostart { action }) => cmd_autostart(action, cli.json),
+        Some(Commands::InstallSudoers) => cmd_install_sudoers(cli.json),
         Some(Commands::Ui {
             pod,
             port,
@@ -2368,7 +2617,11 @@ async fn activate_tunnel_elevated(
         eprintln!("Cannot determine executable path");
         std::process::exit(1);
     });
-    let exe_str = exe.display().to_string();
+    #[cfg(unix)]
+    let elevated_exe = preferred_elevated_exe(&exe);
+    #[cfg(not(unix))]
+    let elevated_exe = exe.clone();
+    let exe_str = elevated_exe.display().to_string();
     let config_path_str = config_path.display().to_string();
     let json_flag = if json { " --json" } else { "" };
 
@@ -2377,7 +2630,13 @@ async fn activate_tunnel_elevated(
     // Spawn tunnel-up as a detached background process with elevated privileges.
     // The subprocess writes PID + interface name to /tmp/tytus/ and prints TUNNEL_READY to stdout.
     // We capture stdout to detect when the tunnel is up, then return immediately.
-    let child = try_spawn_elevated(&exe_str, &full_args, &config_path_str, json_flag);
+    let child = try_spawn_elevated(
+        &exe_str,
+        &full_args,
+        &config_path_str,
+        json_flag,
+        wizard::is_interactive(),
+    );
 
     let mut child = match child {
         Ok(c) => c,
@@ -2531,6 +2790,7 @@ fn try_spawn_elevated(
     args: &[String],
     config_path: &str,
     json_flag: &str,
+    allow_prompt: bool,
 ) -> Result<std::process::Child, String> {
     // Strategy 1: `sudo -n` (passwordless). Unlike the pre-sprint version,
     // we actually verify sudo succeeded rather than trusting spawn(). Flow:
@@ -2581,6 +2841,12 @@ fn try_spawn_elevated(
                     if !needs_password {
                         return Err(format!("sudo -n failed: {}", stderr.trim()));
                     }
+                    if !allow_prompt {
+                        return Err(format!(
+                            "passwordless tunnel permission is missing for {}. Run `tytus install-sudoers`, then `tytus autostart install`, then try `tytus connect` again.",
+                            exe
+                        ));
+                    }
                     // Fall through to strategy 2. Note: child is already dead.
                     tracing::info!("sudo -n declined ({}), trying osascript", stderr.trim());
                 }
@@ -2590,8 +2856,20 @@ fn try_spawn_elevated(
             }
         }
         Err(e) => {
+            if !allow_prompt {
+                return Err(format!(
+                    "cannot start sudo in headless mode: {}. Run `tytus install-sudoers` from Terminal.",
+                    e
+                ));
+            }
             tracing::warn!("sudo -n spawn failed: {} — falling back to osascript", e);
         }
+    }
+
+    if !allow_prompt {
+        return Err(format!(
+            "headless connect cannot ask for an admin password. Run `tytus install-sudoers` from Terminal once, then `tytus autostart install`."
+        ));
     }
 
     // Strategy 2: osascript on macOS (GUI password dialog / Touch ID).
@@ -2988,13 +3266,11 @@ fn cmd_tunnel_down(pid: i32) {
         if !(name.starts_with("tunnel-") && name.ends_with(".pid")) {
             continue;
         }
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(file_pid) = content.trim().parse::<i32>() {
-                if file_pid == pid {
-                    matched = true;
-                    matched_path = Some(path.clone());
-                    break;
-                }
+        if let Some(meta) = tunnel_pidfile::read(&path) {
+            if meta.pid == pid {
+                matched = true;
+                matched_path = Some(path.clone());
+                break;
             }
         }
     }
@@ -4009,8 +4285,11 @@ async fn cmd_restart(http: &atomek_core::HttpClient, pod_id: Option<String>, jso
                 let mut confirmed: Option<atomek_pods::AgentStatus> = None;
                 for _ in 0..6 {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    if let Ok(status) =
-                        atomek_pods::get_agent_status_target(&client, agent_target_from_resolved(&target)).await
+                    if let Ok(status) = atomek_pods::get_agent_status_target(
+                        &client,
+                        agent_target_from_resolved(&target),
+                    )
+                    .await
                     {
                         let up = status.uptime_seconds.unwrap_or(u64::MAX);
                         if status.healthy == Some(true) || up < 120 {
@@ -6002,7 +6281,7 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
     let pb = wizard::spinner("Running test query...");
 
     let test_result = if let Some(pod) = state.pods.first() {
-        if let (Some(ref endpoint), Some(ref key)) = (&pod.ai_endpoint, &pod.pod_api_key) {
+        if let (Some(endpoint), Some(key)) = (pod_gateway_endpoint(pod), pod_gateway_key(pod)) {
             test_chat_completion(endpoint, key, "ail-compound", "Say hello in 3 words").await
         } else {
             Err("Pod missing endpoint or API key".to_string())
@@ -6031,7 +6310,7 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
     wizard::print_success_banner("Your Tytus pod is ready to use!");
 
     if let Some(pod) = state.pods.first() {
-        if let (Some(ref ep), Some(ref key)) = (&pod.ai_endpoint, &pod.pod_api_key) {
+        if let (Some(ep), Some(key)) = (pod_gateway_endpoint(pod), pod_gateway_key(pod)) {
             wizard::print_box(
                 "Your Connection Info",
                 &[
@@ -6126,8 +6405,8 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
 
     // Check 4: gateway reachable
     let pb = wizard::spinner("Testing AI gateway");
-    let endpoint = pod.ai_endpoint.as_deref().unwrap_or("");
-    let key = pod.pod_api_key.as_deref().unwrap_or("");
+    let endpoint = pod_gateway_endpoint(&pod).unwrap_or("");
+    let key = pod_gateway_key(&pod).unwrap_or("");
 
     match test_chat_completion(endpoint, key, "ail-compound", "Say hello").await {
         Ok(response) => {
@@ -6221,7 +6500,10 @@ fn cmd_chat_open(json: bool) {
     println!("   Sign in with the same Traylinx account as this CLI, then DM");
     println!("   or @-mention an agent. Replies run on YOUR pod.");
     if let Err(e) = open::that(TYTUS_CHAT_URL) {
-        eprintln!("   (failed to open browser: {} — open the URL manually.)", e);
+        eprintln!(
+            "   (failed to open browser: {} — open the URL manually.)",
+            e
+        );
     }
 }
 
@@ -6254,8 +6536,8 @@ async fn cmd_chat(http: &atomek_core::HttpClient, model: &str, json: bool) {
         }
     };
 
-    let endpoint = pod.ai_endpoint.as_deref().unwrap_or("");
-    let key = pod.pod_api_key.as_deref().unwrap_or("");
+    let endpoint = pod_gateway_endpoint(&pod).unwrap_or("");
+    let key = pod_gateway_key(&pod).unwrap_or("");
 
     wizard::print_logo();
     wizard::print_header(&format!("Chat — {} (pod {})", model, pod.pod_id));
@@ -6459,6 +6741,52 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
 
 // ── Autostart (macOS LaunchAgent + Linux systemd --user) ────
 
+#[cfg(unix)]
+fn cmd_install_sudoers(json: bool) {
+    match install_privileged_helper_and_sudoers() {
+        Ok(helper) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "helper": helper.to_string_lossy(),
+                        "sudoers_file": "/etc/sudoers.d/tytus"
+                    })
+                );
+            } else {
+                println!("✓ Secure tunnel helper installed at {}", helper.display());
+                println!("✓ Passwordless tunnel permission installed at /etc/sudoers.d/tytus");
+                println!("  Re-run: tytus autostart install");
+            }
+        }
+        Err(e) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": false,
+                        "error": e
+                    })
+                );
+            } else {
+                eprintln!("Failed to install tunnel permission: {}", e);
+                eprintln!("Run this from Terminal so macOS/Linux can ask for your admin password.");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn cmd_install_sudoers(json: bool) {
+    if json {
+        println!(r#"{"ok":false,"error":"install-sudoers is only needed on macOS/Linux"}"#);
+    } else {
+        println!("install-sudoers is only needed on macOS/Linux.");
+    }
+}
+
 /// FIX-6: auto-start on boot.
 ///
 /// After a reboot, the tunnel daemon is gone — but the user's apps (Cursor,
@@ -6553,6 +6881,25 @@ fn cmd_autostart(action: AutostartAction, json: bool) {
 
         match action {
             AutostartAction::Install => {
+                #[cfg(unix)]
+                {
+                    let (permission_ok, permission_msg) = tunnel_permission_configured();
+                    if !permission_ok {
+                        if !json {
+                            eprintln!(
+                                "Configuring secure tunnel permission required for reboot auto-connect..."
+                            );
+                            eprintln!("  {}", permission_msg);
+                        }
+                        if let Err(e) = install_privileged_helper_and_sudoers() {
+                            eprintln!("Failed to configure tunnel permission: {}", e);
+                            eprintln!(
+                                "Auto-start cannot work reliably until this succeeds. Run: tytus install-sudoers"
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 if let Err(e) = std::fs::create_dir_all(&plist_dir) {
                     eprintln!("Failed to create LaunchAgents dir: {}", e);
                     std::process::exit(1);
@@ -9233,26 +9580,40 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
     let mut live_tunnel_pods: Vec<String> = Vec::new();
     let mut live_tunnel_ifaces: Vec<String> = Vec::new();
     for pod in &state.pods {
-        let mut tunnel_ok = pod.tunnel_iface.is_some();
-        if !tunnel_ok {
-            let pidfile = format!("/tmp/tytus/tunnel-{}.pid", pod.pod_id);
+        let mut tunnel_ok = false;
+        let mut keys = vec![route_scoped_key(&pod.pod_id, pod.route_id.as_deref())];
+        if !keys.iter().any(|k| k == &pod.pod_id) {
+            keys.push(pod.pod_id.clone());
+        }
+        for key in keys {
+            let pidfile = format!("/tmp/tytus/tunnel-{}.pid", key);
             if let Ok(raw) = std::fs::read_to_string(&pidfile) {
-                if let Ok(pid) = raw.trim().parse::<i32>() {
-                    let alive = process_alive_cross(pid);
-                    if alive {
+                let pid = raw.lines().find_map(|line| {
+                    line.strip_prefix("pid=")
+                        .or(Some(line))
+                        .and_then(|v| v.trim().parse::<i32>().ok())
+                });
+                if let Some(pid) = pid {
+                    if process_alive_cross(pid) {
                         tunnel_ok = true;
+                        if let Ok(iface) =
+                            std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.iface", key))
+                        {
+                            let iface = iface.trim().to_string();
+                            if !iface.is_empty() && !live_tunnel_ifaces.iter().any(|i| i == &iface)
+                            {
+                                live_tunnel_ifaces.push(iface);
+                            }
+                        }
+                        break;
                     }
                 }
             }
         }
         if tunnel_ok {
-            live_tunnel_pods.push(pod.pod_id.clone());
-            if let Some(ref iface) = pod.tunnel_iface {
-                live_tunnel_ifaces.push(iface.clone());
-            } else if let Ok(iface) =
-                std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.iface", pod.pod_id))
-            {
-                live_tunnel_ifaces.push(iface.trim().to_string());
+            let key = route_scoped_key(&pod.pod_id, pod.route_id.as_deref());
+            if !live_tunnel_pods.iter().any(|p| p == &key) {
+                live_tunnel_pods.push(key);
             }
         }
     }
@@ -9273,10 +9634,26 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
         },
     ));
 
+    // 6b. Permission required for headless reconnect after reboot. This is
+    // separate from "tunnel currently up": a live tunnel can mask a broken
+    // install until the next restart. Autostart LaunchAgents run headless, so
+    // they cannot type an admin password; the sudoers helper must already be
+    // installed.
+    #[cfg(unix)]
+    {
+        let (ok, msg) = tunnel_permission_configured();
+        checks.push(("tunnel_permission", ok, msg));
+    }
+
     // 7. Gateway reachability (only if tunnel active)
     if has_tunnel {
-        if let Some(pod) = state.pods.iter().find(|p| p.tunnel_iface.is_some()) {
-            if let (Some(ref ep), Some(ref key)) = (&pod.ai_endpoint, &pod.pod_api_key) {
+        if let Some(pod) = state.pods.iter().find(|p| {
+            let key = route_scoped_key(&p.pod_id, p.route_id.as_deref());
+            live_tunnel_pods
+                .iter()
+                .any(|live| live == &key || live == &p.pod_id)
+        }) {
+            if let (Some(ep), Some(key)) = (pod_gateway_endpoint(pod), pod_gateway_key(pod)) {
                 let url = format!("{}/v1/models", ep);
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(5))
