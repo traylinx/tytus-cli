@@ -6781,7 +6781,10 @@ fn cmd_install_sudoers(json: bool) {
 #[cfg(not(unix))]
 fn cmd_install_sudoers(json: bool) {
     if json {
-        println!(r#"{"ok":false,"error":"install-sudoers is only needed on macOS/Linux"}"#);
+        println!(
+            "{}",
+            r#"{"ok":false,"error":"install-sudoers is only needed on macOS/Linux"}"#
+        );
     } else {
         println!("install-sudoers is only needed on macOS/Linux.");
     }

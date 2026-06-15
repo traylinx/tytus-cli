@@ -1,4 +1,4 @@
-## 0.7.51 - 2026-06-15
+## 0.7.52 - 2026-06-15
 
 - Fixes macOS cold-boot auto-connect by installing a root-owned privileged tunnel helper and a validated, tightly scoped sudoers entry during install instead of silently skipping permissions when `sudo -n` is unavailable.
 - Adds `tytus install-sudoers` / `tytus repair-permissions`, autostart permission checks, and headless-connect failures that explain the exact repair instead of falling through to an impossible password prompt.
