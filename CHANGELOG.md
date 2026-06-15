@@ -1,3 +1,9 @@
+## 0.7.53 - 2026-06-15
+
+- Fixes post-restart connection truth by hydrating `tytus status`, `tytus test`, and `tytus doctor` from route-scoped live tunnel pidfiles instead of stale `state.json` only.
+- Prevents duplicate `pod_id=01` allocations from borrowing each other's legacy tunnel pidfile; routed pods now require their own route-scoped daemon proof.
+- Keeps the default AIL route as the preferred health-test target so the tray/menu can reconnect cleanly after Mac restart without confusing agent pods with the included AIL runtime.
+
 ## 0.7.52 - 2026-06-15
 
 - Fixes macOS cold-boot auto-connect by installing a root-owned privileged tunnel helper and a validated, tightly scoped sudoers entry during install instead of silently skipping permissions when `sudo -n` is unavailable.

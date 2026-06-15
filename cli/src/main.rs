@@ -2084,6 +2084,11 @@ async fn cmd_status(http: &atomek_core::HttpClient, json: bool, raw: bool) {
 
     // Detect stale tunnels: state says tunnel is up but interface/daemon is dead
     reap_dead_tunnels(&mut state);
+    // Also detect the inverse stale state: after reboot/login sync, state can
+    // say `tunnel_iface:null` even while a route-scoped tunnel daemon is alive
+    // under /tmp/tytus/tunnel-<route>.pid. The tray/menu status surface uses
+    // this command, so it must share doctor/test's live route truth.
+    hydrate_live_tunnel_ifaces(&mut state);
     state.save();
 
     if json {
@@ -2117,6 +2122,104 @@ fn route_scoped_key(pod_id: &str, route_id: Option<&str>) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or(pod_id)
         .to_string()
+}
+
+#[derive(Debug, Clone)]
+struct LiveTunnelStatus {
+    key: String,
+    iface: String,
+}
+
+fn parse_tunnel_pid(raw: &str) -> Option<i32> {
+    raw.lines().find_map(|line| {
+        let value = line
+            .trim()
+            .strip_prefix("pid=")
+            .unwrap_or_else(|| line.trim());
+        if value.is_empty() {
+            None
+        } else {
+            value.parse::<i32>().ok()
+        }
+    })
+}
+
+fn tunnel_keys_for_pod(pod: &PodEntry) -> Vec<String> {
+    let mut keys = vec![route_scoped_key(&pod.pod_id, pod.route_id.as_deref())];
+    // Only fall back to the legacy pod_id key for state that has no route_id.
+    // Modern accounts can have multiple "pod_id=01" allocations on different
+    // droplets. Treating /tmp/tytus/tunnel-01.pid as a match for every routed
+    // pod would make status/tray lie after a restart. Routed pods must prove
+    // liveness with their route-scoped pidfile.
+    if pod.route_id.as_deref().filter(|route| !route.is_empty()).is_none()
+        && !keys.iter().any(|key| key == &pod.pod_id)
+    {
+        keys.push(pod.pod_id.clone());
+    }
+    keys
+}
+
+fn interface_exists(iface: &str) -> bool {
+    !iface.trim().is_empty()
+        && std::process::Command::new("ifconfig")
+            .arg(iface.trim())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+}
+
+fn live_tunnel_for_key(key: &str) -> Option<LiveTunnelStatus> {
+    let pidfile = format!("/tmp/tytus/tunnel-{}.pid", key);
+    let raw = std::fs::read_to_string(&pidfile).ok()?;
+    let pid = parse_tunnel_pid(&raw)?;
+    if !process_alive_cross(pid) {
+        return None;
+    }
+    let iface = std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.iface", key))
+        .ok()?
+        .trim()
+        .to_string();
+    if !interface_exists(&iface) {
+        return None;
+    }
+    Some(LiveTunnelStatus {
+        key: key.to_string(),
+        iface,
+    })
+}
+
+fn live_tunnel_for_pod(pod: &PodEntry) -> Option<LiveTunnelStatus> {
+    tunnel_keys_for_pod(pod)
+        .into_iter()
+        .find_map(|key| live_tunnel_for_key(&key))
+}
+
+fn hydrate_live_tunnel_ifaces(state: &mut CliState) {
+    for pod in &mut state.pods {
+        if let Some(tunnel) = live_tunnel_for_pod(pod) {
+            pod.tunnel_iface = Some(tunnel.iface);
+        }
+    }
+}
+
+fn preferred_test_pod(state: &CliState) -> Option<(PodEntry, Option<LiveTunnelStatus>)> {
+    if let Some(pod) = state
+        .pods
+        .iter()
+        .find(|pod| live_tunnel_for_pod(pod).is_some())
+    {
+        return Some((pod.clone(), live_tunnel_for_pod(pod)));
+    }
+    if let Some(pod) = state
+        .pods
+        .iter()
+        .find(|pod| pod.agent_type.as_deref() == Some("none"))
+    {
+        return Some((pod.clone(), None));
+    }
+    state.pods.first().cloned().map(|pod| (pod, None))
 }
 
 async fn cmd_connect(http: &atomek_core::HttpClient, pod_id: Option<String>, json: bool) {
@@ -2514,7 +2617,7 @@ async fn activate_tunnel_elevated(
     let existing_alive = {
         let pidfile_pid = std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.pid", target_key))
             .ok()
-            .and_then(|s| s.trim().parse::<i32>().ok())
+            .and_then(|s| parse_tunnel_pid(&s))
             .filter(|&pid| process_alive_cross(pid));
         let orphan_pods = tunnel_reap::list_orphan_tunnel_pods();
         pidfile_pid.is_some() || orphan_pods.iter().any(|p| p == target_key)
@@ -6384,22 +6487,39 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
         wizard::print_hint("Run: tytus connect");
         std::process::exit(1);
     }
-    let pod = &state.pods[0].clone();
-    wizard::finish_ok(&pb, &format!("Pod {} allocated", pod.pod_id));
-
-    // Check 3: tunnel active
-    let pb = wizard::spinner("Checking tunnel");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    if pod.tunnel_iface.is_none() {
-        wizard::finish_fail(&pb, "Tunnel not running");
-        wizard::print_hint("Run: tytus connect");
-        std::process::exit(1);
-    }
+    let (pod, live_tunnel) = preferred_test_pod(&state).expect("state.pods is not empty");
+    let pod_label = pod
+        .display_name
+        .as_deref()
+        .or(pod.agent_type.as_deref())
+        .unwrap_or("pod");
     wizard::finish_ok(
         &pb,
         &format!(
-            "Tunnel active on {}",
-            pod.tunnel_iface.as_deref().unwrap_or("?")
+            "Pod {} allocated ({}, route {})",
+            pod.pod_id,
+            pod_label,
+            pod.route_id.as_deref().unwrap_or("?")
+        ),
+    );
+
+    // Check 3: tunnel active. Use the same live route-scoped pidfile source as
+    // `tytus doctor`, not stale `state.pods[*].tunnel_iface`. Multiple agents
+    // can share pod_id=01 across droplets, while the default AIL route is often
+    // the real connected tunnel after login/restart.
+    let pb = wizard::spinner("Checking tunnel");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let live_tunnel = live_tunnel.or_else(|| live_tunnel_for_pod(&pod));
+    let Some(live_tunnel) = live_tunnel else {
+        wizard::finish_fail(&pb, "Tunnel not running");
+        wizard::print_hint("Run: tytus connect");
+        std::process::exit(1);
+    };
+    wizard::finish_ok(
+        &pb,
+        &format!(
+            "Tunnel active on {} (route {})",
+            live_tunnel.iface, live_tunnel.key
         ),
     );
 
@@ -9583,40 +9703,12 @@ async fn cmd_doctor(_http: &atomek_core::HttpClient, json: bool) {
     let mut live_tunnel_pods: Vec<String> = Vec::new();
     let mut live_tunnel_ifaces: Vec<String> = Vec::new();
     for pod in &state.pods {
-        let mut tunnel_ok = false;
-        let mut keys = vec![route_scoped_key(&pod.pod_id, pod.route_id.as_deref())];
-        if !keys.iter().any(|k| k == &pod.pod_id) {
-            keys.push(pod.pod_id.clone());
-        }
-        for key in keys {
-            let pidfile = format!("/tmp/tytus/tunnel-{}.pid", key);
-            if let Ok(raw) = std::fs::read_to_string(&pidfile) {
-                let pid = raw.lines().find_map(|line| {
-                    line.strip_prefix("pid=")
-                        .or(Some(line))
-                        .and_then(|v| v.trim().parse::<i32>().ok())
-                });
-                if let Some(pid) = pid {
-                    if process_alive_cross(pid) {
-                        tunnel_ok = true;
-                        if let Ok(iface) =
-                            std::fs::read_to_string(format!("/tmp/tytus/tunnel-{}.iface", key))
-                        {
-                            let iface = iface.trim().to_string();
-                            if !iface.is_empty() && !live_tunnel_ifaces.iter().any(|i| i == &iface)
-                            {
-                                live_tunnel_ifaces.push(iface);
-                            }
-                        }
-                        break;
-                    }
-                }
+        if let Some(tunnel) = live_tunnel_for_pod(pod) {
+            if !live_tunnel_pods.iter().any(|p| p == &tunnel.key) {
+                live_tunnel_pods.push(tunnel.key.clone());
             }
-        }
-        if tunnel_ok {
-            let key = route_scoped_key(&pod.pod_id, pod.route_id.as_deref());
-            if !live_tunnel_pods.iter().any(|p| p == &key) {
-                live_tunnel_pods.push(key);
+            if !live_tunnel_ifaces.iter().any(|i| i == &tunnel.iface) {
+                live_tunnel_ifaces.push(tunnel.iface);
             }
         }
     }
@@ -10464,31 +10556,24 @@ pub(crate) async fn ensure_token(
 /// affected pods so status/connect don't lie about connectivity.
 fn reap_dead_tunnels(state: &mut CliState) {
     for pod in &mut state.pods {
-        if let Some(ref iface) = pod.tunnel_iface {
-            let pid_file = format!("/tmp/tytus/tunnel-{}.pid", pod.pod_id);
-            let daemon_alive = std::fs::read_to_string(&pid_file)
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok())
-                .map(|pid| {
-                    // kill(pid, 0) checks if process exists without sending a signal.
-                    // Returns 0 if we have permission, -1 with:
-                    //   EPERM = process exists but we can't signal it (it's root) → alive
-                    //   ESRCH = no such process → dead
-                    process_alive_cross(pid as i32)
-                })
-                .unwrap_or(false);
+        let Some(ref iface) = pod.tunnel_iface else {
+            continue;
+        };
+        if live_tunnel_for_pod(pod).is_some() {
+            continue;
+        }
 
-            if !daemon_alive {
-                tracing::debug!(
-                    "Stale tunnel on pod {}: iface={} but daemon is dead — clearing",
-                    pod.pod_id,
-                    iface
-                );
-                pod.tunnel_iface = None;
-                // Clean up stale PID/iface files
-                let _ = std::fs::remove_file(&pid_file);
-                let _ = std::fs::remove_file(format!("/tmp/tytus/tunnel-{}.iface", pod.pod_id));
-            }
+        tracing::debug!(
+            "Stale tunnel on pod {} route {:?}: iface={} but route-scoped daemon/interface is dead — clearing",
+            pod.pod_id,
+            pod.route_id,
+            iface
+        );
+        pod.tunnel_iface = None;
+        // Clean up stale PID/iface files for both route-scoped and legacy pod-id keys.
+        for key in tunnel_keys_for_pod(pod) {
+            let _ = std::fs::remove_file(format!("/tmp/tytus/tunnel-{}.pid", key));
+            let _ = std::fs::remove_file(format!("/tmp/tytus/tunnel-{}.iface", key));
         }
     }
 }
