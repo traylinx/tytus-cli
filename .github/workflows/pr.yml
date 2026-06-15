@@ -56,13 +56,18 @@ jobs:
               assert "TYTUS_SKIP_GARAGETYTUS" in text, path
 
           postinstall = Path("pkg/scripts/postinstall").read_text()
-          assert "/usr/local/bin/tytus tunnel-up /tmp/tytus/tunnel-*.json" in postinstall
-          assert "/usr/local/bin/tytus tunnel-down *" in postinstall
+          assert "HELPER_BIN=$HELPER_DIR/tytus" in postinstall
+          assert "NOPASSWD: $HELPER_BIN tunnel-up /tmp/tytus/tunnel-*.json, $HELPER_BIN tunnel-down *" in postinstall
+          assert "/usr/local/bin/tytus tunnel-up /tmp/tytus/tunnel-*.json" not in postinstall
+          assert "HELPER_DIR=/Library/PrivilegedHelperTools/com.traylinx.tytus" in postinstall
           assert "visudo" in postinstall
           for forbidden in ["/sbin/route", "/sbin/ifconfig", "/usr/sbin/sysctl", "wg-quick", "wireguard-go"]:
               assert forbidden not in postinstall, forbidden
 
           installer = Path("install.sh").read_text()
+          assert "/Library/PrivilegedHelperTools/com.traylinx.tytus/tytus" in installer
+          assert "install-sudoers" in installer
+          assert "sudo -n -l" in installer
           assert "releases/tags/${EFFECTIVE_RELEASE_TAG}" in installer
           assert "PUBLIC_CATALOG_URL" in installer
           assert "release_tag" in installer
