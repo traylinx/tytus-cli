@@ -2151,7 +2151,11 @@ fn tunnel_keys_for_pod(pod: &PodEntry) -> Vec<String> {
     // droplets. Treating /tmp/tytus/tunnel-01.pid as a match for every routed
     // pod would make status/tray lie after a restart. Routed pods must prove
     // liveness with their route-scoped pidfile.
-    if pod.route_id.as_deref().filter(|route| !route.is_empty()).is_none()
+    if pod
+        .route_id
+        .as_deref()
+        .filter(|route| !route.is_empty())
+        .is_none()
         && !keys.iter().any(|key| key == &pod.pod_id)
     {
         keys.push(pod.pod_id.clone());
@@ -6450,7 +6454,10 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
 
     if !state.is_logged_in() {
         if json {
-            println!(r#"{{"ok":false,"error":"not_logged_in"}}"#);
+            println!(
+                "{}",
+                serde_json::json!({"ok": false, "error": "not_logged_in"})
+            );
         } else {
             wizard::print_fail("Not logged in. Run: tytus setup");
         }
@@ -6459,7 +6466,10 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
 
     if let Err(e) = ensure_token(&mut state, http).await {
         if json {
-            println!(r#"{{"ok":false,"error":"token_refresh_failed: {}"}}"#, e);
+            println!(
+                "{}",
+                serde_json::json!({"ok": false, "error": "token_refresh_failed", "message": e.to_string()})
+            );
         } else {
             wizard::print_fail(&format!("Token refresh failed: {}. Run: tytus login", e));
         }
@@ -6472,19 +6482,31 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
     }
 
     // Check 1: logged in
-    let pb = wizard::spinner("Checking authentication");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    wizard::finish_ok(
-        &pb,
-        &format!("Signed in as {}", state.email.as_deref().unwrap_or("?")),
-    );
+    if !json {
+        let pb = wizard::spinner("Checking authentication");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        wizard::finish_ok(
+            &pb,
+            &format!("Signed in as {}", state.email.as_deref().unwrap_or("?")),
+        );
+    }
 
     // Check 2: has pod
-    let pb = wizard::spinner("Checking pod allocation");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let pod_spinner = if json {
+        None
+    } else {
+        Some(wizard::spinner("Checking pod allocation"))
+    };
+    if !json {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     if state.pods.is_empty() {
-        wizard::finish_fail(&pb, "No workspace yet");
-        wizard::print_hint("Run: tytus connect");
+        if json {
+            println!("{}", serde_json::json!({"ok": false, "error": "no_pod"}));
+        } else if let Some(pb) = &pod_spinner {
+            wizard::finish_fail(pb, "No workspace yet");
+            wizard::print_hint("Run: tytus connect");
+        }
         std::process::exit(1);
     }
     let (pod, live_tunnel) = preferred_test_pod(&state).expect("state.pods is not empty");
@@ -6493,57 +6515,99 @@ async fn cmd_test(http: &atomek_core::HttpClient, json: bool) {
         .as_deref()
         .or(pod.agent_type.as_deref())
         .unwrap_or("pod");
-    wizard::finish_ok(
-        &pb,
-        &format!(
-            "Pod {} allocated ({}, route {})",
-            pod.pod_id,
-            pod_label,
-            pod.route_id.as_deref().unwrap_or("?")
-        ),
-    );
+    if let Some(pb) = &pod_spinner {
+        wizard::finish_ok(
+            pb,
+            &format!(
+                "Pod {} allocated ({}, route {})",
+                pod.pod_id,
+                pod_label,
+                pod.route_id.as_deref().unwrap_or("?")
+            ),
+        );
+    }
 
     // Check 3: tunnel active. Use the same live route-scoped pidfile source as
     // `tytus doctor`, not stale `state.pods[*].tunnel_iface`. Multiple agents
     // can share pod_id=01 across droplets, while the default AIL route is often
     // the real connected tunnel after login/restart.
-    let pb = wizard::spinner("Checking tunnel");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let tunnel_spinner = if json {
+        None
+    } else {
+        Some(wizard::spinner("Checking tunnel"))
+    };
+    if !json {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     let live_tunnel = live_tunnel.or_else(|| live_tunnel_for_pod(&pod));
     let Some(live_tunnel) = live_tunnel else {
-        wizard::finish_fail(&pb, "Tunnel not running");
-        wizard::print_hint("Run: tytus connect");
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": false,
+                    "error": "tunnel_not_running",
+                    "pod_id": pod.pod_id,
+                    "route_id": pod.route_id
+                })
+            );
+        } else if let Some(pb) = &tunnel_spinner {
+            wizard::finish_fail(pb, "Tunnel not running");
+            wizard::print_hint("Run: tytus connect");
+        }
         std::process::exit(1);
     };
-    wizard::finish_ok(
-        &pb,
-        &format!(
-            "Tunnel active on {} (route {})",
-            live_tunnel.iface, live_tunnel.key
-        ),
-    );
+    if let Some(pb) = &tunnel_spinner {
+        wizard::finish_ok(
+            pb,
+            &format!(
+                "Tunnel active on {} (route {})",
+                live_tunnel.iface, live_tunnel.key
+            ),
+        );
+    }
 
     // Check 4: gateway reachable
-    let pb = wizard::spinner("Testing AI gateway");
+    let gateway_spinner = if json {
+        None
+    } else {
+        Some(wizard::spinner("Testing AI gateway"))
+    };
     let endpoint = pod_gateway_endpoint(&pod).unwrap_or("");
     let key = pod_gateway_key(&pod).unwrap_or("");
 
     match test_chat_completion(endpoint, key, "ail-compound", "Say hello").await {
         Ok(response) => {
-            wizard::finish_ok(&pb, "Gateway responded!");
-            println!();
-            wizard::print_info(&format!("AI said: \"{}\"", response.trim()));
-            println!();
             if json {
-                println!(r#"{{"ok":true}}"#);
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "pod_id": pod.pod_id,
+                        "route_id": pod.route_id,
+                        "tunnel_iface": live_tunnel.iface,
+                        "model": "ail-compound",
+                        "response_preview": response.trim()
+                    })
+                );
             } else {
+                if let Some(pb) = &gateway_spinner {
+                    wizard::finish_ok(pb, "Gateway responded!");
+                }
+                println!();
+                wizard::print_info(&format!("AI said: \"{}\"", response.trim()));
+                println!();
                 wizard::print_success_banner("Everything is working!");
             }
         }
         Err(e) => {
-            wizard::finish_fail(&pb, &format!("Gateway failed: {}", e));
             if json {
-                println!(r#"{{"ok":false,"error":"gateway_failed"}}"#);
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": false, "error": "gateway_failed", "message": e})
+                );
+            } else if let Some(pb) = &gateway_spinner {
+                wizard::finish_fail(pb, &format!("Gateway failed: {}", e));
             }
             std::process::exit(1);
         }

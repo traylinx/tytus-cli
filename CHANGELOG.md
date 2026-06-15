@@ -1,3 +1,8 @@
+## 0.7.54 - 2026-06-15
+
+- Fixed `tytus test --json` to emit machine-parseable JSON only; human progress spinners stay in normal mode.
+- Supersedes 0.7.53 for automation/AI CLI consumers that pipe `tytus test --json` into `jq`.
+
 ## 0.7.53 - 2026-06-15
 
 - Fixes post-restart connection truth by hydrating `tytus status`, `tytus test`, and `tytus doctor` from route-scoped live tunnel pidfiles instead of stale `state.json` only.
