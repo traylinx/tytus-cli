@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "atomek-auth"
-version = "0.7.54"
+version = "0.7.55"
 dependencies = [
  "atomek-core",
  "dirs",
@@ -158,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "atomek-cli"
-version = "0.7.54"
+version = "0.7.55"
 dependencies = [
  "atomek-auth",
  "atomek-core",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "atomek-core"
-version = "0.7.54"
+version = "0.7.55"
 dependencies = [
  "base64",
  "chrono",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "atomek-pods"
-version = "0.7.54"
+version = "0.7.55"
 dependencies = [
  "atomek-core",
  "dirs",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "atomek-tunnel"
-version = "0.7.54"
+version = "0.7.55"
 dependencies = [
  "atomek-core",
  "base64",
@@ -3488,7 +3488,7 @@ checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
 name = "tytus-mcp"
-version = "0.7.54"
+version = "0.7.55"
 dependencies = [
  "atomek-auth",
  "atomek-cli",
@@ -3506,7 +3506,7 @@ dependencies = [
 
 [[package]]
 name = "tytus-tray"
-version = "0.7.54"
+version = "0.7.55"
 dependencies = [
  "atomek-auth",
  "atomek-core",

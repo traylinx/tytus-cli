@@ -1,3 +1,10 @@
+## 0.7.55 - 2026-06-17
+
+- Fixes shared-folder re-provisioning so refreshing one binding only preserves buckets selected for the same exact route/runtime, instead of granting every cached shared folder globally.
+- Adds pod-side shared-folder grant status to the local daemon response so TytusOS can show verified, missing-grant, and needs-reprovision states per selected agent.
+- Improves Tytus Chat/DAM provider failure classification by preserving upstream HTTP class, timeout mode, elapsed time, and provider request id for heartbeat watchdog alerts.
+- Embeds TytusOS `v1.0.82-shared-folder-target-status`.
+
 ## 0.7.54 - 2026-06-15
 
 - Fixed `tytus test --json` to emit machine-parseable JSON only; human progress spinners stay in normal mode.

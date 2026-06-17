@@ -10215,11 +10215,9 @@ fn spawn_external_command_with_options(
 /// `garagetytus folder bind` v0.5.3+). Returns empty `bindings` when
 /// the dir doesn't exist (no bindings yet) — never errors.
 fn handle_shared_folders_list(request: Request) {
-    respond_json(
-        request,
-        200,
-        &serde_json::json!({"bindings": shared_bindings_from_cache()}),
-    );
+    let mut bindings = shared_bindings_from_cache();
+    enrich_shared_bindings_with_target_status(&mut bindings);
+    respond_json(request, 200, &serde_json::json!({"bindings": bindings}));
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -13016,16 +13014,82 @@ fn handle_pod_refresh_creds(request: Request, registry: &Registry, query: &str) 
     );
 }
 
-fn all_known_shared_buckets() -> Vec<String> {
+#[derive(Debug, PartialEq)]
+enum SharedProvisionBucketsError {
+    NoBuckets,
+    InvalidBucket(String),
+}
+
+fn shared_buckets_selected_for_selector_in_bindings(
+    selector: &str,
+    bindings: &[serde_json::Value],
+) -> Vec<String> {
     let mut buckets = std::collections::BTreeSet::new();
-    for binding in shared_bindings_from_cache() {
-        if let Some(bucket) = binding.get("bucket").and_then(|v| v.as_str()) {
-            if valid_sharing_bucket(bucket) {
-                buckets.insert(bucket.to_string());
-            }
+    for binding in bindings {
+        let Some(bucket) = binding.get("bucket").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !valid_sharing_bucket(bucket) {
+            continue;
+        }
+        if shared_binding_selected_for_selector(binding, selector) {
+            buckets.insert(bucket.to_string());
         }
     }
     buckets.into_iter().collect()
+}
+
+fn resolve_shared_provision_buckets_for_bindings(
+    requested: &[String],
+    all_buckets: bool,
+    pod_selector: &str,
+    bindings: &[serde_json::Value],
+) -> Result<Vec<String>, SharedProvisionBucketsError> {
+    let mut dedup = std::collections::BTreeSet::new();
+
+    for bucket in requested {
+        let bucket = bucket.trim().to_string();
+        if !valid_sharing_bucket(&bucket) {
+            return Err(SharedProvisionBucketsError::InvalidBucket(bucket));
+        }
+        dedup.insert(bucket);
+    }
+
+    if all_buckets {
+        for binding in bindings {
+            if let Some(bucket) = binding.get("bucket").and_then(|v| v.as_str()) {
+                if valid_sharing_bucket(bucket) {
+                    dedup.insert(bucket.to_string());
+                }
+            }
+        }
+    } else {
+        if requested.is_empty() {
+            return Err(SharedProvisionBucketsError::NoBuckets);
+        }
+        // The pod helper rewrites credentials.json as a full credential set.
+        // Keep every bucket already selected for this exact route/runtime, but
+        // do NOT add every cached bucket globally. That was the bug: one
+        // current-binding reprovision could silently grant stale/unrelated
+        // bindings from other folders or droplets.
+        for bucket in shared_buckets_selected_for_selector_in_bindings(pod_selector, bindings) {
+            dedup.insert(bucket);
+        }
+    }
+
+    if dedup.is_empty() {
+        return Err(SharedProvisionBucketsError::NoBuckets);
+    }
+    Ok(dedup.into_iter().collect())
+}
+
+fn resolve_shared_provision_buckets(
+    requested: &[String],
+    all_buckets: bool,
+    pod_selector: &str,
+) -> Result<Vec<String>, SharedProvisionBucketsError> {
+    let bindings = shared_bindings_from_cache();
+    resolve_shared_provision_buckets_for_bindings(requested, all_buckets, pod_selector, &bindings)
 }
 
 #[derive(Clone, Debug)]
@@ -13174,6 +13238,213 @@ fn shared_folder_verify_actual_grant(selector: &str, bucket: &str) -> (bool, Opt
         Ok(_) => (false, Some(format!("bucket not granted: {}", bucket))),
         Err(e) => (false, Some(e)),
     }
+}
+
+fn shared_target_string(target: &serde_json::Value, field: &str) -> Option<String> {
+    target
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string)
+}
+
+fn shared_target_label(target: &serde_json::Value) -> Option<String> {
+    if let Some(label) = shared_target_string(target, "label") {
+        return Some(label);
+    }
+    target
+        .get("labels")
+        .and_then(|v| v.as_array())
+        .and_then(|labels| {
+            labels
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .find(|v| !v.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+fn shared_target_id_contains_selector(target_id: &str, selector: &str) -> bool {
+    let selector = selector.trim();
+    !selector.is_empty()
+        && target_id
+            .split(':')
+            .any(|part| part.trim().eq_ignore_ascii_case(selector))
+}
+
+fn shared_target_selector(target: &serde_json::Value) -> Option<String> {
+    shared_target_string(target, "provision_selector")
+        .or_else(|| shared_target_string(target, "route_id"))
+        .or_else(|| shared_target_string(target, "runtime_id"))
+}
+
+fn shared_binding_target_matches_selector(target: &serde_json::Value, selector: &str) -> bool {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return false;
+    }
+    if shared_target_string(target, "provision_selector")
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case(selector))
+    {
+        return true;
+    }
+    if shared_target_string(target, "route_id")
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case(selector))
+    {
+        return true;
+    }
+    if shared_target_string(target, "target_id")
+        .as_deref()
+        .is_some_and(|v| shared_target_id_contains_selector(v, selector))
+    {
+        return true;
+    }
+    match (
+        normalize_pod_id_for_query(selector),
+        shared_target_string(target, "runtime_id").and_then(|v| normalize_pod_id_for_query(&v)),
+    ) {
+        (Some(want), Some(runtime)) => want == runtime,
+        _ => false,
+    }
+}
+
+fn shared_binding_selector_in_values(
+    binding: &serde_json::Value,
+    key: &str,
+    selector: &str,
+) -> bool {
+    let selector = selector.trim();
+    let selector_norm = normalize_pod_id_for_query(selector);
+    binding
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values.iter().filter_map(|v| v.as_str()).any(|raw| {
+                let raw = raw.trim();
+                if raw.eq_ignore_ascii_case(selector) {
+                    return true;
+                }
+                match (selector_norm.as_deref(), normalize_pod_id_for_query(raw)) {
+                    (Some(want), Some(got)) => want == got,
+                    _ => false,
+                }
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn shared_binding_selected_for_selector(binding: &serde_json::Value, selector: &str) -> bool {
+    let targets = binding.get("targets").and_then(|v| v.as_array());
+    if let Some(targets) = targets {
+        if !targets.is_empty() {
+            return targets.iter().any(|target| {
+                !target
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .is_some_and(|enabled| !enabled)
+                    && shared_binding_target_matches_selector(target, selector)
+            });
+        }
+    }
+
+    shared_binding_selector_in_values(binding, "routes_provisioned", selector)
+        || shared_binding_selector_in_values(binding, "pods_provisioned", selector)
+}
+
+fn enrich_shared_bindings_with_target_status(bindings: &mut [serde_json::Value]) {
+    let checked_at = now_secs();
+    for binding in bindings {
+        enrich_shared_binding_target_status(binding, checked_at);
+    }
+}
+
+fn enrich_shared_binding_target_status(binding: &mut serde_json::Value, checked_at: u64) {
+    let bucket = binding
+        .get("bucket")
+        .and_then(|v| v.as_str())
+        .unwrap_or("shared")
+        .to_string();
+    let Some(targets) = binding.get("targets").and_then(|v| v.as_array()).cloned() else {
+        return;
+    };
+    let statuses = targets
+        .iter()
+        .map(|target| shared_target_live_status(target, &bucket, checked_at))
+        .collect::<Vec<_>>();
+    if let Some(obj) = binding.as_object_mut() {
+        obj.insert(
+            "target_status".to_string(),
+            serde_json::Value::Array(statuses),
+        );
+    }
+}
+
+fn shared_target_live_status(
+    target: &serde_json::Value,
+    bucket: &str,
+    checked_at: u64,
+) -> serde_json::Value {
+    let runtime_id = shared_target_string(target, "runtime_id").unwrap_or_default();
+    let route_id = shared_target_string(target, "route_id");
+    let provision_selector = shared_target_string(target, "provision_selector");
+    let target_id = shared_target_string(target, "target_id");
+    let label = shared_target_label(target);
+    let enabled = !target
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .is_some_and(|enabled| !enabled);
+
+    let mut status = serde_json::json!({
+        "runtime_id": runtime_id,
+        "selected": enabled,
+        "grant_verified": false,
+        "state": "unselected",
+        "checked_at": checked_at,
+    });
+    if let Some(route_id) = route_id {
+        status["route_id"] = serde_json::Value::String(route_id);
+    }
+    if let Some(provision_selector) = provision_selector {
+        status["provision_selector"] = serde_json::Value::String(provision_selector);
+    }
+    if let Some(target_id) = target_id {
+        status["target_id"] = serde_json::Value::String(target_id);
+    }
+    if let Some(label) = label {
+        status["label"] = serde_json::Value::String(label);
+    }
+    if !enabled {
+        return status;
+    }
+
+    let Some(selector) = shared_target_selector(target) else {
+        status["state"] = serde_json::Value::String("verification_error".to_string());
+        status["error"] =
+            serde_json::Value::String("missing target provision selector".to_string());
+        return status;
+    };
+
+    let (grant_ok, grant_error) = shared_folder_verify_actual_grant(&selector, bucket);
+    status["grant_verified"] = serde_json::Value::Bool(grant_ok);
+    if grant_ok {
+        status["state"] = serde_json::Value::String("verified".to_string());
+    } else {
+        let err = grant_error.unwrap_or_else(|| "pod-side grant missing".to_string());
+        status["state"] = serde_json::Value::String(
+            if err.starts_with("bucket not granted:") {
+                "grant_missing"
+            } else {
+                "verification_error"
+            }
+            .to_string(),
+        );
+        status["error"] = serde_json::Value::String(err);
+    }
+    status
 }
 
 fn shared_binding_provisioned_for_runtime(binding: &serde_json::Value, canonical: &str) -> bool {
@@ -13507,6 +13778,8 @@ fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry
         #[serde(default)]
         buckets: Vec<String>,
         #[serde(default)]
+        all_buckets: bool,
+        #[serde(default)]
         no_restart: bool,
     }
 
@@ -13547,40 +13820,35 @@ fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry
         }
     };
 
-    let buckets = {
-        let mut dedup = std::collections::BTreeSet::new();
-        for bucket in all_known_shared_buckets() {
-            dedup.insert(bucket);
+    let buckets = match resolve_shared_provision_buckets(
+        &body.buckets,
+        body.all_buckets,
+        &pod_selector,
+    ) {
+        Ok(buckets) => buckets,
+        Err(SharedProvisionBucketsError::InvalidBucket(bucket)) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({
+                    "error": format!("invalid bucket: {}", bucket),
+                    "code": "sharing.provision.bucket.invalid"
+                }),
+            );
+            return;
         }
-        for bucket in body.buckets {
-            let bucket = bucket.trim().to_string();
-            if !valid_sharing_bucket(&bucket) {
-                respond_json(
-                    request,
-                    400,
-                    &serde_json::json!({
-                        "error": format!("invalid bucket: {}", bucket),
-                        "code": "sharing.provision.bucket.invalid"
-                    }),
-                );
-                return;
-            }
-            dedup.insert(bucket);
+        Err(SharedProvisionBucketsError::NoBuckets) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({
+                    "error":"buckets is required; pass all_buckets=true to refresh every binding",
+                    "code":"sharing.provision.no_buckets"
+                }),
+            );
+            return;
         }
-        dedup.into_iter().collect::<Vec<_>>()
     };
-
-    if buckets.is_empty() {
-        respond_json(
-            request,
-            400,
-            &serde_json::json!({
-                "error":"no shared buckets configured yet",
-                "code":"sharing.provision.no_buckets"
-            }),
-        );
-        return;
-    }
 
     let mut args = vec![pod_selector.clone()];
     for bucket in &buckets {
@@ -17654,6 +17922,173 @@ mod tests {
         assert!(lisa.starts_with("No."));
         assert!(lisa.contains("does not currently have a verified Garage grant"));
         assert!(lisa.contains("bucket not granted: shared"));
+    }
+
+    #[test]
+    fn shared_provision_bucket_resolution_uses_current_route_scope_not_global_cache() {
+        let bindings = vec![
+            serde_json::json!({
+                "bucket": "cooperation-strategy",
+                "pods_provisioned": ["lisa-route"],
+                "targets": [{
+                    "runtime_id": "01",
+                    "provision_selector": "lisa-route",
+                    "target_id": "agent:01:lisa-route:lisa",
+                    "enabled": true
+                }]
+            }),
+            serde_json::json!({
+                "bucket": "skills",
+                "pods_provisioned": ["claus-route"],
+                "targets": [{
+                    "runtime_id": "01",
+                    "provision_selector": "claus-route",
+                    "target_id": "agent:01:claus-route:claus",
+                    "enabled": true
+                }]
+            }),
+        ];
+
+        let buckets = resolve_shared_provision_buckets_for_bindings(
+            &["cooperation-strategy".to_string()],
+            false,
+            "lisa-route",
+            &bindings,
+        )
+        .unwrap();
+
+        assert_eq!(buckets, vec!["cooperation-strategy"]);
+    }
+
+    #[test]
+    fn shared_provision_bucket_resolution_retains_same_route_selected_buckets() {
+        let bindings = vec![
+            serde_json::json!({
+                "bucket": "cooperation-strategy",
+                "targets": [{
+                    "runtime_id": "01",
+                    "route_id": "lisa-route",
+                    "enabled": true
+                }]
+            }),
+            serde_json::json!({
+                "bucket": "marketing",
+                "targets": [{
+                    "runtime_id": "01",
+                    "provision_selector": "lisa-route",
+                    "enabled": true
+                }]
+            }),
+            serde_json::json!({
+                "bucket": "skills",
+                "targets": [{
+                    "runtime_id": "01",
+                    "provision_selector": "claus-route",
+                    "enabled": true
+                }]
+            }),
+        ];
+
+        let buckets = resolve_shared_provision_buckets_for_bindings(
+            &["cooperation-strategy".to_string()],
+            false,
+            "lisa-route",
+            &bindings,
+        )
+        .unwrap();
+
+        assert_eq!(buckets, vec!["cooperation-strategy", "marketing"]);
+    }
+
+    #[test]
+    fn shared_provision_bucket_resolution_requires_explicit_bucket_or_all_flag() {
+        let bindings = vec![serde_json::json!({"bucket": "shared"})];
+        assert_eq!(
+            resolve_shared_provision_buckets_for_bindings(&[], false, "01", &bindings),
+            Err(SharedProvisionBucketsError::NoBuckets)
+        );
+        assert_eq!(
+            resolve_shared_provision_buckets_for_bindings(&[], true, "01", &bindings).unwrap(),
+            vec!["shared"]
+        );
+        assert_eq!(
+            resolve_shared_provision_buckets_for_bindings(
+                &["Shared".to_string()],
+                false,
+                "01",
+                &bindings
+            ),
+            Err(SharedProvisionBucketsError::InvalidBucket(
+                "Shared".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn shared_folder_list_target_status_reports_verified_missing_and_unselected() {
+        {
+            let mut overrides = shared_grant_test_overrides().lock().unwrap();
+            overrides.clear();
+            overrides.insert(
+                shared_grant_cache_key("lisa-route"),
+                SharedGrantCacheEntry {
+                    grants: HashSet::from(["shared".to_string()]),
+                    checked_at: now_secs(),
+                    error: None,
+                },
+            );
+            overrides.insert(
+                shared_grant_cache_key("claus-route"),
+                SharedGrantCacheEntry {
+                    grants: HashSet::new(),
+                    checked_at: now_secs(),
+                    error: None,
+                },
+            );
+        }
+
+        let mut bindings = vec![serde_json::json!({
+            "bucket": "shared",
+            "targets": [
+                {
+                    "runtime_id": "01",
+                    "provision_selector": "lisa-route",
+                    "target_id": "agent:01:lisa-route:lisa",
+                    "label": "Lisa",
+                    "enabled": true
+                },
+                {
+                    "runtime_id": "01",
+                    "provision_selector": "claus-route",
+                    "target_id": "agent:01:claus-route:claus",
+                    "label": "Claus",
+                    "enabled": true
+                },
+                {
+                    "runtime_id": "01",
+                    "provision_selector": "hermie-route",
+                    "target_id": "agent:01:hermie-route:hermie",
+                    "label": "Hermie",
+                    "enabled": false
+                }
+            ]
+        })];
+
+        enrich_shared_bindings_with_target_status(&mut bindings);
+        let statuses = bindings[0]["target_status"].as_array().unwrap();
+        let by_label = |label: &str| {
+            statuses
+                .iter()
+                .find(|status| status["label"].as_str() == Some(label))
+                .unwrap()
+        };
+
+        assert_eq!(by_label("Lisa")["state"], "verified");
+        assert_eq!(by_label("Lisa")["grant_verified"], true);
+        assert_eq!(by_label("Claus")["state"], "grant_missing");
+        assert_eq!(by_label("Claus")["grant_verified"], false);
+        assert_eq!(by_label("Hermie")["state"], "unselected");
+        assert_eq!(by_label("Hermie")["selected"], false);
     }
 
     #[test]
