@@ -13111,8 +13111,19 @@ static SHARED_GRANT_TEST_OVERRIDES: OnceLock<Mutex<HashMap<String, SharedGrantCa
     OnceLock::new();
 
 #[cfg(test)]
+static SHARED_GRANT_TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(test)]
 fn shared_grant_test_overrides() -> &'static Mutex<HashMap<String, SharedGrantCacheEntry>> {
     SHARED_GRANT_TEST_OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn shared_grant_test_serial_lock() -> std::sync::MutexGuard<'static, ()> {
+    SHARED_GRANT_TEST_SERIAL
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap()
 }
 
 fn shared_grant_cache_key(selector: &str) -> String {
@@ -17799,6 +17810,8 @@ mod tests {
 
     #[test]
     fn shared_folder_direct_answer_respects_agent_targets() {
+        let _grant_guard = shared_grant_test_serial_lock();
+        shared_grant_test_overrides().lock().unwrap().clear();
         let home = HomeOverrideGuard::new();
         let marketing = home.root.join("marketing");
         std::fs::create_dir_all(&marketing).unwrap();
@@ -17874,6 +17887,7 @@ mod tests {
 
     #[test]
     fn shared_folder_direct_answer_fails_closed_when_selected_but_grant_missing() {
+        let _grant_guard = shared_grant_test_serial_lock();
         let home = HomeOverrideGuard::new();
         let shared = home.root.join("shared");
         std::fs::create_dir_all(&shared).unwrap();
@@ -18074,6 +18088,7 @@ mod tests {
 
     #[test]
     fn shared_folder_list_target_status_reports_verified_missing_and_unselected() {
+        let _grant_guard = shared_grant_test_serial_lock();
         {
             let mut overrides = shared_grant_test_overrides().lock().unwrap();
             overrides.clear();
