@@ -81,7 +81,7 @@ jobs:
           assert "releases/latest" in powershell_installer
           assert "(\./)?" in powershell_installer
 
-          import re
+          import json, re
 
           cargo_toml = Path("Cargo.toml").read_text()
           current_version = re.search(r'^version = "([^"]+)"$', cargo_toml, re.M).group(1)
@@ -91,6 +91,13 @@ jobs:
           assert "Not production GA" in web_index
           assert "https://get.traylinx.com/install.ps1" in web_index
           assert "https://get.traylinx.com/install.sh" in web_index
+
+          catalog = json.loads(Path("web/catalog.json").read_text())
+          assert catalog["version"] == current_version, "catalog version does not match Cargo.toml"
+          assert catalog["release_tag"] == f"v{current_version}", "catalog release_tag does not match Cargo.toml"
+          windows_alt = catalog["platforms"]["windows"]["alternative"]
+          assert f"/v{current_version}/" in windows_alt["url"], "catalog Windows fallback URL is stale"
+          assert len(windows_alt["sha256"]) == 64 and all(c in "0123456789abcdef" for c in windows_alt["sha256"]), "catalog Windows fallback sha256 is invalid"
 
           sync_script = Path("scripts/sync-tytus-os-dist.sh").read_text()
           assert "python3 - \"${dir}\"" in sync_script
