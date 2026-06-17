@@ -13056,12 +13056,12 @@ fn resolve_shared_provision_buckets_for_bindings(
     }
 
     if all_buckets {
-        for binding in bindings {
-            if let Some(bucket) = binding.get("bucket").and_then(|v| v.as_str()) {
-                if valid_sharing_bucket(bucket) {
-                    dedup.insert(bucket.to_string());
-                }
-            }
+        // Reconcile means "all buckets selected for this exact route/runtime",
+        // not "all cached bindings on this Mac". The old global-cache behavior
+        // could grant unselected folders, including registry/chat-drop folders
+        // whose target list is intentionally empty.
+        for bucket in shared_buckets_selected_for_selector_in_bindings(pod_selector, bindings) {
+            dedup.insert(bucket);
         }
     } else {
         if requested.is_empty() {
@@ -18001,15 +18001,18 @@ mod tests {
     }
 
     #[test]
-    fn shared_provision_bucket_resolution_requires_explicit_bucket_or_all_flag() {
+    fn shared_provision_bucket_resolution_requires_explicit_bucket_or_selected_reconcile_scope() {
         let bindings = vec![serde_json::json!({"bucket": "shared"})];
         assert_eq!(
             resolve_shared_provision_buckets_for_bindings(&[], false, "01", &bindings),
             Err(SharedProvisionBucketsError::NoBuckets)
         );
+        // `all_buckets=true` is a reconcile request, but it is still scoped to
+        // buckets selected for this route/runtime. A random cached binding with
+        // no target policy is not enough to grant the pod.
         assert_eq!(
-            resolve_shared_provision_buckets_for_bindings(&[], true, "01", &bindings).unwrap(),
-            vec!["shared"]
+            resolve_shared_provision_buckets_for_bindings(&[], true, "01", &bindings),
+            Err(SharedProvisionBucketsError::NoBuckets)
         );
         assert_eq!(
             resolve_shared_provision_buckets_for_bindings(
@@ -18022,6 +18025,51 @@ mod tests {
                 "Shared".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn shared_reconcile_all_buckets_excludes_unselected_global_bindings() {
+        let bindings = vec![
+            serde_json::json!({
+                "bucket": "shared",
+                "targets": [{
+                    "runtime_id": "01",
+                    "provision_selector": "lisa-route",
+                    "target_id": "agent:01:lisa-route:lisa",
+                    "enabled": true
+                }]
+            }),
+            serde_json::json!({
+                "bucket": "marketing",
+                "targets": [{
+                    "runtime_id": "01",
+                    "route_id": "lisa-route",
+                    "target_id": "agent:01:lisa-route:lisa",
+                    "enabled": true
+                }]
+            }),
+            serde_json::json!({
+                "bucket": "tytus-shared-folders-prod",
+                "slug": "chat-drop",
+                "pods_provisioned": [],
+                "targets": []
+            }),
+            serde_json::json!({
+                "bucket": "skills",
+                "targets": [{
+                    "runtime_id": "01",
+                    "provision_selector": "claus-route",
+                    "target_id": "agent:01:claus-route:claus",
+                    "enabled": true
+                }]
+            }),
+        ];
+
+        let buckets =
+            resolve_shared_provision_buckets_for_bindings(&[], true, "lisa-route", &bindings)
+                .unwrap();
+
+        assert_eq!(buckets, vec!["marketing", "shared"]);
     }
 
     #[test]

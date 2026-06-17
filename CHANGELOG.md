@@ -1,3 +1,8 @@
+## 0.7.56 - 2026-06-18
+
+- Fixes shared-folder reconcile so `all_buckets=true` means all folders selected for the specific route/runtime, not every cached binding on the Mac. This prevents dirty installs from granting unselected folders such as registry `chat-drop` during repair.
+- Adds regression coverage for duplicate `pod_id=01` route-scoped reconciliation and unselected global binding exclusion.
+
 ## 0.7.55 - 2026-06-17
 
 - Fixes shared-folder re-provisioning so refreshing one binding only preserves buckets selected for the same exact route/runtime, instead of granting every cached shared folder globally.
