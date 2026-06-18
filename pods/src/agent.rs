@@ -421,7 +421,10 @@ mod tests {
     #[test]
     fn agent_env_path_preserves_reveal_secrets_after_route_id() {
         let path = agent_env_path(AgentTarget::new("01", Some("eb2qvn3t4s")), true).unwrap();
-        assert_eq!(path, "/pod/agent/env?pod_id=01&route_id=eb2qvn3t4s&reveal=secrets");
+        assert_eq!(
+            path,
+            "/pod/agent/env?pod_id=01&route_id=eb2qvn3t4s&reveal=secrets"
+        );
     }
 
     #[test]

@@ -10,9 +10,10 @@ pub mod status;
 pub mod user_key;
 
 pub use agent::{
-    agent_env_target, agent_logs, agent_logs_target, deploy_agent, exec_in_agent, exec_in_agent_target,
-    get_agent_status, get_agent_status_target, restart_agent, restart_agent_target, stop_agent,
-    AgentDeployResult, AgentLogs, AgentStatus, AgentTarget, ExecResult,
+    agent_env_target, agent_logs, agent_logs_target, deploy_agent, exec_in_agent,
+    exec_in_agent_target, get_agent_status, get_agent_status_target, restart_agent,
+    restart_agent_target, stop_agent, AgentDeployResult, AgentLogs, AgentStatus, AgentTarget,
+    ExecResult,
 };
 pub use catalog::{fetch_catalog, AgentCatalog, AgentCatalogEntry};
 pub use client::TytusClient;

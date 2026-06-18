@@ -3379,13 +3379,19 @@
     }
     host.innerHTML = '';
     pods.forEach((p) => {
-      const id = p.pod_id || '';
-      const label = p.agent_type ? `pod-${id} (${p.agent_type})` : `pod-${id}`;
+      const selector = p.id || p.route_id || p.pod_id || '';
+      const id = p.pod_id || selector;
+      const route = p.route_id || p.id || '';
+      const labelBase = p.display_label || p.display_name || (p.agent_type ? `pod-${id} (${p.agent_type})` : `pod-${id}`);
+      const label = route && route !== id ? `${labelBase} · route ${route}` : labelBase;
       const chip = document.createElement('button');
       chip.type = 'button';
       chip.className = 'sf-pod-chip';
-      chip.dataset.podId = id;
+      chip.dataset.podId = selector;
+      if (route) chip.dataset.routeId = route;
+      chip.dataset.runtimePodId = id;
       chip.textContent = label;
+      chip.title = route ? `Shared-folder provisioning will target route ${route} (pod ${id})` : `Shared-folder provisioning will target pod ${id}`;
       chip.addEventListener('click', () => {
         chip.classList.toggle('checked');
       });

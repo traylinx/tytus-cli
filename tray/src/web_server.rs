@@ -9428,7 +9428,10 @@ fn shared_folder_bind_provision_selectors(
                 selector.clone(),
             ));
         }
-        selectors.insert(selector);
+        let Some(route_selector) = route_selector_for_selector_in_snapshot(snap, &selector) else {
+            return Err(SharedFolderBindSelectorError::Unknown(raw.clone()));
+        };
+        selectors.insert(route_selector);
     }
     Ok(selectors.into_iter().collect())
 }
@@ -11126,12 +11129,49 @@ fn handle_shared_folders_update_targets(mut request: Request, _registry: &Regist
         "pods_provisioned".to_string(),
         normalized_pod_json_array(runtime_pods.clone()),
     );
+    let snap = compute_state_snapshot();
+    let route_selectors = match shared_folder_bind_provision_selectors(&body.pods, &snap) {
+        Ok(selectors) => selectors,
+        Err(SharedFolderBindSelectorError::Invalid(p)) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({
+                    "error": format!("invalid pod selector: {:?}", p),
+                    "code": "sharing.targets.pod.invalid"
+                }),
+            );
+            return;
+        }
+        Err(SharedFolderBindSelectorError::Unknown(p)) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({
+                    "error": format!("unknown pod selector: {:?}", p),
+                    "code": "sharing.targets.pod.unknown"
+                }),
+            );
+            return;
+        }
+        Err(SharedFolderBindSelectorError::AmbiguousNumeric(p)) => {
+            respond_json(
+                request,
+                409,
+                &serde_json::json!({
+                    "error": format!("ambiguous pod selector {:?}; use route_id", p),
+                    "code": "sharing.targets.pod.ambiguous"
+                }),
+            );
+            return;
+        }
+    };
     obj.insert(
         "routes_provisioned".to_string(),
         serde_json::Value::Array(
-            body.pods
+            route_selectors
                 .iter()
-                .filter_map(|pod| canonical_pod_selector(pod))
+                .cloned()
                 .map(serde_json::Value::String)
                 .collect::<Vec<_>>(),
         ),
@@ -12996,21 +13036,57 @@ fn handle_pod_refresh_creds(request: Request, registry: &Registry, query: &str) 
             return;
         }
     };
-    let Some(pod_id) = cli_pod_id_for_selector(&selector) else {
-        respond_json(request, 404, &serde_json::json!({"error":"unknown pod"}));
-        return;
-    };
+    let snap = compute_state_snapshot();
+    let provision_selector =
+        match shared_folder_bind_provision_selectors(&[selector.clone()], &snap) {
+            Ok(mut selectors) => selectors.pop().unwrap_or_default(),
+            Err(SharedFolderBindSelectorError::Invalid(p)) => {
+                respond_json(
+                    request,
+                    400,
+                    &serde_json::json!({
+                        "error": format!("invalid pod selector: {:?}", p),
+                        "code": "sharing.refresh.pod.invalid"
+                    }),
+                );
+                return;
+            }
+            Err(SharedFolderBindSelectorError::Unknown(p)) => {
+                respond_json(
+                    request,
+                    404,
+                    &serde_json::json!({
+                        "error": format!("unknown pod selector: {:?}", p),
+                        "code": "sharing.refresh.pod.unknown"
+                    }),
+                );
+                return;
+            }
+            Err(SharedFolderBindSelectorError::AmbiguousNumeric(p)) => {
+                respond_json(
+                    request,
+                    409,
+                    &serde_json::json!({
+                        "error": format!("ambiguous pod selector {:?}; use route_id", p),
+                        "code": "sharing.refresh.pod.ambiguous"
+                    }),
+                );
+                return;
+            }
+        };
+    let runtime_pod =
+        cli_pod_id_for_selector(&provision_selector).unwrap_or_else(|| provision_selector.clone());
     let bin = resolve_garagetytus_helper("garagetytus-pod-refresh");
     let (job_id, job) = registry.create();
-    // Pass the original route selector through when the UI supplied one.
-    // Numeric pod ids are only DAM-local; in a multi-droplet Strato fleet,
-    // converting `route_id -> "01"` here makes the helper refresh the wrong
-    // droplet. The helper now resolves route_id -> pod_id + droplet itself.
-    spawn_external_command(job, bin, vec![selector.clone()]);
+    // Always pass the route-backed selector. Numeric pod ids are DAM-local; in
+    // a multi-droplet Strato fleet, converting `route_id -> "01"` here makes
+    // the helper refresh the wrong droplet. The helper resolves route_id ->
+    // pod_id + droplet itself, with numeric fallback only for legacy singletons.
+    spawn_external_command(job, bin, vec![provision_selector.clone()]);
     respond_json(
         request,
         202,
-        &serde_json::json!({"job_id": job_id, "pod": pod_id, "selector": selector}),
+        &serde_json::json!({"job_id": job_id, "pod": runtime_pod, "selector": provision_selector}),
     );
 }
 
@@ -13816,15 +13892,28 @@ fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry
         }
     };
 
-    let pod_selector = match canonical_pod_selector(&body.pod) {
-        Some(p) if pod_selector_exists(&p) => p,
-        _ => {
+    let snap = compute_state_snapshot();
+    let pod_selector = match shared_folder_bind_provision_selectors(&[body.pod.clone()], &snap) {
+        Ok(mut selectors) => selectors.pop().unwrap_or_default(),
+        Err(SharedFolderBindSelectorError::Invalid(_))
+        | Err(SharedFolderBindSelectorError::Unknown(_)) => {
             respond_json(
                 request,
                 400,
                 &serde_json::json!({
                     "error":"invalid pod",
                     "code":"sharing.provision.pod.invalid"
+                }),
+            );
+            return;
+        }
+        Err(SharedFolderBindSelectorError::AmbiguousNumeric(p)) => {
+            respond_json(
+                request,
+                409,
+                &serde_json::json!({
+                    "error": format!("ambiguous pod selector {:?}; use route_id", p),
+                    "code":"sharing.provision.pod.ambiguous"
                 }),
             );
             return;
@@ -17758,7 +17847,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(selectors, vec!["02", "0e0ah755r3", "12gy79s7g0"]);
+        // Even a unique numeric selector is normalized to the route-backed
+        // local id when the state snapshot has one. That keeps new
+        // shared-folder binds/reconciles route-scoped instead of DAM-local.
+        assert_eq!(selectors, vec!["0e0ah755r3", "12gy79s7g0", "t3n7s69day"]);
     }
 
     #[test]
