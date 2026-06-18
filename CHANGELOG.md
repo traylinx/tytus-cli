@@ -1,3 +1,11 @@
+## 0.7.57 - 2026-06-18
+
+- Bundles route-id-aware garagetytus shared-folder provisioning so duplicate numeric pod slots (Lisa/Claus/Hermie all `pod_id=01`) no longer push credentials into the wrong container or rotate each other's Garage keys.
+- Materializes shared folders canonically under `/app/workspace/Shared/<slug>` with `/app/workspace/shared` as a lowercase compatibility symlink.
+- Quarantines stale materialized folders and temp directories during reconcile, while preserving non-empty unknown folders instead of deleting user data.
+- Handles Hermes pods without an OpenClaw JSON overlay by writing the shared-folder prompt fragment to `/app/workspace/.garagetytus/shared-folders-prompt.md` instead of failing on missing `.openclaw`/`jq`.
+- Adds retry-after-transport-failure verification for large bucket materialization so successful pod-side copies are not reported as failed when the provider exec request disconnects early.
+
 ## 0.7.56 - 2026-06-18
 
 - Fixes shared-folder reconcile so `all_buckets=true` means all folders selected for the specific route/runtime, not every cached binding on the Mac. This prevents dirty installs from granting unselected folders such as registry `chat-drop` during repair.
