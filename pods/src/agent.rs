@@ -305,16 +305,30 @@ pub struct AgentEnv {
     pub vars: Vec<EnvVar>,
 }
 
+fn agent_env_path(target: AgentTarget<'_>, reveal_secrets: bool) -> Result<String, AtomekError> {
+    validate_target(target)?;
+    let mut path = format!("/pod/agent/env?pod_id={}", target.pod_id);
+    append_route_query(&mut path, target);
+    if reveal_secrets {
+        path.push_str("&reveal=secrets");
+    }
+    Ok(path)
+}
+
 pub async fn agent_env(
     client: &TytusClient,
     pod_id: &str,
     reveal_secrets: bool,
 ) -> atomek_core::Result<AgentEnv> {
-    validate_pod_id(pod_id)?;
-    let mut path = format!("/pod/agent/env?pod_id={}", pod_id);
-    if reveal_secrets {
-        path.push_str("&reveal=secrets");
-    }
+    agent_env_target(client, AgentTarget::pod(pod_id), reveal_secrets).await
+}
+
+pub async fn agent_env_target(
+    client: &TytusClient,
+    target: AgentTarget<'_>,
+    reveal_secrets: bool,
+) -> atomek_core::Result<AgentEnv> {
+    let path = agent_env_path(target, reveal_secrets)?;
     let resp = client.get_with_retry(&path).await?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -351,7 +365,7 @@ pub async fn stop_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{exec_body, validate_pod_id, validate_route_id, AgentTarget};
+    use super::{agent_env_path, exec_body, validate_pod_id, validate_route_id, AgentTarget};
 
     #[test]
     fn validate_pod_id_accepts_canonical_forms() {
@@ -396,6 +410,23 @@ mod tests {
         assert!(validate_route_id("0e0ah755").is_err());
         assert!(validate_route_id("0E0AH755R3").is_err());
         assert!(validate_route_id("../escape").is_err());
+    }
+
+    #[test]
+    fn agent_env_path_includes_route_id_when_present() {
+        let path = agent_env_path(AgentTarget::new("01", Some("0e0ah755r3")), false).unwrap();
+        assert_eq!(path, "/pod/agent/env?pod_id=01&route_id=0e0ah755r3");
+    }
+
+    #[test]
+    fn agent_env_path_preserves_reveal_secrets_after_route_id() {
+        let path = agent_env_path(AgentTarget::new("01", Some("eb2qvn3t4s")), true).unwrap();
+        assert_eq!(path, "/pod/agent/env?pod_id=01&route_id=eb2qvn3t4s&reveal=secrets");
+    }
+
+    #[test]
+    fn agent_env_path_rejects_route_injection() {
+        assert!(agent_env_path(AgentTarget::new("01", Some("0e0ah755r3&x=1")), false).is_err());
     }
 
     #[test]

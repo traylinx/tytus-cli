@@ -3460,31 +3460,22 @@ async fn cmd_agent_env(
     let (sk, auid) = get_credentials(&mut state, http).await;
     let client = atomek_pods::TytusClient::new(http, &sk, &auid);
 
-    // Resolve the pod id — same strategy as `tytus logs` / `tytus exec`:
-    // explicit --pod wins, otherwise pick the first connected pod.
-    let resolved = match pod_id {
-        Some(p) => p,
-        None => match atomek_pods::status::get_pod_status(&client).await {
-            Ok(s) => match s.pods.first() {
-                Some(p) => p.pod_id.clone(),
-                None => {
-                    eprintln!("No pods. Run: tytus connect");
-                    std::process::exit(1);
-                }
-            },
-            Err(e) => {
-                eprintln!("Failed to list pods: {}", e);
-                std::process::exit(1);
-            }
-        },
-    };
+    let target = resolve_pod_target_or_exit(pod_id.as_deref(), &state, json);
 
-    match atomek_pods::agent::agent_env(&client, &resolved, reveal_secrets).await {
+    match atomek_pods::agent::agent_env_target(
+        &client,
+        agent_target_from_resolved(&target),
+        reveal_secrets,
+    )
+    .await
+    {
         Ok(env) => {
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
+                        "pod_id": target.pod_id,
+                        "route_id": target.route_id,
                         "pod_num": env.pod_num,
                         "agent_type": env.agent_type,
                         "reveal_secrets": env.reveal_secrets,
@@ -3503,7 +3494,7 @@ async fn cmd_agent_env(
                 "Pod {} — {} — {} variable(s){}",
                 env.pod_num
                     .map(|n| format!("{:02}", n))
-                    .unwrap_or_else(|| resolved.clone()),
+                    .unwrap_or_else(|| target.pod_id.clone()),
                 env.agent_type.unwrap_or_else(|| "unknown".to_string()),
                 env.vars.len(),
                 if revealed {
