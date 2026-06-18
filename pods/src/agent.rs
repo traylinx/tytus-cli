@@ -75,6 +75,8 @@ pub struct AgentStatus {
     pub healthy: Option<bool>,
     pub uptime_seconds: Option<u64>,
     pub image: Option<String>,
+    pub image_id: Option<String>,
+    pub image_repo_digests: Option<Vec<String>>,
     pub ports: Option<AgentPorts>,
 }
 
@@ -365,7 +367,9 @@ pub async fn stop_agent(client: &TytusClient, pod_id: &str) -> atomek_core::Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_env_path, exec_body, validate_pod_id, validate_route_id, AgentTarget};
+    use super::{
+        agent_env_path, exec_body, validate_pod_id, validate_route_id, AgentStatus, AgentTarget,
+    };
 
     #[test]
     fn validate_pod_id_accepts_canonical_forms() {
@@ -410,6 +414,28 @@ mod tests {
         assert!(validate_route_id("0e0ah755").is_err());
         assert!(validate_route_id("0E0AH755R3").is_err());
         assert!(validate_route_id("../escape").is_err());
+    }
+
+    #[test]
+    fn agent_status_deserializes_image_identity_fields() {
+        let status: AgentStatus = serde_json::from_value(serde_json::json!({
+            "pod_num": 1,
+            "agent_type": "nemoclaw",
+            "container_status": "running",
+            "healthy": true,
+            "uptime_seconds": 42,
+            "image": "tytus-nemoclaw:latest",
+            "image_id": "sha256:image-live",
+            "image_repo_digests": ["tytus-nemoclaw@sha256:digest-live"],
+            "ports": {"api": 3000, "health": 3000}
+        }))
+        .unwrap();
+
+        assert_eq!(status.image_id.as_deref(), Some("sha256:image-live"));
+        assert_eq!(
+            status.image_repo_digests.as_ref().unwrap(),
+            &vec!["tytus-nemoclaw@sha256:digest-live".to_string()]
+        );
     }
 
     #[test]

@@ -9592,6 +9592,8 @@ async fn cmd_doctor_pod(http: &atomek_core::HttpClient, pod_id: String, json: bo
                         "healthy": status.healthy,
                         "uptime_seconds": status.uptime_seconds,
                         "image": status.image,
+                        "image_id": status.image_id,
+                        "image_repo_digests": status.image_repo_digests,
                         "ports": {
                             "api": status.ports.as_ref().and_then(|p| p.api),
                             "health": status.ports.as_ref().and_then(|p| p.health),
@@ -9621,6 +9623,14 @@ async fn cmd_doctor_pod(http: &atomek_core::HttpClient, pod_id: String, json: bo
             }
             if let Some(image) = status.image {
                 println!("Image: {}", image);
+            }
+            if let Some(image_id) = status.image_id {
+                println!("Image ID: {}", image_id);
+            }
+            if let Some(digests) = status.image_repo_digests {
+                if !digests.is_empty() {
+                    println!("Image digests: {}", digests.join(", "));
+                }
             }
             if let Some(ports) = status.ports {
                 let api = ports
