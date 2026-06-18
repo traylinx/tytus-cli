@@ -1,3 +1,9 @@
+## 0.7.58 - 2026-06-18
+
+- Bundles a garagetytus helper fix that quarantines stale native Tytus shared-folder watcher configs under `/app/workspace/.tytus/shared-folders/.stale/` when they no longer match the selected bindings.
+- Prevents Hermes restarts from reintroducing unselected `chat-drop` / `tytus-shared-folders-prod` credentials after route-scoped Garage provisioning.
+- Verified live against Hermie: after re-provision + restart, `/app/workspace/.garagetytus/credentials.json` still contains the seven selected buckets and `/app/workspace/Shared/` shows only `inbox`, `marketing`, `missions`, `outbox`, `shared`, `skills`, `strategy`.
+
 ## 0.7.57 - 2026-06-18
 
 - Bundles route-id-aware garagetytus shared-folder provisioning so duplicate numeric pod slots (Lisa/Claus/Hermie all `pod_id=01`) no longer push credentials into the wrong container or rotate each other's Garage keys.
