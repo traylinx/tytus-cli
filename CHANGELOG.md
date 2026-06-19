@@ -1,3 +1,9 @@
+## 0.7.60 - 2026-06-19
+
+- Embeds TytusOS `v1.0.83-juli3ta-catalog-v64`, so Featured Apps and app self-update checks resolve JULI3TA `0.3.25` through catalog `catalog-v64`.
+- Includes the tray launch hardening that avoids tray self-spawn during CLI exec probes.
+- Caches yt-dlp version status in the tray music bridge to reduce repeated startup probes during JULI3TA music playback.
+
 ## 0.7.59 - 2026-06-19
 
 - Lets `tytus agent env` and shared-folder tray operations target pods by canonical route id, while ambiguous duplicate numeric `pod_id` selectors fail closed.
