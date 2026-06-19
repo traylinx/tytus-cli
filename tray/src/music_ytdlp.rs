@@ -14,6 +14,7 @@ static SEARCH_CACHE: OnceLock<RwLock<HashMap<String, CacheEntry<Vec<MusicSearchR
     OnceLock::new();
 static STREAM_CACHE: OnceLock<RwLock<HashMap<String, CacheEntry<MusicStreamInfo>>>> =
     OnceLock::new();
+static VERSION_CACHE: OnceLock<RwLock<HashMap<String, CacheEntry<String>>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 struct CacheEntry<T: Clone> {
@@ -183,6 +184,10 @@ fn get_binary_path() -> Result<PathBuf, String> {
 }
 
 pub fn binary_version(path: &PathBuf) -> Option<String> {
+    let cache_key = path.to_string_lossy().to_string();
+    if let Some(version) = cached(&VERSION_CACHE, &cache_key, Duration::from_secs(6 * 60 * 60)) {
+        return Some(version);
+    }
     let out = Command::new(path).arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
@@ -191,6 +196,7 @@ pub fn binary_version(path: &PathBuf) -> Option<String> {
     if version.is_empty() {
         None
     } else {
+        store_cache(&VERSION_CACHE, cache_key, version.clone());
         Some(version)
     }
 }
