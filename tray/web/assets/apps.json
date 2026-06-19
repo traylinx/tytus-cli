@@ -375,6 +375,48 @@
     }
   },
   {
+    "id": "tytus-chat",
+    "name": "Tytus Chat",
+    "description": "Your private team chat where your Tytus pods are teammates — DM or @-mention them and replies run on your own pod. Branded desktop client for macOS.",
+    "category": "Communication",
+    "icon": "MessageCircle",
+    "url": "https://chat.traylinx.com",
+    "docs": "https://docs.traylinx.com",
+    "platforms": [
+      "macos"
+    ],
+    "detect": {
+      "macos": [
+        "Tytus Chat"
+      ]
+    },
+    "install": {
+      "macos": "Visit https://chat.traylinx.com to download the Tytus Chat desktop app"
+    },
+    "launch": {
+      "macos": {
+        "kind": "app",
+        "target": "Tytus Chat"
+      }
+    },
+    "installers": [
+      {
+        "os": "macos",
+        "arch": "universal",
+        "kind": "url",
+        "label": "Get Tytus Chat for macOS",
+        "url": "https://chat.traylinx.com"
+      }
+    ],
+    "runtime": {
+      "macos": {
+        "process_names": [
+          "Tytus Chat"
+        ]
+      }
+    }
+  },
+  {
     "id": "telegram",
     "name": "Telegram Desktop",
     "description": "Fast, secure messaging app. Cloud-based, syncs across all your devices. Supports groups, channels, bots, and file sharing.",
