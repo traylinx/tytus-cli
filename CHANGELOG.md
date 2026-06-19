@@ -1,3 +1,9 @@
+## 0.7.59 - 2026-06-19
+
+- Lets `tytus agent env` and shared-folder tray operations target pods by canonical route id, while ambiguous duplicate numeric `pod_id` selectors fail closed.
+- Shows DAM image identity in `tytus doctor --pod <route_id> --json` when the route exposes `image_id` and repository digests, giving rollout scripts route-scoped image proof.
+- Honors long `tytus exec --timeout` requests through the CLI and Provider request path so canary checks can prove long-agent completion instead of timing out at the client edge.
+
 ## 0.7.58 - 2026-06-18
 
 - Bundles a garagetytus helper fix that quarantines stale native Tytus shared-folder watcher configs under `/app/workspace/.tytus/shared-folders/.stale/` when they no longer match the selected bindings.
