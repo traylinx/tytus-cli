@@ -2786,7 +2786,18 @@ pub(crate) fn resolve_tytus_bin() -> std::path::PathBuf {
         if let Some(dir) = exe.parent() {
             let sibling = dir.join("tytus");
             if sibling.is_file() {
-                return sibling;
+                let sibling_is_current_exe = match (exe.canonicalize(), sibling.canonicalize()) {
+                    (Ok(exe_path), Ok(sibling_path)) => exe_path == sibling_path,
+                    _ => false,
+                };
+                // macOS app bundles ship `Contents/MacOS/Tytus`. On the
+                // default case-insensitive APFS volume, probing sibling
+                // `tytus` resolves right back to the GUI binary. Spawning the
+                // GUI as if it were the CLI exits cleanly with empty stdout,
+                // which makes JSON callers report bogus parse-EOF failures.
+                if !sibling_is_current_exe {
+                    return sibling;
+                }
             }
         }
     }

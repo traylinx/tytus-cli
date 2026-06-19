@@ -592,7 +592,23 @@ fn run_tytus_exec_shell(
                 let stderr_raw = String::from_utf8_lossy(&output.stderr).to_string();
                 if output.status.success() {
                     let parsed = parse_tytus_exec_json_output(&stdout_raw)
-                        .map_err(|e| format!("failed to parse tytus exec json: {}", e))?;
+                        .map_err(|e| {
+                            let stderr_tail = stderr_raw
+                                .chars()
+                                .rev()
+                                .take(240)
+                                .collect::<String>()
+                                .chars()
+                                .rev()
+                                .collect::<String>();
+                            format!(
+                                "failed to parse tytus exec json: {}; bin={}; stdout_len={}; stderr_tail={}",
+                                e,
+                                bin.display(),
+                                stdout_raw.len(),
+                                stderr_tail.trim()
+                            )
+                        })?;
                     let exit_code = parsed
                         .get("exit_code")
                         .and_then(|v| v.as_i64())
