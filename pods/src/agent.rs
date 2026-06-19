@@ -1,6 +1,7 @@
 use crate::client::TytusClient;
 use atomek_core::AtomekError;
 use serde::Deserialize;
+use std::time::Duration;
 
 /// Strict pod-id validator for any function that interpolates `pod_id`
 /// into a query string. Pod ids on this product are always
@@ -212,6 +213,7 @@ pub async fn exec_in_agent_target(
     let body = exec_body(target, command, timeout)?;
     let resp = client
         .post("/pod/agent/exec")
+        .timeout(Duration::from_secs(u64::from(timeout).saturating_add(30)))
         .json(&body)
         .send()
         .await
