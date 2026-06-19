@@ -814,7 +814,7 @@ enum Commands {
         /// Pod ID (defaults to first pod)
         #[arg(short, long)]
         pod: Option<String>,
-        /// Timeout in seconds (default: 30, max: 120)
+        /// Timeout in seconds (default: 30, max: 900)
         #[arg(short, long, default_value = "30")]
         timeout: u32,
     },
@@ -4500,7 +4500,7 @@ async fn cmd_exec(
         &client,
         agent_target_from_resolved(&target),
         &cmd_str,
-        timeout.min(120),
+        timeout.clamp(1, 900),
     )
     .await
     {
