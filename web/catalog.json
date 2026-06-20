@@ -1,7 +1,7 @@
 {
-  "version": "0.7.61",
-  "release_tag": "v0.7.61",
-  "updated_at": "2026-06-19",
+  "version": "0.7.62",
+  "release_tag": "v0.7.62",
+  "updated_at": "2026-06-20",
   "platforms": {
     "macos": {
       "label": "macOS",
@@ -36,8 +36,8 @@
       "alternative": {
         "available": true,
         "kind": "zip",
-        "url": "https://github.com/traylinx/tytus-cli/releases/download/v0.7.61/tytus-windows-x86_64.zip",
-        "sha256": "0298093552d0849b17f8ea35e47a4c76e883be28a3d9977fbd51454cbe15c6e4"
+        "url": "https://github.com/traylinx/tytus-cli/releases/download/v0.7.62/tytus-windows-x86_64.zip",
+        "sha256": "3fb0e2a119e242bad4b1afb12305af80b1bfc0e211d24d4db0174d7674a8ed89"
       },
       "extra": "PowerShell installer first; x86_64 and arm64 zip fallbacks are on the GitHub release for locked-down machines"
     }
