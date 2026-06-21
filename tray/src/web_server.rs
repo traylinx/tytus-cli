@@ -4607,8 +4607,6 @@ struct HelpQueryBody {
     #[serde(default)]
     min_score: Option<f64>,
     #[serde(default)]
-    app: Option<String>,
-    #[serde(default)]
     source: Option<Vec<String>>,
 }
 
@@ -4703,15 +4701,41 @@ fn respond_help_bridge_error(request: Request, err: HelpBridgeError) {
     }
 }
 
+// Ask-Tytus-Docs routes through the Provider's /docs/* proxy, which re-presents
+// our Sentinel A2A identity to Cortex. The daemon already uses TYTUS_PROVIDER_URL
+// for pod operations; an env override is allowed for dev.
+fn docs_proxy_base() -> String {
+    std::env::var("TYTUS_DOCS_PROXY_URL")
+        .unwrap_or_else(|_| TYTUS_PROVIDER_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+// (X-Agent-Secret-Token, X-Agent-User-Id) — the same Sentinel A2A credentials the
+// daemon presents for pod operations. Absent (not signed in) → degraded → the
+// Help app falls back to bundled docs.
+fn docs_bridge_auth() -> Result<(String, String), HelpBridgeError> {
+    read_provider_auth().map_err(|_| HelpBridgeError::MissingToken)
+}
+
+// Degradation contract: the only docs upstream is the Provider's /docs/* proxy
+// (the cloud Cortex isn't directly reachable from the desktop, and the Provider
+// has no /memory/search), so any non-2xx — including a 404 while Cortex /docs/*
+// is mid-rollout — degrades to the Help app's bundled docs rather than a live
+// fallback. The prior cortex_memory_search fallback depended on a keychain token
+// nothing ever wrote, so it never actually served results. The matching tytus-cli
+// release is gated on the Provider + Cortex /docs/* being deployed, so end users
+// on that build always have a live upstream.
 fn cortex_docs_sources() -> Result<serde_json::Value, HelpBridgeError> {
-    let token = cortex_docs_token()?;
+    let (secret, agent_user_id) = docs_bridge_auth()?;
     let client = cortex_docs_client()?;
-    let url = format!("{}/docs/sources", cortex_api_base());
+    let url = format!("{}/docs/sources", docs_proxy_base());
     let resp = client
         .get(&url)
-        .bearer_auth(token)
+        .header("X-Agent-Secret-Token", &secret)
+        .header("X-Agent-User-Id", &agent_user_id)
         .send()
-        .map_err(|e| HelpBridgeError::BadGateway(format!("cortex_unreachable: {e}")))?;
+        .map_err(|e| HelpBridgeError::BadGateway(format!("docs_proxy_unreachable: {e}")))?;
     let status = resp.status().as_u16();
     let body = resp
         .json::<serde_json::Value>()
@@ -4729,209 +4753,67 @@ fn cortex_docs_sources() -> Result<serde_json::Value, HelpBridgeError> {
     } else {
         Err(HelpBridgeError::Remote(
             status,
-            "cortex_sources_failed".into(),
+            "docs_sources_failed".into(),
         ))
     }
 }
 
 fn cortex_docs_answer(body: &HelpQueryBody) -> Result<serde_json::Value, HelpBridgeError> {
-    let token = cortex_docs_token()?;
+    let (secret, agent_user_id) = docs_bridge_auth()?;
     let client = cortex_docs_client()?;
-    let url = format!("{}/docs/answer", cortex_api_base());
+    let url = format!("{}/docs/answer", docs_proxy_base());
     let resp = client
         .post(&url)
-        .bearer_auth(&token)
+        .header("X-Agent-Secret-Token", &secret)
+        .header("X-Agent-User-Id", &agent_user_id)
         .json(&serde_json::json!({
             "query": body.query,
             "k": clamp_help_k(body.k),
             "min_score": body.min_score.unwrap_or(0.45),
-            "app": body.app,
             "source": body.source,
         }))
         .send()
-        .map_err(|e| HelpBridgeError::BadGateway(format!("cortex_unreachable: {e}")))?;
+        .map_err(|e| HelpBridgeError::BadGateway(format!("docs_proxy_unreachable: {e}")))?;
     let status = resp.status().as_u16();
     let remote_body = resp
         .json::<serde_json::Value>()
         .unwrap_or_else(|_| serde_json::json!({}));
     if (200..300).contains(&status) {
-        return Ok(remote_body);
-    }
-    if status != 404 {
-        return Err(HelpBridgeError::Remote(
-            status,
-            "cortex_answer_failed".into(),
-        ));
-    }
-
-    let search = cortex_memory_search(body, &token)?;
-    let results = search
-        .get("results")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let answer = if results.is_empty() {
-        "No live Cortex documentation matches yet. Showing bundled docs fallback.".to_string()
+        Ok(remote_body)
     } else {
-        let mut lines = vec!["Relevant Tytus documentation from Cortex:".to_string()];
-        for (idx, item) in results.iter().take(5).enumerate() {
-            let title = item
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Tytus doc");
-            let snippet = item
-                .get("snippet")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .chars()
-                .take(260)
-                .collect::<String>();
-            lines.push(format!("{}. {} — {}", idx + 1, title, snippet));
-        }
-        lines.join("\n")
-    };
-    Ok(serde_json::json!({
-        "status":"ok",
-        "answer": answer,
-        "citations": results,
-        "results": results,
-        "model":"cortex-memory-search",
-        "api_version":"local-proxy-v1",
-        "corpus_hash": search.get("corpus_hash").cloned().unwrap_or(serde_json::Value::Null),
-    }))
+        Err(HelpBridgeError::Remote(status, "docs_answer_failed".into()))
+    }
 }
 
 fn cortex_docs_search(body: &HelpQueryBody) -> Result<serde_json::Value, HelpBridgeError> {
-    let token = cortex_docs_token()?;
+    let (secret, agent_user_id) = docs_bridge_auth()?;
     let client = cortex_docs_client()?;
-    let url = format!("{}/docs/search", cortex_api_base());
+    let url = format!("{}/docs/search", docs_proxy_base());
     let resp = client
         .post(&url)
-        .bearer_auth(&token)
+        .header("X-Agent-Secret-Token", &secret)
+        .header("X-Agent-User-Id", &agent_user_id)
         .json(&serde_json::json!({
             "query": body.query,
             "k": clamp_help_k(body.k),
             "min_score": body.min_score.unwrap_or(0.45),
-            "app": body.app,
             "source": body.source,
         }))
         .send()
-        .map_err(|e| HelpBridgeError::BadGateway(format!("cortex_unreachable: {e}")))?;
+        .map_err(|e| HelpBridgeError::BadGateway(format!("docs_proxy_unreachable: {e}")))?;
     let status = resp.status().as_u16();
     let remote_body = resp
         .json::<serde_json::Value>()
         .unwrap_or_else(|_| serde_json::json!({}));
     if (200..300).contains(&status) {
-        return Ok(remote_body);
+        Ok(remote_body)
+    } else {
+        Err(HelpBridgeError::Remote(status, "docs_search_failed".into()))
     }
-    if status == 404 {
-        return cortex_memory_search(body, &token);
-    }
-    Err(HelpBridgeError::Remote(
-        status,
-        "cortex_search_failed".into(),
-    ))
-}
-
-fn cortex_memory_search(
-    body: &HelpQueryBody,
-    token: &str,
-) -> Result<serde_json::Value, HelpBridgeError> {
-    let client = cortex_docs_client()?;
-    let url = format!(
-        "{}/memory/search?query={}&limit={}&min_similarity={}&app_id=traylinx",
-        cortex_api_base(),
-        urlencoding::encode(&body.query),
-        clamp_help_k(body.k),
-        body.min_score.unwrap_or(0.45),
-    );
-    let resp = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .map_err(|e| HelpBridgeError::BadGateway(format!("cortex_unreachable: {e}")))?;
-    let status = resp.status().as_u16();
-    let raw = resp
-        .json::<serde_json::Value>()
-        .unwrap_or_else(|_| serde_json::json!({}));
-    if !(200..300).contains(&status) {
-        return Err(HelpBridgeError::Remote(
-            status,
-            "cortex_memory_search_failed".into(),
-        ));
-    }
-    let results = raw
-        .get("results")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .map(normalize_cortex_result)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Ok(serde_json::json!({
-        "status":"ok",
-        "query": body.query,
-        "results": results,
-        "total": results.len(),
-        "api_version":"local-proxy-v1",
-        "corpus_hash": std::env::var("TYTUS_CORTEX_DOCS_CORPUS_HASH").unwrap_or_else(|_| "remote-memory-search".into()),
-    }))
-}
-
-fn normalize_cortex_result(item: &serde_json::Value) -> serde_json::Value {
-    let meta = item.get("metadata").and_then(|v| v.as_object());
-    let meta_str =
-        |k: &str| -> Option<&str> { meta.and_then(|m| m.get(k)).and_then(|v| v.as_str()) };
-    let title = item
-        .get("title")
-        .and_then(|v| v.as_str())
-        .or_else(|| meta_str("title"))
-        .or_else(|| meta_str("doc_title"))
-        .unwrap_or("Tytus documentation");
-    let snippet = item
-        .get("snippet")
-        .and_then(|v| v.as_str())
-        .or_else(|| item.get("content").and_then(|v| v.as_str()))
-        .or_else(|| item.get("text").and_then(|v| v.as_str()))
-        .or_else(|| item.get("memory").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    let doc_id = item
-        .get("doc_id")
-        .and_then(|v| v.as_str())
-        .or_else(|| meta_str("doc_id"))
-        .or_else(|| meta_str("slug"))
-        .unwrap_or(title);
-    let score = item
-        .get("score")
-        .and_then(|v| v.as_f64())
-        .or_else(|| item.get("similarity").and_then(|v| v.as_f64()))
-        .or_else(|| {
-            item.get("distance")
-                .and_then(|v| v.as_f64())
-                .map(|d| 1.0 - d)
-        });
-    serde_json::json!({
-        "title": title,
-        "snippet": snippet,
-        "doc_id": doc_id,
-        "anchor": item.get("anchor").and_then(|v| v.as_str()).or_else(|| meta_str("anchor")),
-        "url": item.get("url").and_then(|v| v.as_str()).or_else(|| item.get("source_url").and_then(|v| v.as_str())).or_else(|| meta_str("url")).or_else(|| meta_str("source_url")),
-        "source": item.get("source").and_then(|v| v.as_str()).or_else(|| meta_str("source")),
-        "score": score,
-    })
 }
 
 fn clamp_help_k(k: Option<u8>) -> u8 {
     k.unwrap_or(5).clamp(1, 20)
-}
-
-fn cortex_api_base() -> String {
-    std::env::var("TYTUS_CORTEX_API_URL")
-        .unwrap_or_else(|_| "https://api.makakoo.com/ma-cortex/v1/api/v1".to_string())
-        .trim_end_matches('/')
-        .to_string()
 }
 
 fn cortex_docs_client() -> Result<reqwest::blocking::Client, HelpBridgeError> {
@@ -4939,33 +4821,6 @@ fn cortex_docs_client() -> Result<reqwest::blocking::Client, HelpBridgeError> {
         .timeout(std::time::Duration::from_secs(12))
         .build()
         .map_err(|e| HelpBridgeError::BadGateway(format!("client_build_failed: {e}")))
-}
-
-fn cortex_docs_token() -> Result<String, HelpBridgeError> {
-    if let Ok(v) = std::env::var("TYTUS_CORTEX_DOCS_TOKEN") {
-        let v = v.trim().to_string();
-        if !v.is_empty() {
-            return Ok(v);
-        }
-    }
-    if let Ok(v) = std::env::var("TRAYLINX_CORTEX_TOKEN") {
-        let v = v.trim().to_string();
-        if !v.is_empty() {
-            return Ok(v);
-        }
-    }
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = keyring::Entry::new("com.traylinx.atomek", "tytus-daemon-docs")
-            .map_err(|e| e.to_string())
-            .and_then(|entry| entry.get_password().map_err(|e| e.to_string()));
-        let _ = tx.send(result);
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-        Ok(Ok(token)) if !token.trim().is_empty() => Ok(token),
-        _ => Err(HelpBridgeError::MissingToken),
-    }
 }
 
 // ── /api/catalog ──────────────────────────────────────────────
