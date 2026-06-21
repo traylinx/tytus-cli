@@ -156,6 +156,11 @@ struct Job {
     /// `None` means "no running process" (job is queued / failed to
     /// spawn / already exited) — cancel becomes a no-op.
     child_pid: Option<u32>,
+    /// Optional daemon-local mutex key for non-pod jobs that still must not
+    /// overlap. Shared-folder binds mutate the same rclone workdir, lock file,
+    /// launchd plist, and sidecar; letting two run at once makes the second
+    /// explode with rclone's "prior lock file found" instead of a useful 409.
+    job_key: Option<String>,
     /// Set when push_event has dropped a Log line because the event
     /// vec is at MAX_EVENTS. The first such drop emits a single
     /// truncation sentinel; subsequent drops are silent. This keeps
@@ -171,6 +176,7 @@ impl Job {
             finished: false,
             pod_id: None,
             child_pid: None,
+            job_key: None,
             log_capped: false,
         }
     }
@@ -180,6 +186,17 @@ impl Job {
             finished: false,
             pod_id: Some(pod_id),
             child_pid: None,
+            job_key: None,
+            log_capped: false,
+        }
+    }
+    fn new_keyed(key: String) -> Self {
+        Job {
+            events: Vec::new(),
+            finished: false,
+            pod_id: None,
+            child_pid: None,
+            job_key: Some(key),
             log_capped: false,
         }
     }
@@ -233,6 +250,23 @@ impl Registry {
         }
         let id = random_job_id();
         let job = Arc::new(Mutex::new(Job::new_pod(pod_id.to_string())));
+        guard.insert(id.clone(), job.clone());
+        Ok((id, job))
+    }
+
+    /// Non-pod constructor with one-running-job-per-key semantics. Used for
+    /// shared-folder binds where the resource is the local folder + bucket, not
+    /// a pod row.
+    fn create_keyed(&self, key: &str) -> Result<(String, Arc<Mutex<Job>>), String> {
+        let mut guard = self.inner.lock().unwrap();
+        for job in guard.values() {
+            let j = job.lock().unwrap();
+            if j.job_key.as_deref() == Some(key) && !j.finished {
+                return Err(key.to_string());
+            }
+        }
+        let id = random_job_id();
+        let job = Arc::new(Mutex::new(Job::new_keyed(key.to_string())));
         guard.insert(id.clone(), job.clone());
         Ok((id, job))
     }
@@ -10751,6 +10785,80 @@ fn shared_bindings_cache_dir() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".cache/garagetytus/bisync"))
 }
 
+fn shared_folder_bind_safe_name(local_path: &str, bucket: &str) -> String {
+    let base = Path::new(local_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(bucket);
+    format!("{}-{}", bucket, base)
+        .chars()
+        .flat_map(|c| c.to_lowercase())
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn shared_folder_bind_job_key(local_path: &str, bucket: &str) -> String {
+    let canonical = Path::new(local_path)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(local_path))
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    format!("shared-folder-bind:{}:{}", bucket, canonical)
+}
+
+fn shared_folder_bind_workdir(local_path: &str, bucket: &str) -> Option<PathBuf> {
+    shared_bindings_cache_dir()
+        .map(|dir| dir.join(shared_folder_bind_safe_name(local_path, bucket)))
+}
+
+#[derive(Debug, Clone)]
+struct SharedFolderBindLock {
+    path: PathBuf,
+    pid: Option<i32>,
+    active: bool,
+    expires: Option<String>,
+}
+
+fn shared_folder_bind_lock(workdir: &Path) -> Option<SharedFolderBindLock> {
+    let entries = std::fs::read_dir(workdir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".lck") {
+            continue;
+        }
+
+        let raw = std::fs::read_to_string(&path).unwrap_or_default();
+        let parsed = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_default();
+        let pid = parsed
+            .get("PID")
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.parse::<i32>().ok());
+        let active = pid.is_some_and(process_exists);
+        let expires = parsed
+            .get("TimeExpires")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        return Some(SharedFolderBindLock {
+            path,
+            pid,
+            active,
+            expires,
+        });
+    }
+    None
+}
+
 fn find_shared_binding_sidecar(bucket: &str, local_path: &str) -> Option<PathBuf> {
     let dir = shared_bindings_cache_dir()?;
     let entries = std::fs::read_dir(dir).ok()?;
@@ -12829,6 +12937,36 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
         return;
     }
 
+    if let Some(workdir) = shared_folder_bind_workdir(&body.local_path, &body.bucket) {
+        if let Some(lock) = shared_folder_bind_lock(&workdir) {
+            respond_json(
+                request,
+                409,
+                &serde_json::json!({
+                    "error": if lock.active {
+                        format!(
+                            "shared-folder bind is already running for {:?}; wait for PID {:?} to finish, then retry",
+                            body.bucket, lock.pid
+                        )
+                    } else {
+                        format!(
+                            "shared-folder bind has a stale rclone lock for {:?}; retry after it expires or remove it only after verifying no rclone is running",
+                            body.bucket
+                        )
+                    },
+                    "code": "shared_folders.bind.rclone_lock",
+                    "bucket": body.bucket.clone(),
+                    "local_path": body.local_path.clone(),
+                    "lock_file": lock.path.to_string_lossy(),
+                    "lock_pid": lock.pid,
+                    "lock_active": lock.active,
+                    "lock_expires": lock.expires,
+                }),
+            );
+            return;
+        }
+    }
+
     // The Mac-side rclone remote points at Garage through the active local
     // WireGuard peer. Prefer the live tunnel gateway (for example 10.18.x.1)
     // and fall back to the historical stable alias. If the tunnel is
@@ -12864,7 +13002,23 @@ fn handle_shared_folders_bind(mut request: Request, registry: &Registry) {
     }
 
     let bin = resolve_garagetytus_helper("garagetytus-folder-bind");
-    let (job_id, job) = registry.create();
+    let bind_job_key = shared_folder_bind_job_key(&body.local_path, &body.bucket);
+    let (job_id, job) = match registry.create_keyed(&bind_job_key) {
+        Ok(pair) => pair,
+        Err(_) => {
+            respond_json(
+                request,
+                409,
+                &serde_json::json!({
+                    "error": "shared-folder bind is already running for this local folder and bucket; wait for it to finish, then retry",
+                    "code": "shared_folders.bind.already_running",
+                    "bucket": body.bucket.clone(),
+                    "local_path": body.local_path.clone(),
+                }),
+            );
+            return;
+        }
+    };
     spawn_external_command_with_options(
         job,
         bin,
@@ -16995,6 +17149,26 @@ mod tests {
         assert!(r.get(&id).is_some());
     }
 
+    #[test]
+    fn registry_keyed_jobs_reject_duplicate_active_bind() {
+        let r = Registry::new();
+        let (_id, job) = r
+            .create_keyed("shared-folder-bind:shared:/tmp/shared")
+            .unwrap();
+
+        assert!(r
+            .create_keyed("shared-folder-bind:shared:/tmp/shared")
+            .is_err());
+        assert!(r
+            .create_keyed("shared-folder-bind:other:/tmp/shared")
+            .is_ok());
+
+        push_event(&job, JobEvent::Exit { code: 0 });
+        assert!(r
+            .create_keyed("shared-folder-bind:shared:/tmp/shared")
+            .is_ok());
+    }
+
     fn hdr(name: &str, value: &str) -> Header {
         Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
     }
@@ -18177,6 +18351,18 @@ mod tests {
         assert!(!valid_sharing_bucket("shared-"));
         assert!(!valid_sharing_bucket("sh"));
         assert!(!valid_sharing_bucket("shared_bucket"));
+    }
+
+    #[test]
+    fn shared_folder_bind_safe_name_matches_helper_shape() {
+        assert_eq!(
+            shared_folder_bind_safe_name("/Users/sebastian/freelance-office/", "freelance-office"),
+            "freelance-office-freelance-office"
+        );
+        assert_eq!(
+            shared_folder_bind_safe_name("/tmp/My Folder", "client.docs"),
+            "client.docs-my-folder"
+        );
     }
 
     #[test]
