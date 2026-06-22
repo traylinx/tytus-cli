@@ -1,3 +1,10 @@
+## 0.7.70 - 2026-06-22
+
+- Makes shared-folder binding return as soon as the binding is registered, then runs initial file sync in the background so users no longer wait on long `rclone bisync --resync` jobs.
+- Bundles the new `garagetytus-folder-sync` helper with default excludes for dependency caches, safe stale-lock handling, manual `Sync now` / `Retry sync`, and a 10-minute automatic cooldown.
+- Migrates legacy per-folder LaunchAgents from direct `rclone` commands to the shared helper at daemon startup, preserving registry remotes such as `tytusaws:<folder-prefix>`.
+- Embeds TytusOS `v1.0.84-shared-folder-background-sync` with shared-folder sync state badges, manual retry controls, and grant-missing reprovision repair.
+
 ## 0.7.60 - 2026-06-19
 
 - Embeds TytusOS `v1.0.83-juli3ta-catalog-v64`, so Featured Apps and app self-update checks resolve JULI3TA `0.3.25` through catalog `catalog-v64`.

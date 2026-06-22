@@ -3242,6 +3242,7 @@ pub fn start() -> Option<u16> {
     // request. Idempotent (OnceLock).
     daemon_started_at();
     music_ytdlp_setup::start_background_install();
+    migrate_legacy_shared_folder_launch_agents_best_effort();
 
     let env_port = std::env::var("TYTUS_TRAY_PORT")
         .ok()
@@ -4501,6 +4502,9 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Post, "/api/shared-folders/run-streamed") => {
             handle_shared_folders_run_streamed(request, &registry, &query);
+        }
+        (Method::Post, "/api/shared-folders/sync-now") => {
+            handle_shared_folders_sync_now(request, &registry);
         }
         (Method::Post, "/api/shared-folders/open") => {
             handle_shared_folders_open(request);
@@ -6818,150 +6822,132 @@ fn parse_last_event_id(headers: &[Header]) -> usize {
 }
 
 fn sse_response(request: Request, job: Arc<Mutex<Job>>, resume_from: usize) {
-    // Strategy: spawn a thread that reads events from the job, serializes
-    // them to SSE frames, and writes them into a pipe whose read half we
-    // hand to tiny_http as the response body. The response header sends
-    // "Content-Type: text/event-stream" and no Content-Length so the
-    // browser keeps the connection open until we close the pipe.
-
-    let (rx, tx) = pipe();
-
-    thread::spawn(move || {
-        let mut cursor = resume_from;
-        let mut tx = tx;
-        loop {
-            let (events_snapshot, finished) = {
-                let j = job.lock().unwrap();
-                (j.events.len(), j.finished)
-            };
-            while cursor < events_snapshot {
-                let frame = {
-                    let j = job.lock().unwrap();
-                    // The `id: N\n` prefix is what makes Last-Event-ID
-                    // round-trip work — EventSource parses it and sends
-                    // the last seen value back on its next reconnect.
-                    match &j.events[cursor] {
-                        JobEvent::Log(line) => format!(
-                            "id: {}\nevent: log\ndata: {}\n\n",
-                            cursor,
-                            line.replace('\n', "\\n"),
-                        ),
-                        JobEvent::Done { payload } => format!(
-                            "id: {}\nevent: done\ndata: {}\n\n",
-                            cursor,
-                            payload.replace('\n', " "),
-                        ),
-                        JobEvent::Fail { message } => format!(
-                            "id: {}\nevent: fail\ndata: {}\n\n",
-                            cursor,
-                            message.replace('\n', " "),
-                        ),
-                        JobEvent::Exit { code } => format!(
-                            "id: {}\nevent: exit\ndata: {{\"code\":{}}}\n\n",
-                            cursor, code,
-                        ),
-                    }
-                };
-                if tx.write_all(frame.as_bytes()).is_err() {
-                    return;
-                }
-                cursor += 1;
-            }
-            if finished && cursor >= events_snapshot {
-                break;
-            }
-            thread::sleep(std::time::Duration::from_millis(150));
-        }
-        // Ensure the browser sees EOF and triggers the "done" handler.
-        drop(tx);
-    });
-
     let resp = Response::empty(StatusCode(200))
         .with_header(header("Content-Type", "text/event-stream"))
         .with_header(header("Cache-Control", "no-cache"))
         .with_header(header("X-Accel-Buffering", "no"))
-        .with_data(rx, None)
-        // CRITICAL for SSE streaming: tiny_http's default chunked
-        // threshold is 32KB — when the body length is unknown AND
-        // total output is shorter, it buffers the ENTIRE response
-        // before sending to compute Content-Length, which defeats
-        // streaming entirely (browser gets all frames at once at
-        // process exit). Setting threshold=0 forces chunked transfer
-        // encoding from the first byte: each `read()` from the pipe
-        // produces a chunk that flushes to the wire immediately.
-        // Verified via `curl -sN ... | timestamper` — without this,
-        // all SSE frames arrive within a single second; with it, they
-        // arrive as the subprocess emits them.
+        .with_data(JobSseReader::new(job, resume_from), None)
+        // CRITICAL for SSE streaming: tiny_http writes headers through a
+        // buffered socket and then copies the response body. If the body
+        // reader blocks before yielding its first bytes, the browser may not
+        // see headers, EventSource.onopen never fires, and a quiet rclone
+        // bind is mislabeled as `lost`. JobSseReader returns `: connected`
+        // on its very first read, then emits heartbeat comments while the
+        // child is quiet.
         .with_chunked_threshold(0);
     let _ = request.respond(resp);
 }
 
-/// Simple in-memory pipe — writer side pushes bytes, reader side pulls
-/// them for tiny_http's response body. Backed by a `VecDeque<u8>` under
-/// a mutex; blocks the reader until the writer produces more or closes.
-fn pipe() -> (PipeReader, PipeWriter) {
-    let shared = Arc::new(Mutex::new(PipeState {
-        buf: Vec::new(),
-        closed: false,
-    }));
-    let reader = PipeReader {
-        state: shared.clone(),
-    };
-    let writer = PipeWriter { state: shared };
-    (reader, writer)
+struct JobSseReader {
+    job: Arc<Mutex<Job>>,
+    cursor: usize,
+    pending: Vec<u8>,
+    sent_connected: bool,
+    last_emit: std::time::Instant,
 }
 
-struct PipeState {
-    buf: Vec<u8>,
-    closed: bool,
+// tiny_http wraps the socket in a 1024-byte BufWriter, then wraps that in
+// chunked_transfer::Encoder, whose default chunk size is 8192 bytes. SSE jobs
+// do not end until the child process exits, so small initial comments/logs can
+// sit in memory for minutes. Padding comment frames past the chunk buffer
+// forces the first byte and every quiet heartbeat onto the socket immediately.
+// EventSource ignores comment lines.
+const SSE_FLUSH_PADDING_BYTES: usize = 9 * 1024;
+
+fn sse_comment_frame(label: &str) -> Vec<u8> {
+    format!(": {label} {}\n\n", ".".repeat(SSE_FLUSH_PADDING_BYTES)).into_bytes()
 }
 
-struct PipeReader {
-    state: Arc<Mutex<PipeState>>,
+impl JobSseReader {
+    fn new(job: Arc<Mutex<Job>>, cursor: usize) -> Self {
+        Self {
+            job,
+            cursor,
+            pending: Vec::new(),
+            sent_connected: false,
+            last_emit: std::time::Instant::now(),
+        }
+    }
+
+    fn next_frame(&mut self) -> Option<Vec<u8>> {
+        if !self.sent_connected {
+            self.sent_connected = true;
+            self.last_emit = std::time::Instant::now();
+            return Some(sse_comment_frame("connected"));
+        }
+
+        let (events_snapshot, finished) = {
+            let j = self.job.lock().unwrap();
+            (j.events.len(), j.finished)
+        };
+
+        if self.cursor < events_snapshot {
+            let frame = {
+                let j = self.job.lock().unwrap();
+                // The `id: N\n` prefix is what makes Last-Event-ID
+                // round-trip work — EventSource parses it and sends
+                // the last seen value back on its next reconnect.
+                match &j.events[self.cursor] {
+                    JobEvent::Log(line) => format!(
+                        "id: {}\nevent: log\ndata: {}\n\n",
+                        self.cursor,
+                        line.replace('\n', "\\n"),
+                    ),
+                    JobEvent::Done { payload } => format!(
+                        "id: {}\nevent: done\ndata: {}\n\n",
+                        self.cursor,
+                        payload.replace('\n', " "),
+                    ),
+                    JobEvent::Fail { message } => format!(
+                        "id: {}\nevent: fail\ndata: {}\n\n",
+                        self.cursor,
+                        message.replace('\n', " "),
+                    ),
+                    JobEvent::Exit { code } => format!(
+                        "id: {}\nevent: exit\ndata: {{\"code\":{}}}\n\n",
+                        self.cursor, code,
+                    ),
+                }
+            };
+            self.cursor += 1;
+            self.last_emit = std::time::Instant::now();
+            return Some(frame.into_bytes());
+        }
+
+        if finished {
+            return None;
+        }
+
+        if self.last_emit.elapsed() >= std::time::Duration::from_secs(10) {
+            self.last_emit = std::time::Instant::now();
+            return Some(sse_comment_frame("ping"));
+        }
+
+        Some(Vec::new())
+    }
 }
 
-impl Read for PipeReader {
+impl Read for JobSseReader {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         loop {
-            {
-                let mut s = self.state.lock().unwrap();
-                if !s.buf.is_empty() {
-                    let n = out.len().min(s.buf.len());
-                    out[..n].copy_from_slice(&s.buf[..n]);
-                    s.buf.drain(..n);
-                    return Ok(n);
-                }
-                if s.closed {
-                    return Ok(0);
-                }
+            if !self.pending.is_empty() {
+                let n = out.len().min(self.pending.len());
+                out[..n].copy_from_slice(&self.pending[..n]);
+                self.pending.drain(..n);
+                return Ok(n);
             }
-            thread::sleep(std::time::Duration::from_millis(50));
-        }
-    }
-}
 
-struct PipeWriter {
-    state: Arc<Mutex<PipeState>>,
-}
-
-impl Write for PipeWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut s = self.state.lock().unwrap();
-        if s.closed {
-            return Err(std::io::ErrorKind::BrokenPipe.into());
-        }
-        s.buf.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Drop for PipeWriter {
-    fn drop(&mut self) {
-        if let Ok(mut s) = self.state.lock() {
-            s.closed = true;
+            match self.next_frame() {
+                Some(frame) if !frame.is_empty() => {
+                    self.pending = frame;
+                    continue;
+                }
+                Some(_) => {
+                    thread::sleep(std::time::Duration::from_millis(150));
+                    continue;
+                }
+                None => return Ok(0),
+            }
         }
     }
 }
@@ -10124,6 +10110,7 @@ fn spawn_external_command_with_options(
 /// the dir doesn't exist (no bindings yet) — never errors.
 fn handle_shared_folders_list(request: Request) {
     let mut bindings = shared_bindings_from_cache();
+    enrich_shared_bindings_with_sync_status(&mut bindings);
     enrich_shared_bindings_with_target_status(&mut bindings);
     respond_json(request, 200, &serde_json::json!({"bindings": bindings}));
 }
@@ -10409,6 +10396,525 @@ fn handle_shared_folders_run_streamed(request: Request, registry: &Registry, que
         request,
         202,
         &serde_json::json!({"job_id": job_id, "action": action}),
+    );
+}
+
+fn shared_folder_sync_job_key(local_path: &str, bucket: &str) -> String {
+    format!(
+        "shared-folder-sync:{}",
+        shared_folder_bind_job_key(local_path, bucket)
+    )
+}
+
+fn trusted_shared_folder_plist_label(raw: &str) -> Option<String> {
+    let label = raw.trim();
+    if !label.starts_with("com.traylinx.garagetytus.bisync.") {
+        return None;
+    }
+    if label
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        Some(label.to_string())
+    } else {
+        None
+    }
+}
+
+fn shared_folder_plist_label(
+    binding: &serde_json::Value,
+    local_path: &str,
+    bucket: &str,
+) -> String {
+    binding
+        .get("plist_label")
+        .and_then(|v| v.as_str())
+        .and_then(trusted_shared_folder_plist_label)
+        .unwrap_or_else(|| {
+            format!(
+                "com.traylinx.garagetytus.bisync.{}",
+                shared_folder_bind_safe_name(local_path, bucket)
+            )
+        })
+}
+
+fn shared_folder_launch_agents_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library").join("LaunchAgents"))
+}
+
+fn shared_folder_plist_path(label: &str) -> Option<PathBuf> {
+    trusted_shared_folder_plist_label(label).and_then(|safe| {
+        shared_folder_launch_agents_dir().map(|dir| dir.join(format!("{safe}.plist")))
+    })
+}
+
+fn xml_escape_text(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn xml_unescape_text(raw: &str) -> String {
+    raw.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn plist_string_values(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = raw;
+    while let Some(start) = rest.find("<string>") {
+        rest = &rest[start + "<string>".len()..];
+        let Some(end) = rest.find("</string>") else {
+            break;
+        };
+        out.push(xml_unescape_text(&rest[..end]));
+        rest = &rest[end + "</string>".len()..];
+    }
+    out
+}
+
+fn shell_words_quoted(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut chars = input.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('\''), '\'') => quote = None,
+            (Some('"'), '"') => quote = None,
+            (Some(_), '\\') => {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            }
+            (Some(_), _) => cur.push(c),
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '\\') => {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            }
+            (None, c) if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            (None, _) => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn legacy_rclone_config_from_plist(raw: &str) -> Option<(String, String, String)> {
+    for value in plist_string_values(raw) {
+        if !value.contains("rclone") || !value.contains(" bisync ") {
+            continue;
+        }
+        let words = shell_words_quoted(&value);
+        let bisync = words.iter().position(|w| w == "bisync")?;
+        let remote_spec = words.get(bisync + 2)?;
+        let (remote, remote_path) = remote_spec.split_once(':')?;
+        let rclone_conf = words
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--config").then(|| pair[1].clone()))
+            .unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .map(|home| format!("{home}/.config/rclone/rclone.conf"))
+                    .unwrap_or_else(|_| "~/.config/rclone/rclone.conf".to_string())
+            });
+        return Some((rclone_conf, remote.to_string(), remote_path.to_string()));
+    }
+    None
+}
+
+fn write_shared_folder_sync_plist(
+    path: &Path,
+    label: &str,
+    rclone_conf: &str,
+    remote: &str,
+    remote_path: &str,
+    workdir: &str,
+    interval: u64,
+    timeout: u64,
+    resync_timeout: u64,
+    local_path: &str,
+    bucket: &str,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/garagetytus-folder-sync</string>
+    <string>--rclone-conf</string>
+    <string>{}</string>
+    <string>--remote</string>
+    <string>{}</string>
+    <string>--remote-path</string>
+    <string>{}</string>
+    <string>--workdir</string>
+    <string>{}</string>
+    <string>--timeout</string>
+    <string>{}</string>
+    <string>--resync-timeout</string>
+    <string>{}</string>
+    <string>{}</string>
+    <string>{}</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>{}</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/garagetytus-bisync-{}.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/garagetytus-bisync-{}.err</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
+"#,
+        xml_escape_text(label),
+        xml_escape_text(rclone_conf),
+        xml_escape_text(remote),
+        xml_escape_text(remote_path),
+        xml_escape_text(workdir),
+        timeout,
+        resync_timeout,
+        xml_escape_text(local_path),
+        xml_escape_text(bucket),
+        interval,
+        xml_escape_text(label.trim_start_matches("com.traylinx.garagetytus.bisync.")),
+        xml_escape_text(label.trim_start_matches("com.traylinx.garagetytus.bisync.")),
+    );
+    std::fs::write(path, body)
+}
+
+fn migrate_legacy_shared_folder_launch_agents_best_effort() {
+    let mut bindings = shared_bindings_from_cache();
+    for binding in &mut bindings {
+        migrate_legacy_shared_folder_launch_agent(binding);
+    }
+}
+
+fn migrate_legacy_shared_folder_launch_agent(binding: &mut serde_json::Value) {
+    let bucket = binding
+        .get("bucket")
+        .and_then(|v| v.as_str())
+        .unwrap_or("shared")
+        .to_string();
+    let local_path = binding
+        .get("local_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if bucket.is_empty() || local_path.is_empty() {
+        return;
+    }
+    let auto_sync = binding
+        .get("auto_sync")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    if !auto_sync {
+        return;
+    }
+    let label = shared_folder_plist_label(binding, &local_path, &bucket);
+    let Some(plist_path) = shared_folder_plist_path(&label) else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(&plist_path) else {
+        return;
+    };
+    if raw.contains("/usr/local/bin/garagetytus-folder-sync") {
+        return;
+    }
+
+    let parsed = legacy_rclone_config_from_plist(&raw);
+    let rclone_conf = parsed
+        .as_ref()
+        .map(|(conf, _, _)| conf.clone())
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| format!("{home}/.config/rclone/rclone.conf"))
+        })
+        .unwrap_or_else(|| "~/.config/rclone/rclone.conf".to_string());
+    let remote = binding
+        .get("remote")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| v.to_string())
+        .or_else(|| parsed.as_ref().map(|(_, remote, _)| remote.clone()))
+        .unwrap_or_else(|| "garagetytus".to_string());
+    let remote_path = binding
+        .get("remote_path")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| v.to_string())
+        .or_else(|| parsed.as_ref().map(|(_, _, path)| path.clone()))
+        .unwrap_or_else(|| bucket.clone());
+    let workdir = binding
+        .get("workdir")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+        .or_else(|| {
+            shared_folder_bind_workdir(&local_path, &bucket)
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| {
+            std::env::var("HOME")
+                .map(|home| {
+                    format!(
+                        "{home}/.cache/garagetytus/bisync/{}",
+                        shared_folder_bind_safe_name(&local_path, &bucket)
+                    )
+                })
+                .unwrap_or_else(|_| shared_folder_bind_safe_name(&local_path, &bucket))
+        });
+    let interval = binding
+        .get("interval_sec")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60);
+    if write_shared_folder_sync_plist(
+        &plist_path,
+        &label,
+        &rclone_conf,
+        &remote,
+        &remote_path,
+        &workdir,
+        interval,
+        300,
+        7200,
+        &local_path,
+        &bucket,
+    )
+    .is_err()
+    {
+        return;
+    }
+
+    let _ = Command::new("launchctl")
+        .arg("unload")
+        .arg(&plist_path)
+        .output();
+    let _ = Command::new("launchctl")
+        .arg("load")
+        .arg(&plist_path)
+        .output();
+
+    if let Some(obj) = binding.as_object_mut() {
+        obj.insert(
+            "schema_version".to_string(),
+            serde_json::Value::Number(2.into()),
+        );
+        obj.insert("remote".to_string(), serde_json::Value::String(remote));
+        obj.insert(
+            "remote_path".to_string(),
+            serde_json::Value::String(remote_path),
+        );
+        obj.insert("workdir".to_string(), serde_json::Value::String(workdir));
+        obj.insert("plist_label".to_string(), serde_json::Value::String(label));
+    }
+    if let Some(path) = find_shared_binding_sidecar(&bucket, &local_path) {
+        let _ = write_shared_binding_sidecar(&path, binding);
+    }
+}
+
+/// POST /api/shared-folders/sync-now — body `{bucket, local_path}`.
+/// Runs a one-shot resync-aware helper for this binding. If rclone left a stale
+/// safety lock, remove it first, but never remove an active lock with a live PID.
+fn handle_shared_folders_sync_now(mut request: Request, registry: &Registry) {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        bucket: String,
+        local_path: String,
+    }
+
+    if !sharing_mutations_enabled() {
+        respond_sharing_paused(request);
+        return;
+    }
+
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: Body = match serde_json::from_str(&buf) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":format!("bad json: {}", e)}),
+            );
+            return;
+        }
+    };
+    if !valid_sharing_bucket(&body.bucket) {
+        respond_json(
+            request,
+            400,
+            &serde_json::json!({"error":"invalid bucket","code":"shared_folders.sync.bucket.invalid"}),
+        );
+        return;
+    }
+
+    let Some(sidecar_path) = find_shared_binding_sidecar(&body.bucket, &body.local_path) else {
+        respond_json(
+            request,
+            404,
+            &serde_json::json!({
+                "error": "shared folder binding not found",
+                "code": "shared_folders.sync.binding.not_found",
+                "bucket": body.bucket,
+                "local_path": body.local_path,
+            }),
+        );
+        return;
+    };
+    let raw = match std::fs::read_to_string(&sidecar_path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({"error":format!("failed to read binding sidecar: {}", e)}),
+            );
+            return;
+        }
+    };
+    let mut binding: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(binding) => binding,
+        Err(e) => {
+            respond_json(
+                request,
+                500,
+                &serde_json::json!({"error":format!("failed to parse binding sidecar: {}", e)}),
+            );
+            return;
+        }
+    };
+    normalize_shared_binding_value(&mut binding);
+
+    let workdir = binding
+        .get("workdir")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .or_else(|| shared_folder_bind_workdir(&body.local_path, &body.bucket));
+    let Some(workdir) = workdir else {
+        respond_json(
+            request,
+            500,
+            &serde_json::json!({"error":"cannot resolve shared-folder sync workdir"}),
+        );
+        return;
+    };
+
+    let mut cleared_lock: Option<String> = None;
+    if let Some(lock) = shared_folder_bind_lock(&workdir) {
+        if lock.active {
+            respond_json(
+                request,
+                409,
+                &serde_json::json!({
+                    "error": format!(
+                        "shared-folder sync is already running for {:?}; wait for PID {:?} to finish",
+                        body.bucket, lock.pid
+                    ),
+                    "code": "shared_folders.sync.already_running",
+                    "bucket": body.bucket,
+                    "local_path": body.local_path,
+                    "lock_file": lock.path.to_string_lossy(),
+                    "lock_pid": lock.pid,
+                    "lock_active": true,
+                    "lock_expires": lock.expires,
+                }),
+            );
+            return;
+        }
+        match std::fs::remove_file(&lock.path) {
+            Ok(()) => cleared_lock = Some(lock.path.to_string_lossy().to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                respond_json(
+                    request,
+                    500,
+                    &serde_json::json!({
+                        "error": format!("failed to remove stale rclone lock: {}", e),
+                        "code": "shared_folders.sync.lock_remove_failed",
+                        "lock_file": lock.path.to_string_lossy(),
+                    }),
+                );
+                return;
+            }
+        }
+    }
+
+    let label = shared_folder_plist_label(&binding, &body.local_path, &body.bucket);
+    let job_key = shared_folder_sync_job_key(&body.local_path, &body.bucket);
+    let (job_id, job) = match registry.create_keyed(&job_key) {
+        Ok(pair) => pair,
+        Err(_) => {
+            respond_json(
+                request,
+                409,
+                &serde_json::json!({
+                    "error": "shared-folder sync kick is already running for this binding",
+                    "code": "shared_folders.sync.kick_already_running",
+                    "bucket": body.bucket,
+                    "local_path": body.local_path,
+                }),
+            );
+            return;
+        }
+    };
+
+    let helper = resolve_garagetytus_helper("garagetytus-folder-sync");
+    let mut args = Vec::new();
+    if let Some(remote) = binding.get("remote").and_then(|v| v.as_str()) {
+        if !remote.trim().is_empty() {
+            args.push("--remote".to_string());
+            args.push(remote.to_string());
+        }
+    }
+    if let Some(remote_path) = binding.get("remote_path").and_then(|v| v.as_str()) {
+        if !remote_path.trim().is_empty() {
+            args.push("--remote-path".to_string());
+            args.push(remote_path.to_string());
+        }
+    }
+    args.push("--force".to_string());
+    args.push("--workdir".to_string());
+    args.push(workdir.to_string_lossy().to_string());
+    args.push(body.local_path.clone());
+    args.push(body.bucket.clone());
+    spawn_external_command(job, helper, args);
+    respond_json(
+        request,
+        202,
+        &serde_json::json!({
+            "job_id": job_id,
+            "bucket": body.bucket,
+            "local_path": body.local_path,
+            "plist_label": label,
+            "cleared_lock": cleared_lock,
+        }),
     );
 }
 
@@ -10842,8 +11348,12 @@ fn shared_folder_bind_lock(workdir: &Path) -> Option<SharedFolderBindLock> {
         let parsed = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_default();
         let pid = parsed
             .get("PID")
-            .and_then(|v| v.as_str())
-            .and_then(|v| v.parse::<i32>().ok());
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .or_else(|| v.as_i64().and_then(|n| i32::try_from(n).ok()))
+            })
+            .or_else(|| raw.trim().parse::<i32>().ok());
         let active = pid.is_some_and(process_exists);
         let expires = parsed
             .get("TimeExpires")
@@ -11580,6 +12090,7 @@ fn normalize_shared_binding_value(binding: &mut serde_json::Value) {
 
 const GARAGETYTUS_REQUIRED_HELPERS: &[&str] = &[
     "garagetytus-folder-bind",
+    "garagetytus-folder-sync",
     "garagetytus-folder-list",
     "garagetytus-folder-status",
     "garagetytus-folder-conflicts",
@@ -13471,6 +13982,92 @@ fn enrich_shared_bindings_with_target_status(bindings: &mut [serde_json::Value])
     let checked_at = now_secs();
     for binding in bindings {
         enrich_shared_binding_target_status(binding, checked_at);
+    }
+}
+
+fn enrich_shared_bindings_with_sync_status(bindings: &mut [serde_json::Value]) {
+    let checked_at = now_secs();
+    for binding in bindings {
+        enrich_shared_binding_sync_status(binding, checked_at);
+    }
+}
+
+fn shared_folder_bisync_baseline_ready(workdir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(workdir) else {
+        return false;
+    };
+    let mut path1 = false;
+    let mut path2 = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let has_content = path.metadata().map(|m| m.len() > 0).unwrap_or(false);
+        if name.ends_with(".path1.lst") && has_content {
+            path1 = true;
+        }
+        if name.ends_with(".path2.lst") && has_content {
+            path2 = true;
+        }
+    }
+    path1 && path2
+}
+
+fn enrich_shared_binding_sync_status(binding: &mut serde_json::Value, checked_at: u64) {
+    let workdir = binding
+        .get("workdir")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let bucket = binding.get("bucket").and_then(|v| v.as_str())?;
+            let local_path = binding.get("local_path").and_then(|v| v.as_str())?;
+            shared_folder_bind_workdir(local_path, bucket)
+        });
+
+    let Some(workdir) = workdir else {
+        return;
+    };
+
+    let baseline_ready = shared_folder_bisync_baseline_ready(&workdir);
+    let lock = shared_folder_bind_lock(&workdir);
+    let mut status = serde_json::json!({
+        "state": if baseline_ready { "synced" } else { "pending" },
+        "phase": if baseline_ready { "idle" } else { "initial_resync" },
+        "active": false,
+        "baseline_ready": baseline_ready,
+        "checked_at": checked_at,
+        "workdir": workdir.to_string_lossy(),
+    });
+
+    if let Some(lock) = lock {
+        status["lock_file"] = serde_json::Value::String(lock.path.to_string_lossy().to_string());
+        status["lock_active"] = serde_json::Value::Bool(lock.active);
+        status["active"] = serde_json::Value::Bool(lock.active);
+        if let Some(pid) = lock.pid {
+            status["lock_pid"] = serde_json::Value::Number(serde_json::Number::from(pid));
+        }
+        if let Some(expires) = lock.expires {
+            status["lock_expires"] = serde_json::Value::String(expires);
+        }
+        if lock.active {
+            status["state"] = serde_json::Value::String("syncing".to_string());
+            status["phase"] = serde_json::Value::String(
+                if baseline_ready {
+                    "incremental"
+                } else {
+                    "initial_resync"
+                }
+                .to_string(),
+            );
+        } else if !baseline_ready {
+            status["state"] = serde_json::Value::String("attention".to_string());
+            status["phase"] = serde_json::Value::String("stale_lock".to_string());
+        }
+    }
+
+    if let Some(obj) = binding.as_object_mut() {
+        obj.insert("sync_status".to_string(), status);
     }
 }
 
@@ -17169,6 +17766,119 @@ mod tests {
             .is_ok());
     }
 
+    #[test]
+    fn job_sse_reader_sends_connected_before_quiet_job_logs() {
+        let job = Arc::new(Mutex::new(Job::new_keyed(
+            "shared-folder-bind:shared:/tmp/shared".to_string(),
+        )));
+        let mut reader = JobSseReader::new(job, 0);
+        let mut out = [0u8; 10 * 1024];
+
+        let n = reader.read(&mut out).unwrap();
+        assert!(std::str::from_utf8(&out[..n])
+            .unwrap()
+            .starts_with(": connected "));
+        assert!(n > 8192);
+    }
+
+    #[test]
+    fn job_sse_reader_heartbeats_quiet_unfinished_jobs() {
+        let job = Arc::new(Mutex::new(Job::new_keyed(
+            "shared-folder-bind:shared:/tmp/shared".to_string(),
+        )));
+        let mut reader = JobSseReader::new(job, 0);
+        let mut out = [0u8; 10 * 1024];
+
+        let n = reader.read(&mut out).unwrap();
+        assert!(std::str::from_utf8(&out[..n])
+            .unwrap()
+            .starts_with(": connected "));
+        assert!(n > 8192);
+
+        reader.last_emit = Instant::now() - Duration::from_secs(11);
+        let n = reader.read(&mut out).unwrap();
+        assert!(std::str::from_utf8(&out[..n])
+            .unwrap()
+            .starts_with(": ping "));
+        assert!(n > 8192);
+    }
+
+    #[test]
+    fn job_sse_reader_emits_terminal_event_after_quiet_period() {
+        let job = Arc::new(Mutex::new(Job::new_keyed(
+            "shared-folder-bind:shared:/tmp/shared".to_string(),
+        )));
+        let mut reader = JobSseReader::new(job.clone(), 0);
+        let mut out = [0u8; 10 * 1024];
+
+        let _ = reader.read(&mut out).unwrap();
+        push_event(&job, JobEvent::Log("rclone done".to_string()));
+        push_event(&job, JobEvent::Exit { code: 0 });
+
+        let n = reader.read(&mut out).unwrap();
+        let frame = std::str::from_utf8(&out[..n]).unwrap();
+        assert!(frame.contains("event: log"));
+        assert!(frame.contains("data: rclone done"));
+
+        let n = reader.read(&mut out).unwrap();
+        let frame = std::str::from_utf8(&out[..n]).unwrap();
+        assert!(frame.contains("event: exit"));
+        assert!(frame.contains("data: {\"code\":0}"));
+
+        assert_eq!(reader.read(&mut out).unwrap(), 0);
+    }
+
+    #[test]
+    fn job_sse_wire_flushes_opened_quiet_stream_immediately() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let port = server.server_addr().to_ip().expect("ip").port();
+        let registry = Registry::new();
+        let (job_id, job) = registry
+            .create_keyed("shared-folder-bind:shared:/tmp/shared")
+            .unwrap();
+
+        let server_arc = Arc::new(server);
+        let server_for_thread = server_arc.clone();
+        let handler = thread::spawn(move || {
+            if let Some(req) = server_for_thread.incoming_requests().next() {
+                handle(req, registry);
+            }
+        });
+
+        let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        s.write_all(
+            format!(
+                "GET /api/jobs/{}/stream HTTP/1.1\r\nHost: 127.0.0.1:4242\r\n\r\n",
+                job_id
+            )
+            .as_bytes(),
+        )
+        .expect("write");
+
+        let mut resp = Vec::new();
+        let mut buf = [0u8; 10 * 1024];
+        while !String::from_utf8_lossy(&resp).contains(": connected") {
+            let n = s.read(&mut buf).expect("read initial SSE bytes");
+            assert!(n > 0, "SSE stream closed before connected comment");
+            resp.extend_from_slice(&buf[..n]);
+        }
+        let resp = std::str::from_utf8(&resp).unwrap();
+        assert!(
+            resp.contains("HTTP/1.1 200") && resp.contains(": connected"),
+            "quiet SSE stream must flush headers + connected comment immediately, got: {resp:?}",
+        );
+
+        push_event(&job, JobEvent::Exit { code: 0 });
+        let mut rest = String::new();
+        let _ = s.read_to_string(&mut rest);
+        handler.join().expect("handler thread panicked");
+    }
+
     fn hdr(name: &str, value: &str) -> Header {
         Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
     }
@@ -17781,6 +18491,97 @@ mod tests {
     }
 
     #[test]
+    fn shared_folder_sync_plist_label_rejects_untrusted_sidecar_label() {
+        let binding = serde_json::json!({
+            "plist_label": "../../bad",
+            "bucket": "shared",
+            "local_path": "/Users/test/Shared"
+        });
+
+        assert_eq!(
+            shared_folder_plist_label(&binding, "/Users/test/Shared", "shared"),
+            "com.traylinx.garagetytus.bisync.shared-shared"
+        );
+
+        let trusted = serde_json::json!({
+            "plist_label": "com.traylinx.garagetytus.bisync.missions-missions"
+        });
+        assert_eq!(
+            shared_folder_plist_label(&trusted, "/Users/test/Missions", "missions"),
+            "com.traylinx.garagetytus.bisync.missions-missions"
+        );
+    }
+
+    #[test]
+    fn shared_folder_legacy_plist_parser_extracts_registry_remote() {
+        let plist = r#"
+<plist version="1.0"><dict><key>ProgramArguments</key><array>
+<string>/usr/bin/env</string>
+<string>bash</string>
+<string>-c</string>
+<string>/usr/local/bin/timeout 300 /usr/local/bin/rclone --config "/Users/test/.config/rclone/rclone.conf" bisync "/Users/test/Tytus/Folders/chat-drop" "tytusaws:tytus-shared-folders-prod/owner/folder" --workdir "/Users/test/.cache/garagetytus/bisync/registry-chat-drop" --max-lock 2m --create-empty-src-dirs --conflict-resolve newer --resilient</string>
+</array></dict></plist>
+"#;
+        let (conf, remote, remote_path) =
+            legacy_rclone_config_from_plist(plist).expect("legacy rclone command parsed");
+        assert_eq!(conf, "/Users/test/.config/rclone/rclone.conf");
+        assert_eq!(remote, "tytusaws");
+        assert_eq!(remote_path, "tytus-shared-folders-prod/owner/folder");
+    }
+
+    #[test]
+    fn shared_folder_sync_plist_uses_helper_not_direct_rclone() {
+        let home = HomeOverrideGuard::new();
+        let plist = home.root.join("Library/LaunchAgents/test.plist");
+        write_shared_folder_sync_plist(
+            &plist,
+            "com.traylinx.garagetytus.bisync.test",
+            "/Users/test/.config/rclone/rclone.conf",
+            "tytusaws",
+            "bucket/folder",
+            "/Users/test/.cache/garagetytus/bisync/test",
+            60,
+            300,
+            7200,
+            "/Users/test/Folder",
+            "bucket",
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(plist).unwrap();
+        assert!(raw.contains("/usr/local/bin/garagetytus-folder-sync"));
+        assert!(raw.contains("<string>--remote-path</string>"));
+        assert!(raw.contains("<string>bucket/folder</string>"));
+        assert!(!raw.contains("--create-empty-src-dirs"));
+        assert!(!raw.contains("/usr/local/bin/rclone"));
+    }
+
+    #[test]
+    fn shared_folder_bind_lock_reads_string_numeric_and_raw_pid_locks() {
+        let home = HomeOverrideGuard::new();
+        let workdir = home.root.join("lock-test");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let lock = workdir.join("example.lck");
+
+        std::fs::write(
+            &lock,
+            serde_json::json!({
+                "PID": std::process::id().to_string(),
+                "TimeExpires": "2026-06-22T17:31:47Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let parsed = shared_folder_bind_lock(&workdir).unwrap();
+        assert_eq!(parsed.pid, Some(std::process::id() as i32));
+        assert!(parsed.active);
+
+        std::fs::write(&lock, std::process::id().to_string()).unwrap();
+        let parsed = shared_folder_bind_lock(&workdir).unwrap();
+        assert_eq!(parsed.pid, Some(std::process::id() as i32));
+        assert!(parsed.active);
+    }
+
+    #[test]
     fn shared_runtime_status_tracks_selected_pods() {
         let status = shared_runtime_status_for_pods(
             &[
@@ -18289,6 +19090,51 @@ mod tests {
         assert_eq!(by_label("Claus")["grant_verified"], false);
         assert_eq!(by_label("Hermie")["state"], "unselected");
         assert_eq!(by_label("Hermie")["selected"], false);
+    }
+
+    #[test]
+    fn shared_folder_list_sync_status_reports_initial_sync_and_synced() {
+        let home = HomeOverrideGuard::new();
+        let workdir = home.root.join(".cache/garagetytus/bisync/shared-shared");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let lock_path = workdir.join("Users_test_Shared..garagetytus_shared.lck");
+        std::fs::write(
+            &lock_path,
+            serde_json::json!({
+                "PID": std::process::id().to_string(),
+                "TimeExpires": "2099-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut bindings = vec![serde_json::json!({
+            "bucket": "shared",
+            "local_path": home.root.join("Shared").to_string_lossy(),
+            "workdir": workdir.to_string_lossy(),
+        })];
+        enrich_shared_bindings_with_sync_status(&mut bindings);
+
+        assert_eq!(bindings[0]["sync_status"]["state"], "syncing");
+        assert_eq!(bindings[0]["sync_status"]["phase"], "initial_resync");
+        assert_eq!(bindings[0]["sync_status"]["lock_active"], true);
+
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::write(
+            workdir.join("Users_test_Shared..garagetytus_shared.path1.lst"),
+            "x\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workdir.join("Users_test_Shared..garagetytus_shared.path2.lst"),
+            "x\n",
+        )
+        .unwrap();
+        enrich_shared_bindings_with_sync_status(&mut bindings);
+
+        assert_eq!(bindings[0]["sync_status"]["state"], "synced");
+        assert_eq!(bindings[0]["sync_status"]["phase"], "idle");
+        assert_eq!(bindings[0]["sync_status"]["baseline_ready"], true);
     }
 
     #[test]
