@@ -380,8 +380,8 @@
     "description": "Your private team chat where your Tytus pods are teammates — DM or @-mention them and replies run on your own pod. Branded desktop client for macOS.",
     "category": "Communication",
     "icon": "MessageCircle",
-    "url": "https://chat.traylinx.com",
-    "docs": "https://docs.traylinx.com",
+    "url": "https://github.com/traylinx/tytus-chat/releases",
+    "docs": "https://github.com/traylinx/tytus-chat/releases",
     "platforms": [
       "macos"
     ],
@@ -391,7 +391,7 @@
       ]
     },
     "install": {
-      "macos": "Visit https://chat.traylinx.com to download the Tytus Chat desktop app"
+      "macos": "Download Tytus Chat Desktop from https://github.com/traylinx/tytus-chat/releases"
     },
     "launch": {
       "macos": {
@@ -404,8 +404,8 @@
         "os": "macos",
         "arch": "universal",
         "kind": "url",
-        "label": "Get Tytus Chat for macOS",
-        "url": "https://chat.traylinx.com"
+        "label": "Download Tytus Chat Desktop for macOS",
+        "url": "https://github.com/traylinx/tytus-chat/releases"
       }
     ],
     "runtime": {
