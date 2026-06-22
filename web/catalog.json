@@ -1,1 +1,75 @@
-{"version":"0.7.72","release_tag":"v0.7.72","updated_at":"2026-06-22","platforms":{"macos":{"label":"macOS","subLabel":"arm64 + x86_64","primary":{"command":"curl -fsSL https://get.traylinx.com/install.sh | bash"},"alternative":{"available":false,"available_label":"Use install command"},"extra":"Includes CLI, MCP, tray and TytusOS where supported"},"linux":{"label":"Linux","subLabel":"x86_64 + aarch64 public beta","primary":{"command":"curl -fsSL https://get.traylinx.com/install.sh | bash"},"alternative":{"available":false,"available_label":"Use install command"},"extra":"CLI, MCP and shared-folder tools"},"windows":{"label":"Windows","subLabel":"x86_64 + arm64 public beta","primary":{"command":"powershell -c \"irm https://get.traylinx.com/install.ps1 | iex\""},"alternative":{"available":true,"kind":"zip","url":"https://github.com/traylinx/tytus-cli/releases/download/v0.7.72/tytus-windows-x86_64.zip","sha256":"259dad04ce92995dff6dc4fbe9de3d8c97997dc128d6090e93f6ba0a97e5176a"},"extra":"PowerShell installer first; x86_64 and arm64 zip fallbacks are on the GitHub release for locked-down machines"}},"tytusos":{"docs_url":"https://tytus-os.traylinx.com/","local_url":"http://localhost:4242"},"references":{"install":"https://get.traylinx.com/#install","dashboard":"https://traylinx.com/admin/tytus","openclaw":"https://openclaw.traylinx.com/","hermes":"https://hermes.traylinx.com/"},"agents":[{"id":"openclaw","name":"OpenClaw","units":1,"min_plan":"Explorer","tagline":"Codebase work, terminal tasks, scripts and shared-folder missions on your private Tytus pod.","website":"https://openclaw.traylinx.com/","github":"https://github.com/traylinx/openclaw-traylinx"},{"id":"hermes","name":"Hermes","units":2,"min_plan":"Creator","tagline":"Messenger-native agent with memory, skills and scheduled work on your private Tytus pod.","website":"https://hermes.traylinx.com/","github":"https://github.com/traylinx/openclaw-traylinx"}]}
+{
+  "version": "0.7.72",
+  "release_tag": "v0.7.72",
+  "updated_at": "2026-06-22",
+  "platforms": {
+    "macos": {
+      "label": "macOS",
+      "subLabel": "arm64 + x86_64",
+      "primary": {
+        "command": "curl -fsSL https://get.traylinx.com/install.sh | bash"
+      },
+      "alternative": {
+        "available": false,
+        "available_label": "Use install command"
+      },
+      "extra": "Includes CLI, MCP, tray and TytusOS where supported"
+    },
+    "linux": {
+      "label": "Linux",
+      "subLabel": "x86_64 + aarch64 public beta",
+      "primary": {
+        "command": "curl -fsSL https://get.traylinx.com/install.sh | bash"
+      },
+      "alternative": {
+        "available": false,
+        "available_label": "Use install command"
+      },
+      "extra": "CLI, MCP and shared-folder tools"
+    },
+    "windows": {
+      "label": "Windows",
+      "subLabel": "x86_64 + arm64 public beta",
+      "primary": {
+        "command": "powershell -c \"irm https://get.traylinx.com/install.ps1 | iex\""
+      },
+      "alternative": {
+        "available": true,
+        "kind": "zip",
+        "url": "https://github.com/traylinx/tytus-cli/releases/download/v0.7.72/tytus-windows-x86_64.zip",
+        "sha256": "259dad04ce92995dff6dc4fbe9de3d8c97997dc128d6090e93f6ba0a97e5176a"
+      },
+      "extra": "PowerShell installer first; x86_64 and arm64 zip fallbacks are on the GitHub release for locked-down machines"
+    }
+  },
+  "tytusos": {
+    "docs_url": "https://tytus-os.traylinx.com/",
+    "local_url": "http://localhost:4242"
+  },
+  "references": {
+    "install": "https://get.traylinx.com/#install",
+    "dashboard": "https://traylinx.com/admin/tytus",
+    "openclaw": "https://openclaw.traylinx.com/",
+    "hermes": "https://hermes.traylinx.com/"
+  },
+  "agents": [
+    {
+      "id": "openclaw",
+      "name": "OpenClaw",
+      "units": 1,
+      "min_plan": "Explorer",
+      "tagline": "Codebase work, terminal tasks, scripts and shared-folder missions on your private Tytus pod.",
+      "website": "https://openclaw.traylinx.com/",
+      "github": "https://github.com/traylinx/openclaw-traylinx"
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes",
+      "units": 2,
+      "min_plan": "Creator",
+      "tagline": "Messenger-native agent with memory, skills and scheduled work on your private Tytus pod.",
+      "website": "https://hermes.traylinx.com/",
+      "github": "https://github.com/traylinx/openclaw-traylinx"
+    }
+  ]
+}
