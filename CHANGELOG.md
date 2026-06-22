@@ -1,3 +1,7 @@
+## 0.7.71 - 2026-06-22
+
+- Pins garagetytus `285aba2` so pod shared-folder reprovision returns after credentials are installed and queues large bucket materialization in the background instead of blocking the TytusOS refresh flow.
+
 ## 0.7.70 - 2026-06-22
 
 - Makes shared-folder binding return as soon as the binding is registered, then runs initial file sync in the background so users no longer wait on long `rclone bisync --resync` jobs.
