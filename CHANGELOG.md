@@ -1,3 +1,8 @@
+## 0.7.72 - 2026-06-22
+
+- Embeds TytusOS `b8eb756` so App Store and Tytus Chat surfaces expose the direct desktop download link.
+- Bundles the updated app catalog so Tytus Chat points users to GitHub release downloads instead of the web login page.
+
 ## 0.7.71 - 2026-06-22
 
 - Pins garagetytus `285aba2` so pod shared-folder reprovision returns after credentials are installed and queues large bucket materialization in the background instead of blocking the TytusOS refresh flow.
