@@ -10712,6 +10712,20 @@ async fn sync_tytus(state: &mut CliState, http: &atomek_core::HttpClient) {
         // local fields already present in state.json.
         let user_key = atomek_pods::get_user_key_full(&client).await.ok();
         if let Ok(status) = atomek_pods::get_pod_status(&client).await {
+            // `/pod/status` carries the authoritative plan tier + unit budget,
+            // derived from the live subscription via the Provider's plan check.
+            // Prefer it over the denormalized `tier` returned by
+            // `/me/wannolot-pass`, which is a Sentinel Pass copy that can lag the
+            // real subscription. Without this the tray shows the stale pass tier
+            // (e.g. "basic") and `units_for_tier` resolves it to a 0-unit budget.
+            if status.has_plan {
+                if let Some(tier_name) = status.tier_name.as_deref() {
+                    if !tier_name.is_empty() {
+                        state.tier = Some(tier_name.to_string());
+                    }
+                }
+            }
+
             state.pods.retain(|local| {
                 status
                     .pods
