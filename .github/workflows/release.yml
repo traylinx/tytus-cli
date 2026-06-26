@@ -33,7 +33,11 @@ env:
   TYTUS_OS_REF: ${{ inputs.tytus_os_ref }}
   # Pinned so public Tytus releases are deterministic. Update only after
   # garagetytus CI is green and helper scripts have been reviewed.
-  GARAGETYTUS_REF: 285aba2688e002c55f140564c99f008629875919
+  # Bumped for the shared-folder sync fix: this ref adds `garagetytus sync
+  # heal-endpoint` (stale-endpoint self-heal) + `garagetytus sync health`
+  # (mac-sync-health-v1 producer), which the tray invokes. Points at the
+  # feature-branch tip; re-pin to the merge SHA once the garagetytus PR lands.
+  GARAGETYTUS_REF: 10408951ce3f7b1139a643d1f44e58c4e4b48793
 
 jobs:
   check-nonproduction-release-policy:
