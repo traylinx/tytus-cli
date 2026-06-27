@@ -80,13 +80,16 @@ pub async fn create_tunnel(config: TunnelConfig) -> Result<TunnelHandle, AtomekE
         "Creating WireGuard tunnel"
     );
 
-    // 3. Create TUN device
+    // 3. Create TUN device. The MTU is clamped low to survive sub-1500 PMTU
+    // paths — see resolve_tunnel_mtu() below for the full rationale.
+    let mtu = resolve_tunnel_mtu(std::env::var("TYTUS_TUNNEL_MTU").ok().as_deref());
+
     let mut tun_config = tun::Configuration::default();
     tun_config
         .address(&local_ip)
         .netmask(cidr_to_netmask(cidr))
         .destination(&peer_wg_ip) // point-to-point peer (server's tunnel IP)
-        .mtu(1420) // WireGuard standard MTU
+        .mtu(mtu)
         .up();
 
     // Disable the tun crate's auto-route (it creates a conflicting host route on macOS).
@@ -530,4 +533,53 @@ fn cidr_to_netmask(cidr: u8) -> String {
         (mask >> 8) & 0xFF,
         mask & 0xFF,
     )
+}
+
+/// Resolve the WireGuard tunnel MTU.
+///
+/// WireGuard adds ~60 B of encapsulation (outer IP+UDP+WG header+Poly1305 tag)
+/// to every tunnelled packet. At a 1420 inner MTU the *outer* UDP datagram
+/// reaches ~1480 B, which is silently black-holed on any path whose real PMTU
+/// sits below 1500 (PPPoE, double-VPN, some mobile carriers): the DF packets
+/// vanish with no ICMP, so bisync LISTs and large transfers stall intermittently
+/// and undiagnosably. 1280 — the IPv6 minimum MTU (RFC 8200), which every
+/// conforming path MUST carry — keeps the outer packet ~1340 B and eliminates
+/// the black hole fleet-wide.
+///
+/// `TYTUS_TUNNEL_MTU` overrides the default on clean networks that want the
+/// extra throughput; values outside 576..=1420 (IPv4 minimum .. WG standard) are
+/// ignored in favour of the safe default.
+fn resolve_tunnel_mtu(override_raw: Option<&str>) -> u16 {
+    const DEFAULT_MTU: u16 = 1280;
+    override_raw
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|m| (576..=1420).contains(m))
+        .unwrap_or(DEFAULT_MTU)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_tunnel_mtu;
+
+    #[test]
+    fn mtu_defaults_to_1280_when_unset_or_invalid() {
+        assert_eq!(resolve_tunnel_mtu(None), 1280);
+        assert_eq!(resolve_tunnel_mtu(Some("")), 1280);
+        assert_eq!(resolve_tunnel_mtu(Some("not-a-number")), 1280);
+    }
+
+    #[test]
+    fn mtu_honours_in_range_override() {
+        assert_eq!(resolve_tunnel_mtu(Some("1380")), 1380);
+        assert_eq!(resolve_tunnel_mtu(Some(" 1200 ")), 1200); // trimmed
+        assert_eq!(resolve_tunnel_mtu(Some("576")), 576); // lower bound
+        assert_eq!(resolve_tunnel_mtu(Some("1420")), 1420); // upper bound
+    }
+
+    #[test]
+    fn mtu_rejects_out_of_range_override() {
+        assert_eq!(resolve_tunnel_mtu(Some("9000")), 1280); // jumbo → default
+        assert_eq!(resolve_tunnel_mtu(Some("100")), 1280); // too small → default
+        assert_eq!(resolve_tunnel_mtu(Some("0")), 1280);
+    }
 }

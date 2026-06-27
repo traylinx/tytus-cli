@@ -33,7 +33,12 @@ env:
   TYTUS_OS_REF: ${{ inputs.tytus_os_ref }}
   # Pinned so public Tytus releases are deterministic. Update only after
   # garagetytus CI is green and helper scripts have been reviewed.
-  GARAGETYTUS_REF: 285aba2688e002c55f140564c99f008629875919
+  # Bumped for the shared-folder sync fix: this ref adds `garagetytus sync
+  # heal-endpoint` (stale-endpoint self-heal) + `garagetytus sync health`
+  # (mac-sync-health-v1 producer) + the Mac exclude-floor alignment
+  # (target/dist/build/vendor/.terraform, mirroring the pod-side contract).
+  # Pinned to the garagetytus#1 merge commit on main.
+  GARAGETYTUS_REF: 9d47b9fee56b12e349284be59a768d3c5d9b5372
 
 jobs:
   check-nonproduction-release-policy:

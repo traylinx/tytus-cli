@@ -10108,7 +10108,58 @@ fn spawn_external_command_with_options(
 /// `~/.cache/garagetytus/bisync/*.bindings.json` (written by
 /// `garagetytus folder bind` v0.5.3+). Returns empty `bindings` when
 /// the dir doesn't exist (no bindings yet) — never errors.
+/// Resolve the bundled `garagetytus` binary (ships in the tytus-cli release;
+/// also found in a dev checkout). Falls back to PATH.
+fn garagetytus_binary_path() -> String {
+    let candidates = [
+        "/usr/local/bin/garagetytus".to_string(),
+        "/opt/homebrew/bin/garagetytus".to_string(),
+        std::env::var("HOME")
+            .map(|h| format!("{}/garagetytus/target/release/garagetytus", h))
+            .unwrap_or_default(),
+    ];
+    for c in &candidates {
+        if !c.is_empty() && std::path::Path::new(c).is_file() {
+            return c.clone();
+        }
+    }
+    "garagetytus".to_string()
+}
+
+/// If the sync-health file is missing or stale, kick a detached
+/// `garagetytus sync heal-endpoint` (converge a stale ephemeral endpoint) then
+/// `garagetytus sync health` (refresh the file) so the next poll is fresh. This
+/// is what self-heals a reallocation-orphaned endpoint the moment the user opens
+/// Files. Best-effort, throttled by staleness, never blocks the response.
+fn spawn_sync_health_refresh_if_stale() {
+    let stale = match load_garagetytus_sync_health() {
+        Some((v, mtime)) => {
+            let stale_after = v
+                .get("stale_after_seconds")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(300);
+            now_secs().saturating_sub(mtime) > stale_after
+        }
+        None => true,
+    };
+    if !stale {
+        return;
+    }
+    let bin = garagetytus_binary_path();
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new(&bin)
+            .arg("sync")
+            .arg("heal-endpoint")
+            .output();
+        let _ = std::process::Command::new(&bin)
+            .arg("sync")
+            .arg("health")
+            .output();
+    });
+}
+
 fn handle_shared_folders_list(request: Request) {
+    spawn_sync_health_refresh_if_stale();
     let mut bindings = shared_bindings_from_cache();
     enrich_shared_bindings_with_sync_status(&mut bindings);
     enrich_shared_bindings_with_target_status(&mut bindings);
@@ -13985,10 +14036,48 @@ fn enrich_shared_bindings_with_target_status(bindings: &mut [serde_json::Value])
     }
 }
 
+/// Path to the garagetytus Mac sync-health file (`mac-sync-health-v1`), written
+/// by `garagetytus sync health`. Shared across all bindings (one rclone endpoint).
+fn garagetytus_sync_health_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| {
+        PathBuf::from(h)
+            .join(".cache")
+            .join("garagetytus")
+            .join("sync-health.json")
+    })
+}
+
+/// Load `(health_json, file_mtime_secs)` if present + parseable, else None.
+fn load_garagetytus_sync_health() -> Option<(serde_json::Value, u64)> {
+    let path = garagetytus_sync_health_path()?;
+    let meta = std::fs::metadata(&path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some((v, mtime))
+}
+
 fn enrich_shared_bindings_with_sync_status(bindings: &mut [serde_json::Value]) {
     let checked_at = now_secs();
+    // The garagetytus endpoint is shared by every binding, so read its health
+    // once. Stale (older than the producer's stale_after_seconds) or missing
+    // health is surfaced as "unknown" and never used to claim "synced".
+    let health = load_garagetytus_sync_health();
+    let health_view = health.as_ref().map(|(v, mtime)| {
+        let stale_after = v
+            .get("stale_after_seconds")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(300);
+        let stale = checked_at.saturating_sub(*mtime) > stale_after;
+        (v, stale)
+    });
     for binding in bindings {
-        enrich_shared_binding_sync_status(binding, checked_at);
+        enrich_shared_binding_sync_status(binding, checked_at, health_view);
     }
 }
 
@@ -14014,7 +14103,11 @@ fn shared_folder_bisync_baseline_ready(workdir: &Path) -> bool {
     path1 && path2
 }
 
-fn enrich_shared_binding_sync_status(binding: &mut serde_json::Value, checked_at: u64) {
+fn enrich_shared_binding_sync_status(
+    binding: &mut serde_json::Value,
+    checked_at: u64,
+    health: Option<(&serde_json::Value, bool)>,
+) {
     let workdir = binding
         .get("workdir")
         .and_then(|v| v.as_str())
@@ -14063,6 +14156,46 @@ fn enrich_shared_binding_sync_status(binding: &mut serde_json::Value, checked_at
         } else if !baseline_ready {
             status["state"] = serde_json::Value::String("attention".to_string());
             status["phase"] = serde_json::Value::String("stale_lock".to_string());
+        }
+    }
+
+    // Overlay the shared garagetytus endpoint health (sprint 2026-06-26, Phase 4).
+    // A green "synced" derived only from bisync baselines is a LIE when the
+    // endpoint is dead: Sebastian's case was a stale rclone endpoint where every
+    // bisync since timed out yet the baselines persisted. Downgrade to
+    // "attention" and attach the raw mac-sync-health so the UI can render the
+    // truthful state-mapping table. Missing/stale health => "unknown", never used
+    // to claim synced.
+    match health {
+        Some((h, false)) => {
+            let reachable = h.get("reachable").and_then(|v| v.as_bool());
+            let cf = h
+                .get("consecutive_failures")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let endpoint_failing = reachable == Some(false) || cf >= 3;
+            let cur = status["state"].as_str().unwrap_or("").to_string();
+            if endpoint_failing && (cur == "synced" || cur == "pending") {
+                status["state"] = serde_json::Value::String("attention".to_string());
+                status["phase"] = serde_json::Value::String("endpoint_unreachable".to_string());
+            }
+            let mut eh = h.clone();
+            if let Some(o) = eh.as_object_mut() {
+                o.insert("stale".to_string(), serde_json::Value::Bool(false));
+            }
+            status["endpoint_health"] = eh;
+        }
+        Some((h, true)) => {
+            // present but stale -> not trusted; do not upgrade/downgrade state.
+            let mut eh = h.clone();
+            if let Some(o) = eh.as_object_mut() {
+                o.insert("stale".to_string(), serde_json::Value::Bool(true));
+            }
+            status["endpoint_health"] = eh;
+        }
+        None => {
+            status["endpoint_health"] =
+                serde_json::json!({"state": "unknown", "reachable": serde_json::Value::Null});
         }
     }
 
@@ -19135,6 +19268,73 @@ mod tests {
         assert_eq!(bindings[0]["sync_status"]["state"], "synced");
         assert_eq!(bindings[0]["sync_status"]["phase"], "idle");
         assert_eq!(bindings[0]["sync_status"]["baseline_ready"], true);
+    }
+
+    #[test]
+    fn shared_folder_sync_status_downgrades_synced_when_endpoint_dead() {
+        let home = HomeOverrideGuard::new();
+        let workdir = home.root.join(".cache/garagetytus/bisync/cv-cv");
+        std::fs::create_dir_all(&workdir).unwrap();
+        // baselines present -> legacy logic alone would report "synced"
+        std::fs::write(workdir.join("cv.path1.lst"), "x\n").unwrap();
+        std::fs::write(workdir.join("cv.path2.lst"), "x\n").unwrap();
+        // ...but the shared garagetytus endpoint is dead (stale endpoint, 128 fails)
+        let health_dir = home.root.join(".cache/garagetytus");
+        std::fs::create_dir_all(&health_dir).unwrap();
+        std::fs::write(
+            health_dir.join("sync-health.json"),
+            serde_json::json!({
+                "schema_version": "mac-sync-health-v1",
+                "updated_at": "2099-01-01T00:00:00Z",
+                "stale_after_seconds": 300,
+                "endpoint_checked": "http://10.18.2.1:3900",
+                "reachable": false,
+                "consecutive_failures": 128,
+                "state": "failed"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut bindings = vec![serde_json::json!({
+            "bucket": "cv",
+            "local_path": home.root.join("CV").to_string_lossy(),
+            "workdir": workdir.to_string_lossy(),
+        })];
+        enrich_shared_bindings_with_sync_status(&mut bindings);
+
+        // truthful: NOT "synced" while the endpoint is unreachable
+        assert_eq!(bindings[0]["sync_status"]["state"], "attention");
+        assert_eq!(bindings[0]["sync_status"]["phase"], "endpoint_unreachable");
+        assert_eq!(
+            bindings[0]["sync_status"]["endpoint_health"]["reachable"],
+            false
+        );
+        assert_eq!(
+            bindings[0]["sync_status"]["endpoint_health"]["stale"],
+            false
+        );
+    }
+
+    #[test]
+    fn shared_folder_sync_status_endpoint_health_unknown_when_file_missing() {
+        let home = HomeOverrideGuard::new();
+        let workdir = home.root.join(".cache/garagetytus/bisync/x-x");
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(workdir.join("x.path1.lst"), "x\n").unwrap();
+        std::fs::write(workdir.join("x.path2.lst"), "x\n").unwrap();
+        let mut bindings = vec![serde_json::json!({
+            "bucket": "x",
+            "local_path": home.root.join("X").to_string_lossy(),
+            "workdir": workdir.to_string_lossy(),
+        })];
+        enrich_shared_bindings_with_sync_status(&mut bindings);
+        // no health file -> baseline-derived state preserved, endpoint health unknown
+        assert_eq!(bindings[0]["sync_status"]["state"], "synced");
+        assert_eq!(
+            bindings[0]["sync_status"]["endpoint_health"]["state"],
+            "unknown"
+        );
     }
 
     #[test]
