@@ -119,7 +119,9 @@ fn parse_binding(path: &Path, json: &serde_json::Value) -> Option<EnabledBinding
 
 /// List immediate subdirectory names under `bucket/prefix` (no trailing `/`).
 fn list_remote_dirs(bucket: &str, prefix: &str) -> Result<Vec<String>, String> {
-    let mut cmd = Command::new("rclone");
+    // Absolute path: the tray runs under launchd, whose PATH does not
+    // include /usr/local/bin (same convention as RcloneS3::new).
+    let mut cmd = Command::new("/usr/local/bin/rclone");
     if let Some(conf) = rclone_conf_path() {
         cmd.arg("--config").arg(conf);
     }
