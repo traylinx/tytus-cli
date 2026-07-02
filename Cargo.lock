@@ -3542,6 +3542,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "tray-icon",
+ "tytus-progressive-sync",
  "urlencoding",
 ]
 
