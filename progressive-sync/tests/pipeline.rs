@@ -556,6 +556,93 @@ fn cursor_never_beyond_last_durable_record() {
     assert_eq!(c.state.routes.get(ROUTE).map(|r| r.last_applied_sequence).unwrap_or(0), 0);
 }
 
+/// Stage an event under an arbitrary remote binding id (the Provider grant
+/// id producers actually use, which differs from the local sidecar id).
+fn stage_event_remote(s3: &MockS3, remote_binding: &str, sequence: u64, key: &str, body: &[u8]) -> String {
+    let hex_digest = sha_hex(body);
+    let event_id = format!("{sequence:020}-{ULID}");
+    let payload = serde_json::json!({
+        "schema_version": "sync-event-v1",
+        "binding_id": remote_binding,
+        "bucket": BUCKET,
+        "route_id": ROUTE,
+        "sequence": sequence,
+        "event_id": event_id,
+        "op": "put",
+        "key": key,
+        "content_ref": format!("_tytus-sync/blobs/sha256/{hex_digest}"),
+        "object": {"size": body.len(), "sha256": format!("sha256:{hex_digest}")},
+        "created_at": "2026-07-02T12:00:00Z",
+        "producer": {"agent_label": "MockPod", "implementation": "test"},
+    });
+    s3.put(&format!("_tytus-sync/blobs/sha256/{hex_digest}"), body);
+    s3.put(
+        &format!("_tytus-sync/events/{remote_binding}/{ROUTE}/{event_id}.json"),
+        serde_json::to_string(&payload).unwrap().as_bytes(),
+    );
+    event_id
+}
+
+#[test]
+fn remote_binding_id_overrides_local_namespace() {
+    // Producers emit under grant.folder_id (Provider registry) — NOT the
+    // local sidecar folder_id. With remote_binding_id set, the consumer must
+    // poll the remote namespace and accept payloads carrying the remote id,
+    // while all local state stays keyed by the local identity.
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_event_remote(&s3, "sf_provider_registry", 1, "docs/from-pod.md", b"remote namespace");
+    // Default (remote == local): the remote namespace is invisible.
+    let (mut c, _) = consumer(&h, &s3);
+    assert_eq!(c.poll_once().applied, 0, "local-id poll must not see the remote namespace");
+    drop(c);
+    // With the discovered remote id: the event applies end-to-end.
+    let (mut c, _) = consumer(&h, &s3);
+    c.remote_binding_id = "sf_provider_registry".into();
+    let outcome = c.poll_once();
+    assert_eq!(outcome.applied, 1, "{:?}", outcome.transient_errors);
+    assert_eq!(outcome.dead_letters, 0);
+    assert_eq!(fs::read(h.local_root.join("docs/from-pod.md")).unwrap(), b"remote namespace");
+    assert_eq!(c.state.route(ROUTE).last_applied_sequence, 1);
+}
+
+#[test]
+fn remote_namespace_payload_with_foreign_binding_id_dead_letters() {
+    // Trust boundary under a remote namespace: the payload's binding_id must
+    // match the namespace it was listed under, not the local id.
+    let h = harness();
+    let s3 = MockS3::default();
+    // payload claims BINDING (the local id) but sits under sf_provider_registry
+    let body: &[u8] = b"spoof";
+    let hex_digest = sha_hex(body);
+    let event_id = format!("{:020}-{ULID}", 1);
+    let payload = serde_json::json!({
+        "schema_version": "sync-event-v1",
+        "binding_id": BINDING,
+        "bucket": BUCKET,
+        "route_id": ROUTE,
+        "sequence": 1,
+        "event_id": event_id,
+        "op": "put",
+        "key": "docs/spoof.md",
+        "content_ref": format!("_tytus-sync/blobs/sha256/{hex_digest}"),
+        "object": {"size": body.len(), "sha256": format!("sha256:{hex_digest}")},
+        "created_at": "2026-07-02T12:00:00Z",
+        "producer": {"agent_label": "MockPod", "implementation": "test"},
+    });
+    s3.put(&format!("_tytus-sync/blobs/sha256/{hex_digest}"), body);
+    s3.put(
+        &format!("_tytus-sync/events/sf_provider_registry/{ROUTE}/{event_id}.json"),
+        serde_json::to_string(&payload).unwrap().as_bytes(),
+    );
+    let (mut c, _) = consumer(&h, &s3);
+    c.remote_binding_id = "sf_provider_registry".into();
+    let outcome = c.poll_once();
+    assert_eq!(outcome.applied, 0);
+    assert_eq!(outcome.dead_letters, 1, "payload/prefix identity mismatch must dead-letter");
+    assert!(!h.local_root.join("docs/spoof.md").exists());
+}
+
 fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(entries) = fs::read_dir(dir) {

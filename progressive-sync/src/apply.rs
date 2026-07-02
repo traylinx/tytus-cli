@@ -81,6 +81,13 @@ pub struct BindingConsumer<'a, S: S3Ops> {
     /// Routes from the LOCAL sidecar only — remote data can never add one.
     pub authorized_routes: Vec<String>,
     pub cycle_budget: usize,
+    /// The binding id producers write events under. Producers take it from
+    /// the Provider grant (`grant.folder_id`), which is NOT the same registry
+    /// as the Mac-local sidecar `folder_id` — the two ids differ on every
+    /// binding provisioned through Provider. Local state (journal, conflicts,
+    /// dead letters) stays keyed by `identity.binding_id`; only the remote
+    /// namespace and the payload trust check use this id.
+    pub remote_binding_id: String,
     runtime: HashMap<String, RouteRuntime>,
 }
 
@@ -99,12 +106,13 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
             identity,
             authorized_routes,
             cycle_budget: DEFAULT_CYCLE_BUDGET,
+            remote_binding_id: identity.binding_id.clone(),
             runtime: HashMap::new(),
         }
     }
 
     fn events_prefix(&self, route_id: &str) -> String {
-        format!("_tytus-sync/events/{}/{}/", self.identity.binding_id, route_id)
+        format!("_tytus-sync/events/{}/{}/", self.remote_binding_id, route_id)
     }
 
     fn local_root(&self) -> PathBuf {
@@ -286,8 +294,10 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
         };
         // Trust boundary: the payload's identity must match the prefix and
         // filename it was listed under — including the full event_id (ULID
-        // and all, G3 review change 6); the listing is the authority.
-        if event.route_id != route_id || event.binding_id != self.identity.binding_id
+        // and all, G3 review change 6); the listing is the authority. The
+        // payload carries the producer's (remote) binding id, not the local
+        // sidecar folder_id.
+        if event.route_id != route_id || event.binding_id != self.remote_binding_id
             || event.sequence != sequence || event.event_id != event_id
         {
             self.dead_letter(route_id, sequence, event_id, DeadLetterClass::SchemaInvalid,
