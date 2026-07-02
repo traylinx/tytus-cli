@@ -10,6 +10,15 @@
 //! key SAFETY (Unicode/Windows/traversal rules, TECH-SPEC §9) as a separate
 //! layer that lands with the apply pipeline (Phase 3).
 
+pub mod apply;
+pub mod conflict;
 pub mod event;
+pub mod keysafety;
+pub mod s3;
+pub mod state;
 
+pub use apply::{BindingConsumer, PollOutcome};
 pub use event::{validate_sync_event, EventValidationError, SyncEventV1, SYNC_EVENT_SCHEMA_VERSION};
+pub use keysafety::{validate_key, KeySafetyError};
+pub use s3::{RcloneS3, S3Error, S3Ops};
+pub use state::{BindingIdentity, ConsumerState, JournalRecord, StateStore};
