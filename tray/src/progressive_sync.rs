@@ -523,9 +523,214 @@ pub fn start_background() {
         .ok();
 }
 
+// ── status v2 (contract shared-binding-sync-status-v2, Phase 4) ────────────
+
+/// Count unresolved conflict records for a binding.
+fn unresolved_conflicts(binding_id: &str) -> u64 {
+    let Some(dir) = state_root().map(|r| r.join(binding_id).join("conflicts")) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+    entries
+        .flatten()
+        .filter(|e| {
+            std::fs::read_to_string(e.path())
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .map(|record| record.get("resolved_at").map_or(true, |v| v.is_null()))
+                .unwrap_or(false)
+        })
+        .count() as u64
+}
+
+/// Pure state derivation — the STRICT `synced` definition (contract):
+/// synced ⇔ fresh poll ∧ no repair_required ∧ zero unresolved conflicts ∧
+/// zero dead-letters ∧ every authorized route cursor == observed high water.
+/// Everything else is `syncing` or `attention` with explicit reasons.
+/// Recorded v1 deviation: the 15-min PRODUCER echo cap is deferred to the
+/// reconcile report (P5) — surfaced as `producer_echo: "unverified"`.
+pub fn derive_progressive_state(
+    outcome: Option<&serde_json::Value>,
+    last_poll_at: Option<u64>,
+    consecutive_errors: u32,
+    conflicts_unresolved: u64,
+    unpushed_local_edits: Option<u64>,
+    now_epoch: u64,
+) -> (String, Vec<String>) {
+    let mut reasons = Vec::new();
+    let mut attention = false;
+    let mut syncing = false;
+    match last_poll_at {
+        None => {
+            syncing = true;
+            reasons.push("no_poll_yet".into());
+        }
+        Some(at) => {
+            let age = now_epoch.saturating_sub(at);
+            if age > 600 {
+                attention = true;
+                reasons.push("polls_stalled".into());
+            } else if age > POLL_INTERVAL_SECS * 4 {
+                syncing = true;
+                reasons.push("poll_stale".into());
+            }
+        }
+    }
+    if consecutive_errors >= 3 {
+        attention = true;
+        reasons.push("repeated_poll_errors".into());
+    }
+    if conflicts_unresolved > 0 {
+        attention = true;
+        reasons.push("unresolved_conflicts".into());
+    }
+    if let Some(outcome) = outcome {
+        if outcome
+            .get("repair_required")
+            .and_then(|r| r.as_object())
+            .map(|m| !m.is_empty())
+            .unwrap_or(false)
+        {
+            attention = true;
+            reasons.push("repair_required".into());
+        }
+        if let Some(routes) = outcome.get("routes").and_then(|r| r.as_object()) {
+            let mut behind = false;
+            let mut dead = 0u64;
+            for cursor in routes.values() {
+                let applied = cursor.get("last_applied_sequence").and_then(|v| v.as_u64()).unwrap_or(0);
+                let high = cursor.get("observed_high_water_sequence").and_then(|v| v.as_u64()).unwrap_or(0);
+                if high > applied {
+                    behind = true;
+                }
+                dead += cursor.get("dead_letter_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                if cursor.get("repair_required").map_or(false, |v| !v.is_null()) {
+                    attention = true;
+                    if !reasons.iter().any(|r| r == "repair_required") {
+                        reasons.push("repair_required".into());
+                    }
+                }
+            }
+            if dead > 0 {
+                attention = true;
+                reasons.push("dead_letters".into());
+            }
+            if behind {
+                syncing = true;
+                reasons.push("events_pending".into());
+            }
+        }
+    }
+    if unpushed_local_edits.unwrap_or(0) > 0 {
+        // Pull-only honesty: local edits are NOT syncing on a v1 binding.
+        // Informational reason + UI badge; does not fake `attention`.
+        reasons.push("local_edits_not_synced".into());
+    }
+    let state = if attention {
+        "attention"
+    } else if syncing {
+        "syncing"
+    } else {
+        "synced"
+    };
+    (state.into(), reasons)
+}
+
+/// Full progressive `sync_status` block for one enabled binding, or None
+/// when the binding has no consumer state yet.
+pub fn binding_status_v2(binding_id: &str, checked_at: u64) -> Option<serde_json::Value> {
+    let map = status_map().lock().unwrap();
+    let status = map.get(binding_id);
+    let conflicts = unresolved_conflicts(binding_id);
+    let (outcome, last_poll_at, consecutive_errors, local_edits, scanned_at) = match status {
+        Some(s) => (
+            s.last_outcome.clone(),
+            s.last_poll_at,
+            s.consecutive_errors,
+            s.unpushed_local_edits,
+            s.last_local_scan_at,
+        ),
+        None => (None, None, 0, None, None),
+    };
+    let (state, reasons) = derive_progressive_state(
+        outcome.as_ref(),
+        last_poll_at,
+        consecutive_errors,
+        conflicts,
+        local_edits,
+        checked_at,
+    );
+    Some(serde_json::json!({
+        "schema_version": "shared-binding-sync-status-v2",
+        "mode": "progressive",
+        "pull_only": true,
+        "state": state,
+        "reasons": reasons,
+        "checked_at": checked_at,
+        "last_poll_at": last_poll_at,
+        "consecutive_errors": consecutive_errors,
+        "conflicts_unresolved": conflicts,
+        "local_edits": {"unpushed_count": local_edits, "scanned_at": scanned_at},
+        "producer_echo": "unverified",
+        "outcome": outcome,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn outcome(routes: serde_json::Value, repair: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"routes": routes, "repair_required": repair})
+    }
+
+    #[test]
+    fn strict_synced_requires_full_conjunction() {
+        let ok = outcome(
+            serde_json::json!({"r1": {"last_applied_sequence": 5, "observed_high_water_sequence": 5, "dead_letter_count": 0}}),
+            serde_json::json!({}),
+        );
+        let (state, reasons) = derive_progressive_state(Some(&ok), Some(1000), 0, 0, Some(0), 1010);
+        assert_eq!(state, "synced");
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn backlog_is_syncing_never_synced() {
+        let behind = outcome(
+            serde_json::json!({"r1": {"last_applied_sequence": 3, "observed_high_water_sequence": 5, "dead_letter_count": 0}}),
+            serde_json::json!({}),
+        );
+        let (state, reasons) = derive_progressive_state(Some(&behind), Some(1000), 0, 0, None, 1010);
+        assert_eq!(state, "syncing");
+        assert!(reasons.contains(&"events_pending".to_string()));
+    }
+
+    #[test]
+    fn repair_conflicts_dead_letters_stalls_are_attention() {
+        let repair = outcome(serde_json::json!({}), serde_json::json!({"r1": "sequence_gap"}));
+        assert_eq!(derive_progressive_state(Some(&repair), Some(1000), 0, 0, None, 1010).0, "attention");
+        let clean = outcome(serde_json::json!({}), serde_json::json!({}));
+        assert_eq!(derive_progressive_state(Some(&clean), Some(1000), 0, 2, None, 1010).0, "attention");
+        let dead = outcome(
+            serde_json::json!({"r1": {"last_applied_sequence": 5, "observed_high_water_sequence": 5, "dead_letter_count": 1}}),
+            serde_json::json!({}),
+        );
+        assert_eq!(derive_progressive_state(Some(&dead), Some(1000), 0, 0, None, 1010).0, "attention");
+        // polls stalled >10min — the incident-replay shape (frozen movement,
+        // reachable endpoint) can NEVER read synced
+        assert_eq!(derive_progressive_state(Some(&clean), Some(1000), 0, 0, None, 1000 + 601).0, "attention");
+        assert_eq!(derive_progressive_state(Some(&clean), None, 0, 0, None, 1010).0, "syncing");
+    }
+
+    #[test]
+    fn local_edits_reason_is_informational() {
+        let clean = outcome(
+            serde_json::json!({"r1": {"last_applied_sequence": 5, "observed_high_water_sequence": 5, "dead_letter_count": 0}}),
+            serde_json::json!({}),
+        );
+        let (state, reasons) = derive_progressive_state(Some(&clean), Some(1000), 0, 0, Some(7), 1010);
+        assert_eq!(state, "synced");
+        assert!(reasons.contains(&"local_edits_not_synced".to_string()));
+    }
 
     #[test]
     fn jitter_stays_within_25_percent() {
