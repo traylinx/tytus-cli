@@ -14297,6 +14297,44 @@ fn enrich_shared_binding_sync_status(
         }
     }
 
+    // Progressive-mode bindings (sprint 2026-06-30 P4): the event consumer,
+    // not bisync, is the mover — its cursor truth REPLACES the bisync-derived
+    // state (baselines are frozen by design once the agent is unloaded, so
+    // deriving from them would be the old green lie in a new coat). The
+    // endpoint-health overlay above still applies to both modes.
+    let progressive_enabled = binding
+        .get("progressive")
+        .and_then(|p| p.get("consumer_enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if progressive_enabled {
+        if let Some(binding_id) = binding.get("folder_id").and_then(|v| v.as_str()) {
+            if let Some(mut progressive) =
+                crate::progressive_sync::binding_status_v2(binding_id, checked_at)
+            {
+                if let (Some(dst), Some(src)) = (progressive.as_object_mut(), status.as_object()) {
+                    if let Some(eh) = src.get("endpoint_health") {
+                        // endpoint failing caps progressive state too — a
+                        // reachable-looking cursor cannot claim synced when
+                        // the endpoint the polls depend on is down.
+                        dst.insert("endpoint_health".into(), eh.clone());
+                        let failing = eh.get("reachable").and_then(|v| v.as_bool()) == Some(false);
+                        if failing && dst.get("state").and_then(|v| v.as_str()) == Some("synced") {
+                            dst.insert("state".into(), serde_json::json!("attention"));
+                            dst.entry("reasons")
+                                .or_insert_with(|| serde_json::json!([]))
+                                .as_array_mut()
+                                .map(|r| r.push(serde_json::json!("endpoint_unreachable")));
+                        }
+                    }
+                }
+                status = progressive;
+            }
+        }
+    } else if let Some(obj) = status.as_object_mut() {
+        obj.insert("mode".into(), serde_json::json!("bisync"));
+    }
+
     if let Some(obj) = binding.as_object_mut() {
         obj.insert("sync_status".to_string(), status);
     }
