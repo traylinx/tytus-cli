@@ -15,7 +15,32 @@
       "key_safe": true,
       "schema_valid": true
     },
+    "seq-bool.json": {
+      "dead_letter": "schema_invalid",
+      "schema_valid": false
+    },
     "seq-eventid-mismatch.json": {
+      "dead_letter": "schema_invalid",
+      "schema_valid": false
+    },
+    "seq-negative.json": {
+      "dead_letter": "schema_invalid",
+      "schema_valid": false
+    },
+    "seq-overflow.json": {
+      "dead_letter": "schema_invalid",
+      "schema_valid": false
+    },
+    "seq-u64-max-valid.json": {
+      "applied": true,
+      "key_safe": true,
+      "schema_valid": true
+    },
+    "size-bool.json": {
+      "dead_letter": "schema_invalid",
+      "schema_valid": false
+    },
+    "size-overflow.json": {
       "dead_letter": "schema_invalid",
       "schema_valid": false
     },
