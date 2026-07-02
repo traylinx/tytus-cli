@@ -1,0 +1,574 @@
+//! Progressive shared-folder sync — tray-side consumer orchestration
+//! (sprint tytus-garagetytus-progressive-sync-2026-06-30, Phase 3).
+//!
+//! Runs inside the resident tray daemon: a background thread polls each
+//! enabled binding's authorized route prefixes with jitter/backoff and drives
+//! the `tytus-progressive-sync` apply pipeline. Enable/disable implements the
+//! NORMATIVE order (unload the binding's bisync LaunchAgent → drain its
+//! rclone lock → set sidecar flags → polls start): consumer applies must
+//! never race a live bisync run. v1 is pull-only.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use tytus_progressive_sync::apply::{file_sha256, BindingConsumer, DEFAULT_CYCLE_BUDGET};
+use tytus_progressive_sync::s3::RcloneS3;
+use tytus_progressive_sync::state::{BindingIdentity, StateStore};
+
+pub const POLL_INTERVAL_SECS: u64 = 20;
+pub const BACKOFF_MAX_SECS: u64 = 300;
+pub const LOCK_DRAIN_TIMEOUT_SECS: u64 = 120;
+pub const LOCAL_EDIT_SCAN_INTERVAL_SECS: u64 = 3600;
+const RCLONE_REMOTE: &str = "garagetytus";
+
+/// Global kill switch (TECH-SPEC §12): `TYTUS_PROGRESSIVE_SHARED_SYNC=0`
+/// pauses every consumer poll without touching any state.
+pub fn kill_switch_engaged() -> bool {
+    std::env::var("TYTUS_PROGRESSIVE_SHARED_SYNC").map(|v| v == "0").unwrap_or(false)
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn bindings_cache_dir() -> Option<PathBuf> {
+    home().map(|h| h.join(".cache").join("garagetytus").join("bisync"))
+}
+
+pub fn state_root() -> Option<PathBuf> {
+    home().map(|h| h.join(".local").join("state").join("garagetytus").join("progressive-sync"))
+}
+
+fn rclone_conf_path() -> Option<String> {
+    home().map(|h| h.join(".config").join("rclone").join("rclone.conf").to_string_lossy().into_owned())
+}
+
+/// One enabled binding, resolved from its sidecar. Route authority is the
+/// LOCAL sidecar only (targets[].route_id / routes_provisioned).
+#[derive(Debug, Clone)]
+pub struct EnabledBinding {
+    pub sidecar_path: PathBuf,
+    pub binding_id: String,
+    pub bucket: String,
+    pub local_path: String,
+    pub alias: Option<String>,
+    pub routes: Vec<String>,
+    pub plist_label: Option<String>,
+    pub workdir: Option<PathBuf>,
+}
+
+fn parse_binding(path: &Path, json: &serde_json::Value) -> Option<EnabledBinding> {
+    let binding_id = json.get("folder_id")?.as_str()?.to_string();
+    let bucket = json.get("bucket")?.as_str()?.to_string();
+    let local_path = json.get("local_path")?.as_str()?.trim_end_matches('/').to_string();
+    let mut routes: Vec<String> = json
+        .get("targets")
+        .and_then(|t| t.as_array())
+        .map(|targets| {
+            targets
+                .iter()
+                .filter(|t| t.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true))
+                .filter_map(|t| t.get("route_id").and_then(|r| r.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if routes.is_empty() {
+        routes = json
+            .get("routes_provisioned")
+            .and_then(|r| r.as_array())
+            .map(|rows| rows.iter().filter_map(|v| v.as_str()).map(str::to_string).collect())
+            .unwrap_or_default();
+    }
+    routes.sort();
+    routes.dedup();
+    Some(EnabledBinding {
+        sidecar_path: path.to_path_buf(),
+        binding_id,
+        bucket,
+        local_path,
+        alias: json.get("alias").and_then(|a| a.as_str()).map(str::to_string),
+        routes,
+        plist_label: json.get("plist_label").and_then(|p| p.as_str()).map(str::to_string),
+        workdir: json.get("workdir").and_then(|w| w.as_str()).map(PathBuf::from),
+    })
+}
+
+fn read_sidecar(path: &Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn consumer_enabled(json: &serde_json::Value) -> bool {
+    json.get("progressive")
+        .and_then(|p| p.get("consumer_enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// All sidecars, with their parsed binding and enablement.
+pub fn discover() -> Vec<(EnabledBinding, bool)> {
+    let Some(dir) = bindings_cache_dir() else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.to_string_lossy().ends_with(".bindings.json") {
+            continue;
+        }
+        let Some(json) = read_sidecar(&path) else { continue };
+        if let Some(binding) = parse_binding(&path, &json) {
+            let enabled = consumer_enabled(&json);
+            out.push((binding, enabled));
+        }
+    }
+    out
+}
+
+// ── status surface (read by /api and the P4 status enrichment) ─────────────
+
+#[derive(Default)]
+pub struct BindingStatus {
+    pub last_poll_at: Option<u64>,
+    pub last_outcome: Option<serde_json::Value>,
+    pub consecutive_errors: u32,
+    pub unpushed_local_edits: Option<u64>,
+    pub last_local_scan_at: Option<u64>,
+}
+
+static STATUS: OnceLock<Mutex<HashMap<String, BindingStatus>>> = OnceLock::new();
+static NUDGE: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static STARTED: AtomicBool = AtomicBool::new(false);
+
+fn status_map() -> &'static Mutex<HashMap<String, BindingStatus>> {
+    STATUS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn nudges() -> &'static Mutex<Vec<String>> {
+    NUDGE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub fn sync_now(binding_id: &str) {
+    nudges().lock().unwrap().push(binding_id.to_string());
+}
+
+fn epoch_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+pub fn status_snapshot() -> serde_json::Value {
+    let map = status_map().lock().unwrap();
+    let mut out = serde_json::Map::new();
+    for (binding_id, status) in map.iter() {
+        out.insert(binding_id.clone(), serde_json::json!({
+            "last_poll_at": status.last_poll_at,
+            "outcome": status.last_outcome,
+            "consecutive_errors": status.consecutive_errors,
+            "local_edits": {"unpushed_count": status.unpushed_local_edits,
+                             "scanned_at": status.last_local_scan_at},
+        }));
+    }
+    serde_json::Value::Object(out)
+}
+
+// ── enable / disable (the normative order) ──────────────────────────────────
+
+#[derive(Debug)]
+pub struct ToggleReport {
+    pub binding_id: String,
+    pub enabled: bool,
+    pub bisync_agent_unloaded: bool,
+    pub bisync_agent_reloaded: bool,
+    pub lock_drained: bool,
+}
+
+fn uid_string() -> String {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "501".to_string())
+}
+
+fn plist_path(label: &str) -> Option<PathBuf> {
+    if label.contains('/') || label.contains("..") {
+        return None;
+    }
+    home().map(|h| h.join("Library").join("LaunchAgents").join(format!("{label}.plist")))
+}
+
+fn unload_bisync_agent(label: &str) -> bool {
+    let Some(plist) = plist_path(label) else { return false };
+    if !plist.exists() {
+        return false;
+    }
+    // bootout stops the schedule; the plist FILE stays for rollback reload.
+    Command::new("launchctl")
+        .arg("bootout")
+        .arg(format!("gui/{}", uid_string()))
+        .arg(&plist)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Positive proof the agent is NOT loaded (`launchctl print` on the service
+/// target fails when it does not exist). The toggle fails closed on ambiguity:
+/// a binding must never end up with BOTH movers active (G3-B review).
+fn bisync_agent_loaded(label: &str) -> bool {
+    Command::new("launchctl")
+        .arg("print")
+        .arg(format!("gui/{}/{}", uid_string(), label))
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(true) // cannot prove it's gone -> treat as loaded
+}
+
+fn reload_bisync_agent(label: &str) -> bool {
+    let Some(plist) = plist_path(label) else { return false };
+    if !plist.exists() {
+        return false;
+    }
+    Command::new("launchctl")
+        .arg("bootstrap")
+        .arg(format!("gui/{}", uid_string()))
+        .arg(&plist)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn drain_lock(workdir: Option<&Path>) -> bool {
+    let Some(workdir) = workdir else { return true };
+    let deadline = Instant::now() + Duration::from_secs(LOCK_DRAIN_TIMEOUT_SECS);
+    loop {
+        let locked = std::fs::read_dir(workdir)
+            .map(|entries| {
+                entries.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".lck"))
+            })
+            .unwrap_or(false);
+        if !locked {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+fn write_sidecar_atomic(path: &Path, json: &serde_json::Value) -> std::io::Result<()> {
+    let tmp = path.with_extension("bindings.json.tmp");
+    let bytes = serde_json::to_vec_pretty(json).unwrap_or_else(|_| b"{}".to_vec());
+    match std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Find a binding sidecar by folder_id, slug, or alias.
+pub fn find_binding(reference: &str) -> Option<(EnabledBinding, serde_json::Value)> {
+    for (binding, _) in discover() {
+        if binding.binding_id == reference
+            || binding.alias.as_deref() == Some(reference)
+            || read_sidecar(&binding.sidecar_path)
+                .and_then(|j| j.get("slug").and_then(|s| s.as_str()).map(|s| s == reference))
+                .unwrap_or(false)
+        {
+            let json = read_sidecar(&binding.sidecar_path)?;
+            return Some((binding, json));
+        }
+    }
+    None
+}
+
+pub fn set_enabled(reference: &str, enable: bool) -> Result<ToggleReport, String> {
+    let (binding, mut json) = find_binding(reference).ok_or_else(|| format!("no binding matches {reference:?}"))?;
+    if enable && binding.routes.is_empty() {
+        return Err("binding has no provisioned routes — nothing to consume".into());
+    }
+    let mut unloaded = false;
+    let mut reloaded = false;
+    let mut drained = true;
+    if enable {
+        // Normative order: (1) unload bisync agent, (2) drain the lock,
+        // (3) set flags — polls start on the next scheduler tick.
+        if let Some(label) = binding.plist_label.as_deref() {
+            unloaded = unload_bisync_agent(label);
+            // Fail closed (G3-B review): flags are set only with positive
+            // proof the agent is NOT loaded — both movers must never run.
+            if bisync_agent_loaded(label) {
+                return Err(format!(
+                    "bisync agent {label} is still loaded after bootout; toggle aborted (fail closed)"
+                ));
+            }
+        }
+        drained = drain_lock(binding.workdir.as_deref());
+        if !drained {
+            // Roll back step 1: never leave a binding with neither mover.
+            let rollback_ok = binding
+                .plist_label
+                .as_deref()
+                .map(reload_bisync_agent)
+                .unwrap_or(true);
+            return Err(if rollback_ok {
+                "bisync lock did not drain within timeout; binding left on bisync".into()
+            } else {
+                "bisync lock did not drain AND the agent reload failed — binding has \
+                 NO active mover; reload the LaunchAgent manually"
+                    .into()
+            });
+        }
+    }
+    let schema_version = json.get("schema_version").and_then(|v| v.as_u64()).unwrap_or(2);
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("schema_version".into(), serde_json::json!(schema_version.max(3)));
+        let state_dir = state_root()
+            .map(|r| r.join(&binding.binding_id).to_string_lossy().into_owned());
+        obj.insert("progressive".into(), serde_json::json!({
+            "consumer_enabled": enable,
+            "post_delta": enable,
+            "state_dir": state_dir,
+            "toggled_at": tytus_progressive_sync::state::utc_now(),
+        }));
+    }
+    write_sidecar_atomic(&binding.sidecar_path, &json).map_err(|e| format!("sidecar write: {e}"))?;
+    if !enable {
+        // Pre-delta rollback: resume bisync for this binding.
+        if let Some(label) = binding.plist_label.as_deref() {
+            reloaded = reload_bisync_agent(label);
+        }
+    }
+    Ok(ToggleReport {
+        binding_id: binding.binding_id,
+        enabled: enable,
+        bisync_agent_unloaded: unloaded,
+        bisync_agent_reloaded: reloaded,
+        lock_drained: drained,
+    })
+}
+
+// ── the poll scheduler ──────────────────────────────────────────────────────
+
+fn jittered_interval(binding_id: &str, tick: u64) -> Duration {
+    // Deterministic ±25% jitter from a cheap hash — no rand dependency.
+    let mut acc: u64 = tick.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    for b in binding_id.bytes() {
+        acc = acc.rotate_left(7) ^ u64::from(b);
+    }
+    let base = POLL_INTERVAL_SECS * 1000;
+    let spread = base / 2; // ±25%
+    let offset = acc % spread;
+    Duration::from_millis(base - spread / 2 + offset)
+}
+
+fn poll_binding(binding: &EnabledBinding) -> Result<serde_json::Value, String> {
+    let root = state_root().ok_or("no HOME")?;
+    let identity = BindingIdentity {
+        binding_id: binding.binding_id.clone(),
+        bucket: binding.bucket.clone(),
+        local_path: binding.local_path.clone(),
+        alias: binding.alias.clone(),
+    };
+    let store = StateStore::open(&root, &identity).map_err(|e| e.to_string())?;
+    let (mut state, pending) = store.load(&identity, "tray").map_err(|e| e.to_string())?;
+    let s3 = RcloneS3::new(RCLONE_REMOTE, &binding.bucket, rclone_conf_path());
+    let mut consumer = BindingConsumer::new(&s3, &store, &mut state, &identity, binding.routes.clone());
+    consumer.cycle_budget = DEFAULT_CYCLE_BUDGET;
+    consumer.recover(pending);
+    let outcome = consumer.poll_once();
+    let value = serde_json::json!({
+        "applied": outcome.applied,
+        "conflicts": outcome.conflicts,
+        "dead_letters": outcome.dead_letters,
+        "delete_ignored": outcome.delete_ignored,
+        "events_seen": outcome.events_seen,
+        "repair_required": outcome.repair_required,
+        "transient_errors": outcome.transient_errors,
+        "routes": state.routes.iter().map(|(route, cursor)| {
+            (route.clone(), serde_json::json!({
+                "last_applied_sequence": cursor.last_applied_sequence,
+                "observed_high_water_sequence": cursor.observed_high_water_sequence,
+                "repair_required": cursor.repair_required,
+                "dead_letter_count": cursor.dead_letter_count,
+            }))
+        }).collect::<serde_json::Map<_, _>>(),
+    });
+    let had_errors = !outcome.transient_errors.is_empty();
+    if had_errors {
+        Err(value.to_string())
+    } else {
+        Ok(value)
+    }
+}
+
+/// Hourly LOCAL-only scan (no remote listing): count files that differ from
+/// the ledger — pull-only honesty (`local_edits_not_synced`).
+fn scan_local_edits(binding: &EnabledBinding) -> Option<u64> {
+    let root = state_root()?;
+    let identity = BindingIdentity {
+        binding_id: binding.binding_id.clone(),
+        bucket: binding.bucket.clone(),
+        local_path: binding.local_path.clone(),
+        alias: binding.alias.clone(),
+    };
+    let store = StateStore::open(&root, &identity).ok()?;
+    let (state, _) = store.load(&identity, "tray").ok()?;
+    let base = PathBuf::from(&binding.local_path);
+    let mut unpushed = 0u64;
+    let mut stack = vec![base.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "_tytus-sync" {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(&base) else { continue };
+            let key = rel.to_string_lossy().replace('\\', "/");
+            match state.ledger.get(&key) {
+                None => unpushed += 1,
+                Some(entry_record) => {
+                    // size check first; hash only when it can differ
+                    let changed = file_sha256(&path)
+                        .map(|h| h != entry_record.sha256)
+                        .unwrap_or(true);
+                    if changed {
+                        unpushed += 1;
+                    }
+                }
+            }
+        }
+    }
+    Some(unpushed)
+}
+
+/// Start the resident scheduler thread. Idempotent.
+pub fn start_background() {
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("progressive-sync".into())
+        .spawn(|| {
+            let mut next_poll: HashMap<String, Instant> = HashMap::new();
+            let mut backoff: HashMap<String, u64> = HashMap::new();
+            let mut tick: u64 = 0;
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                tick += 1;
+                if kill_switch_engaged() || !crate::web_server::sharing_enabled_now() {
+                    continue;
+                }
+                let nudged: Vec<String> = std::mem::take(&mut *nudges().lock().unwrap());
+                for (binding, enabled) in discover() {
+                    if !enabled || binding.routes.is_empty() {
+                        continue;
+                    }
+                    let id = binding.binding_id.clone();
+                    let due = next_poll.get(&id).map_or(true, |t| Instant::now() >= *t)
+                        || nudged.iter().any(|n| n == &id);
+                    if !due {
+                        continue;
+                    }
+                    let result = poll_binding(&binding);
+                    let mut map = status_map().lock().unwrap();
+                    let status = map.entry(id.clone()).or_default();
+                    status.last_poll_at = Some(epoch_now());
+                    match result {
+                        Ok(outcome) => {
+                            status.last_outcome = Some(outcome);
+                            status.consecutive_errors = 0;
+                            backoff.remove(&id);
+                            next_poll.insert(id.clone(), Instant::now() + jittered_interval(&id, tick));
+                        }
+                        Err(outcome) => {
+                            status.last_outcome = serde_json::from_str(&outcome).ok();
+                            status.consecutive_errors = status.consecutive_errors.saturating_add(1);
+                            let delay = backoff
+                                .entry(id.clone())
+                                .and_modify(|d| *d = (*d * 2).min(BACKOFF_MAX_SECS))
+                                .or_insert(POLL_INTERVAL_SECS * 2);
+                            next_poll.insert(id.clone(), Instant::now() + Duration::from_secs(*delay));
+                        }
+                    }
+                    let scan_due = status
+                        .last_local_scan_at
+                        .map_or(true, |at| epoch_now().saturating_sub(at) >= LOCAL_EDIT_SCAN_INTERVAL_SECS);
+                    drop(map);
+                    if scan_due {
+                        let count = scan_local_edits(&binding);
+                        let mut map = status_map().lock().unwrap();
+                        let status = map.entry(id.clone()).or_default();
+                        status.unpushed_local_edits = count;
+                        status.last_local_scan_at = Some(epoch_now());
+                    }
+                }
+            }
+        })
+        .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jitter_stays_within_25_percent() {
+        for tick in 0..50 {
+            let d = jittered_interval("sf_test", tick).as_millis() as u64;
+            assert!((15_000..=25_000).contains(&d), "{d}");
+        }
+    }
+
+    #[test]
+    fn parse_binding_extracts_routes_from_targets() {
+        let json = serde_json::json!({
+            "folder_id": "sf_x", "bucket": "b", "local_path": "/tmp/x/",
+            "plist_label": "com.traylinx.garagetytus.bisync.x",
+            "targets": [
+                {"route_id": "r1", "enabled": true},
+                {"route_id": "r2", "enabled": false},
+                {"route_id": "r1", "enabled": true},
+            ],
+            "routes_provisioned": ["r9"],
+        });
+        let binding = parse_binding(Path::new("/tmp/x.bindings.json"), &json).unwrap();
+        assert_eq!(binding.routes, vec!["r1"]);
+        assert_eq!(binding.local_path, "/tmp/x");
+    }
+
+    #[test]
+    fn parse_binding_falls_back_to_routes_provisioned() {
+        let json = serde_json::json!({
+            "folder_id": "sf_x", "bucket": "b", "local_path": "/tmp/x",
+            "routes_provisioned": ["r2", "r1", "r2"],
+        });
+        let binding = parse_binding(Path::new("/tmp/x.bindings.json"), &json).unwrap();
+        assert_eq!(binding.routes, vec!["r1", "r2"]);
+    }
+
+    #[test]
+    fn consumer_enabled_reads_progressive_block() {
+        let on = serde_json::json!({"progressive": {"consumer_enabled": true}});
+        let off = serde_json::json!({"progressive": {"consumer_enabled": false}});
+        let absent = serde_json::json!({});
+        assert!(consumer_enabled(&on));
+        assert!(!consumer_enabled(&off));
+        assert!(!consumer_enabled(&absent));
+    }
+}

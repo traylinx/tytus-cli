@@ -28,6 +28,7 @@ mod music_connectors;
 mod music_proxy;
 mod music_ytdlp;
 mod music_ytdlp_setup;
+mod progressive_sync;
 mod shared_folders;
 mod single_instance;
 mod socket;

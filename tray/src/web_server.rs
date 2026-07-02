@@ -3243,6 +3243,11 @@ pub fn start() -> Option<u16> {
     daemon_started_at();
     music_ytdlp_setup::start_background_install();
     migrate_legacy_shared_folder_launch_agents_best_effort();
+    // Progressive shared-folder sync consumer (sprint 2026-06-30 P3):
+    // resident poll scheduler; inert until a binding opts in via
+    // POST /api/shared-folders/progressive (kill switch:
+    // TYTUS_PROGRESSIVE_SHARED_SYNC=0).
+    crate::progressive_sync::start_background();
 
     let env_port = std::env::var("TYTUS_TRAY_PORT")
         .ok()
@@ -4532,6 +4537,18 @@ fn handle(request: Request, registry: Registry) {
         }
         (Method::Post, "/api/shared-folders/bind") => {
             handle_shared_folders_bind(request, &registry);
+        }
+        // ── progressive sync (sprint 2026-06-30 P3): exact-key event
+        //    consumer per binding; enable implements the normative order
+        //    (unload bisync agent → drain lock → set sidecar flags).
+        (Method::Post, "/api/shared-folders/progressive") => {
+            handle_progressive_toggle(request);
+        }
+        (Method::Post, "/api/shared-folders/progressive/sync-now") => {
+            handle_progressive_sync_now(request);
+        }
+        (Method::Get, "/api/shared-folders/progressive/status") => {
+            respond_json(request, 200, &crate::progressive_sync::status_snapshot());
         }
         // ── rc.13 / PR3: Files app safe browser actions ─────────────
         (Method::Get, "/api/files/list") => {
@@ -10292,6 +10309,11 @@ fn sharing_mutations_enabled() -> bool {
     load_sharing_defaults().sharing_globally_enabled
 }
 
+/// The master sharing pause also gates the progressive-sync consumer polls.
+pub(crate) fn sharing_enabled_now() -> bool {
+    load_sharing_defaults().sharing_globally_enabled
+}
+
 fn handle_sharing_defaults_get(request: Request) {
     respond_json(request, 200, &load_sharing_defaults());
 }
@@ -11768,6 +11790,82 @@ fn handle_shared_folders_update_targets(mut request: Request, _registry: &Regist
 /// POST /api/shared-folders/update-alias — body `{bucket, local_path, slug}`.
 /// Renames the workspace-facing alias only. It never renames/deletes the Mac
 /// folder and never changes the Garage bucket.
+fn handle_progressive_toggle(mut request: Request) {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        /// folder_id, slug, or alias
+        binding: String,
+        enabled: bool,
+    }
+
+    if !sharing_mutations_enabled() {
+        respond_sharing_paused(request);
+        return;
+    }
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: Body = match serde_json::from_str(&buf) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error":format!("bad json: {}", e)}));
+            return;
+        }
+    };
+    match crate::progressive_sync::set_enabled(body.binding.trim(), body.enabled) {
+        Ok(report) => {
+            if report.enabled {
+                crate::progressive_sync::sync_now(&report.binding_id);
+            }
+            respond_json(request, 200, &serde_json::json!({
+                "ok": true,
+                "binding_id": report.binding_id,
+                "enabled": report.enabled,
+                "bisync_agent_unloaded": report.bisync_agent_unloaded,
+                "bisync_agent_reloaded": report.bisync_agent_reloaded,
+                "lock_drained": report.lock_drained,
+                "pull_only": true,
+            }));
+        }
+        Err(message) => {
+            respond_json(request, 409, &serde_json::json!({
+                "error": message,
+                "code": "sharing.progressive.toggle_failed",
+            }));
+        }
+    }
+}
+
+fn handle_progressive_sync_now(mut request: Request) {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        binding: String,
+    }
+    let mut buf = String::new();
+    if request.as_reader().read_to_string(&mut buf).is_err() {
+        respond_json(request, 400, &serde_json::json!({"error":"bad body"}));
+        return;
+    }
+    let body: Body = match serde_json::from_str(&buf) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(request, 400, &serde_json::json!({"error":format!("bad json: {}", e)}));
+            return;
+        }
+    };
+    match crate::progressive_sync::find_binding(body.binding.trim()) {
+        Some((binding, _)) => {
+            crate::progressive_sync::sync_now(&binding.binding_id);
+            respond_json(request, 200, &serde_json::json!({"ok": true, "binding_id": binding.binding_id}));
+        }
+        None => {
+            respond_json(request, 404, &serde_json::json!({"error":"no such binding"}));
+        }
+    }
+}
+
 fn handle_shared_folders_update_alias(mut request: Request) {
     #[derive(serde::Deserialize)]
     struct Body {
