@@ -1,0 +1,21 @@
+{
+  "binding_id": "sf_0000synthetic0000",
+  "bucket": "tytus-progressive-canary",
+  "content_ref": "_tytus-sync/blobs/sha256/cb9409737f3b3723ea638030899336eaa27e07890f2557c303f6d8418e7cba50",
+  "created_at": "2026-07-02T12:00:00Z",
+  "event_id": "00000000000000000046-01J2Z7P2V8QJ0S7KX6YQ8M9H3A",
+  "key": "docs/résumé.md",
+  "object": {
+    "mtime_unix_ms": 1782820374427,
+    "sha256": "sha256:cb9409737f3b3723ea638030899336eaa27e07890f2557c303f6d8418e7cba50",
+    "size": 997
+  },
+  "op": "put",
+  "producer": {
+    "agent_label": "SyntheticPod",
+    "implementation": "tytus-shared-watch/3"
+  },
+  "route_id": "r0synthetic",
+  "schema_version": "sync-event-v1",
+  "sequence": 46
+}

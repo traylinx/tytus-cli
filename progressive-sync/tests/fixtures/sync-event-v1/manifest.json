@@ -1,0 +1,43 @@
+{
+  "schema": "sync-event-v1-fixture-manifest",
+  "verdicts": {
+    "delete-reserved.json": {
+      "counter": "delete_events_ignored",
+      "ignored": true,
+      "schema_valid": true
+    },
+    "missing-content-ref.json": {
+      "dead_letter": "schema_invalid",
+      "schema_valid": false
+    },
+    "nfc-key.json": {
+      "applied": true,
+      "key_safe": true,
+      "schema_valid": true
+    },
+    "seq-eventid-mismatch.json": {
+      "dead_letter": "schema_invalid",
+      "schema_valid": false
+    },
+    "unknown-fields.json": {
+      "applied": true,
+      "key_safe": true,
+      "schema_valid": true
+    },
+    "valid-pod-put.json": {
+      "applied": true,
+      "key_safe": true,
+      "schema_valid": true
+    },
+    "valid-scoped-prefix.json": {
+      "applied": true,
+      "key_safe": true,
+      "schema_valid": true
+    },
+    "windows-unsafe-key.json": {
+      "dead_letter": "path_invalid",
+      "key_safe": false,
+      "schema_valid": true
+    }
+  }
+}

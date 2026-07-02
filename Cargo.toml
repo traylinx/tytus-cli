@@ -8,6 +8,7 @@ members = [
     "tunnel",
     "mcp",
     "tray",
+    "progressive-sync",
 ]
 
 [workspace.package]
