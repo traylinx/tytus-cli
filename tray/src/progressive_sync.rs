@@ -59,6 +59,11 @@ pub struct EnabledBinding {
     pub routes: Vec<String>,
     pub plist_label: Option<String>,
     pub workdir: Option<PathBuf>,
+    /// The binding id producers emit under (`grant.folder_id` from the
+    /// Provider registry). It differs from the local sidecar `folder_id` on
+    /// every Provider-provisioned binding. None = not discovered yet; the
+    /// scheduler re-discovers lazily and persists the answer to the sidecar.
+    pub remote_binding_id: Option<String>,
 }
 
 fn parse_binding(path: &Path, json: &serde_json::Value) -> Option<EnabledBinding> {
@@ -95,7 +100,93 @@ fn parse_binding(path: &Path, json: &serde_json::Value) -> Option<EnabledBinding
         routes,
         plist_label: json.get("plist_label").and_then(|p| p.as_str()).map(str::to_string),
         workdir: json.get("workdir").and_then(|w| w.as_str()).map(PathBuf::from),
+        remote_binding_id: json
+            .get("progressive")
+            .and_then(|p| p.get("remote_binding_id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
     })
+}
+
+// ── remote binding-id discovery ─────────────────────────────────────────────
+//
+// Producers emit under `_tytus-sync/events/<grant.folder_id>/<route_id>/`.
+// `grant.folder_id` comes from the Provider registry and does NOT match the
+// Mac-local sidecar `folder_id`, so the consumer must discover the remote
+// namespace instead of assuming its own id. Route ids are globally unique
+// (Scalesys invariant), which makes the match unambiguous unless the folder
+// was re-registered; ambiguity fails closed.
+
+/// List immediate subdirectory names under `bucket/prefix` (no trailing `/`).
+fn list_remote_dirs(bucket: &str, prefix: &str) -> Result<Vec<String>, String> {
+    let mut cmd = Command::new("rclone");
+    if let Some(conf) = rclone_conf_path() {
+        cmd.arg("--config").arg(conf);
+    }
+    cmd.arg("--contimeout").arg("10s");
+    cmd.arg("--timeout").arg("30s");
+    cmd.arg("--retries").arg("1");
+    cmd.arg("--low-level-retries").arg("2");
+    cmd.arg("lsf").arg("--dirs-only").arg("--max-depth").arg("1");
+    cmd.arg(format!("{RCLONE_REMOTE}:{bucket}/{prefix}"));
+    let out = cmd.output().map_err(|e| format!("rclone spawn: {e}"))?;
+    if !out.status.success() {
+        // rclone exits non-zero on a missing directory too; treat a clean
+        // "directory not found" the same as empty (producer never emitted).
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("directory not found") {
+            return Ok(Vec::new());
+        }
+        return Err(format!("rclone lsf failed: {}", stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().trim_end_matches('/').to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// Pure matcher: candidates are `(binding_dir, route_dirs)`; a candidate
+/// matches when it contains at least one of the binding's authorized routes.
+fn match_remote_candidates(
+    candidates: &[(String, Vec<String>)],
+    routes: &[String],
+) -> Result<Option<String>, String> {
+    let matches: Vec<&String> = candidates
+        .iter()
+        .filter(|(_, route_dirs)| route_dirs.iter().any(|r| routes.iter().any(|x| x == r)))
+        .map(|(id, _)| id)
+        .collect();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches[0].clone())),
+        _ => Err(format!(
+            "remote binding id is ambiguous: {} event namespaces claim this binding's routes",
+            matches.len()
+        )),
+    }
+}
+
+/// Resolve the remote binding id from the events namespace. `Ok(None)` means
+/// no producer has emitted yet (harmless — retry on later scheduler passes).
+fn discover_remote_binding_id(bucket: &str, routes: &[String]) -> Result<Option<String>, String> {
+    let mut candidates = Vec::new();
+    for dir in list_remote_dirs(bucket, "_tytus-sync/events/")? {
+        let route_dirs = list_remote_dirs(bucket, &format!("_tytus-sync/events/{dir}/"))?;
+        candidates.push((dir, route_dirs));
+    }
+    match_remote_candidates(&candidates, routes)
+}
+
+/// Persist a discovered remote binding id into the sidecar's progressive
+/// block so later passes (and other readers) skip discovery.
+fn persist_remote_binding_id(sidecar_path: &Path, remote_id: &str) -> Result<(), String> {
+    let mut json = read_sidecar(sidecar_path).ok_or("sidecar unreadable")?;
+    let Some(progressive) = json.get_mut("progressive").and_then(|p| p.as_object_mut()) else {
+        return Err("sidecar has no progressive block".into());
+    };
+    progressive.insert("remote_binding_id".into(), serde_json::json!(remote_id));
+    write_sidecar_atomic(sidecar_path, &json).map_err(|e| format!("sidecar write: {e}"))
 }
 
 fn read_sidecar(path: &Path) -> Option<serde_json::Value> {
@@ -299,7 +390,16 @@ pub fn set_enabled(reference: &str, enable: bool) -> Result<ToggleReport, String
     let mut unloaded = false;
     let mut reloaded = false;
     let mut drained = true;
+    let mut remote_binding_id = binding.remote_binding_id.clone();
     if enable {
+        // Resolve the remote events namespace BEFORE touching the movers —
+        // discovery is read-only, and an ambiguous namespace must abort the
+        // toggle while bisync is still the active mover. `None` (producer has
+        // not emitted yet) is fine: the scheduler re-discovers lazily.
+        if remote_binding_id.is_none() {
+            remote_binding_id = discover_remote_binding_id(&binding.bucket, &binding.routes)
+                .map_err(|e| format!("remote binding-id discovery: {e}"))?;
+        }
         // Normative order: (1) unload bisync agent, (2) drain the lock,
         // (3) set flags — polls start on the next scheduler tick.
         if let Some(label) = binding.plist_label.as_deref() {
@@ -337,6 +437,7 @@ pub fn set_enabled(reference: &str, enable: bool) -> Result<ToggleReport, String
         obj.insert("progressive".into(), serde_json::json!({
             "consumer_enabled": enable,
             "post_delta": enable,
+            "remote_binding_id": remote_binding_id,
             "state_dir": state_dir,
             "toggled_at": tytus_progressive_sync::state::utc_now(),
         }));
@@ -384,9 +485,13 @@ fn poll_binding(binding: &EnabledBinding) -> Result<serde_json::Value, String> {
     let s3 = RcloneS3::new(RCLONE_REMOTE, &binding.bucket, rclone_conf_path());
     let mut consumer = BindingConsumer::new(&s3, &store, &mut state, &identity, binding.routes.clone());
     consumer.cycle_budget = DEFAULT_CYCLE_BUDGET;
+    if let Some(remote_id) = binding.remote_binding_id.as_ref() {
+        consumer.remote_binding_id = remote_id.clone();
+    }
     consumer.recover(pending);
     let outcome = consumer.poll_once();
     let value = serde_json::json!({
+        "remote_binding_id": binding.remote_binding_id,
         "applied": outcome.applied,
         "conflicts": outcome.conflicts,
         "dead_letters": outcome.dead_letters,
@@ -475,7 +580,7 @@ pub fn start_background() {
                     continue;
                 }
                 let nudged: Vec<String> = std::mem::take(&mut *nudges().lock().unwrap());
-                for (binding, enabled) in discover() {
+                for (mut binding, enabled) in discover() {
                     if !enabled || binding.routes.is_empty() {
                         continue;
                     }
@@ -484,6 +589,35 @@ pub fn start_background() {
                         || nudged.iter().any(|n| n == &id);
                     if !due {
                         continue;
+                    }
+                    // Lazy remote-namespace discovery: bindings toggled before
+                    // the producer's first emit have no remote_binding_id yet.
+                    // Ambiguity fails closed (skip the poll, surface the error);
+                    // "not found yet" polls the local id, which is harmless.
+                    if binding.remote_binding_id.is_none() {
+                        match discover_remote_binding_id(&binding.bucket, &binding.routes) {
+                            Ok(Some(remote_id)) => {
+                                let _ = persist_remote_binding_id(&binding.sidecar_path, &remote_id);
+                                binding.remote_binding_id = Some(remote_id);
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                let mut map = status_map().lock().unwrap();
+                                let status = map.entry(id.clone()).or_default();
+                                status.last_poll_at = Some(epoch_now());
+                                status.last_outcome = Some(serde_json::json!({
+                                    "transient_errors": [format!("remote binding-id discovery: {e}")],
+                                }));
+                                status.consecutive_errors = status.consecutive_errors.saturating_add(1);
+                                drop(map);
+                                let delay = backoff
+                                    .entry(id.clone())
+                                    .and_modify(|d| *d = (*d * 2).min(BACKOFF_MAX_SECS))
+                                    .or_insert(POLL_INTERVAL_SECS * 2);
+                                next_poll.insert(id.clone(), Instant::now() + Duration::from_secs(*delay));
+                                continue;
+                            }
+                        }
                     }
                     let result = poll_binding(&binding);
                     let mut map = status_map().lock().unwrap();
@@ -775,5 +909,48 @@ mod tests {
         assert!(consumer_enabled(&on));
         assert!(!consumer_enabled(&off));
         assert!(!consumer_enabled(&absent));
+    }
+
+    #[test]
+    fn parse_binding_reads_remote_binding_id() {
+        let with = serde_json::json!({
+            "folder_id": "sf_local", "bucket": "b", "local_path": "/tmp/x",
+            "routes_provisioned": ["r1"],
+            "progressive": {"consumer_enabled": true, "remote_binding_id": "sf_remote"},
+        });
+        let without = serde_json::json!({
+            "folder_id": "sf_local", "bucket": "b", "local_path": "/tmp/x",
+            "routes_provisioned": ["r1"],
+            "progressive": {"consumer_enabled": true, "remote_binding_id": null},
+        });
+        assert_eq!(
+            parse_binding(Path::new("/tmp/x.bindings.json"), &with).unwrap().remote_binding_id,
+            Some("sf_remote".to_string())
+        );
+        assert_eq!(
+            parse_binding(Path::new("/tmp/x.bindings.json"), &without).unwrap().remote_binding_id,
+            None
+        );
+    }
+
+    #[test]
+    fn match_remote_candidates_route_scoped() {
+        let routes = vec!["r-lisa".to_string(), "r-claus".to_string()];
+        // one namespace claims our routes → unambiguous
+        let one = vec![
+            ("sf_provider".to_string(), vec!["r-lisa".to_string()]),
+            ("sf_other".to_string(), vec!["r-foreign".to_string()]),
+        ];
+        assert_eq!(match_remote_candidates(&one, &routes).unwrap(), Some("sf_provider".into()));
+        // none claim them → not discovered yet
+        let none = vec![("sf_other".to_string(), vec!["r-foreign".to_string()])];
+        assert_eq!(match_remote_candidates(&none, &routes).unwrap(), None);
+        assert_eq!(match_remote_candidates(&[], &routes).unwrap(), None);
+        // two claim them → fail closed
+        let two = vec![
+            ("sf_a".to_string(), vec!["r-lisa".to_string()]),
+            ("sf_b".to_string(), vec!["r-claus".to_string()]),
+        ];
+        assert!(match_remote_candidates(&two, &routes).is_err());
     }
 }
