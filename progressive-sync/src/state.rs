@@ -91,7 +91,11 @@ pub struct RouteCursor {
     pub observed_high_water_sequence: u64,
     #[serde(default)]
     pub processed_window: Vec<String>,
-    #[serde(default)]
+    /// DERIVED state (G3 review): set from live listing observations, cleared
+    /// by durable skip_sequence/repair records. Never serialized — a snapshot
+    /// must contain nothing that is not journal-derived; after a restart the
+    /// condition re-derives from the next polls.
+    #[serde(skip)]
     pub repair_required: Option<String>,
     #[serde(default)]
     pub dead_letter_count: u64,
@@ -190,7 +194,23 @@ impl ConsumerState {
                 // for the gap it adjudicated (contract: auditable-or-not-at-all).
                 cursor.repair_required = None;
             }
-            JournalRecord::Repair { .. } => {}
+            JournalRecord::Repair { corrections, .. } => {
+                // Reconcile is ground truth: a durable repair record clears
+                // the repair-required state for every route it corrected
+                // (G3 review change 5). Cursor rewrites ride the corrections.
+                if let Some(rows) = corrections.as_array() {
+                    for row in rows {
+                        let Some(route_id) = row.get("route_id").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let cursor = self.route(route_id);
+                        cursor.repair_required = None;
+                        if let Some(seq) = row.get("set_cursor_sequence").and_then(|v| v.as_u64()) {
+                            cursor.last_applied_sequence = seq.max(cursor.last_applied_sequence);
+                        }
+                    }
+                }
+            }
         }
     }
 }

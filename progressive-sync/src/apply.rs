@@ -38,12 +38,30 @@ pub struct PollOutcome {
     pub events_seen: u64,
 }
 
-/// Per-route in-memory progress (attempts/backoff/grace are re-derived after
-/// a restart; durable facts live in the journal only).
+/// Per-route in-memory progress. Gap grace is re-derived after a restart;
+/// retry ATTEMPTS are durable (attempts.json) so a poison event cannot dodge
+/// its dead-letter budget by riding process restarts (G3 review change 2).
 #[derive(Default)]
 struct RouteRuntime {
     gap_polls: u32,
-    attempts: HashMap<String, u32>, // event_id -> failed attempts
+}
+
+fn attempts_path(store: &StateStore) -> PathBuf {
+    store.dir.join("attempts.json")
+}
+
+fn load_attempts(store: &StateStore) -> HashMap<String, u32> {
+    fs::read(attempts_path(store))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_attempts(store: &StateStore, attempts: &HashMap<String, u32>) {
+    let _ = atomic_write(
+        &attempts_path(store),
+        &serde_json::to_vec(attempts).unwrap_or_default(),
+    );
 }
 
 pub struct BindingConsumer<'a, S: S3Ops> {
@@ -184,13 +202,23 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
                 continue;
             }
             if sequence != cursor + 1 {
-                // Hole: bounded grace for eventual listing, then repair-required.
+                if cursor == 0 {
+                    // Fresh consumer, non-empty prefix, min visible > 1: the
+                    // janitor never deletes the high-water event, so this is
+                    // retention pruning by definition — flag IMMEDIATELY, no
+                    // grace (G3 review change 3). Grace exists only for a
+                    // predecessor that may still be listing.
+                    self.state.route(route_id).repair_required = Some("retention_gap".into());
+                    outcome.repair_required.insert(route_id.into(), "retention_gap".into());
+                    return used;
+                }
+                // Hole above an existing cursor: bounded grace for eventual
+                // listing, then repair-required.
                 let runtime = self.runtime.entry(route_id.into()).or_default();
                 runtime.gap_polls += 1;
-                let class = if cursor == 0 { "retention_gap" } else { "sequence_gap" };
                 if runtime.gap_polls >= GAP_GRACE_POLLS {
-                    self.state.route(route_id).repair_required = Some(class.into());
-                    outcome.repair_required.insert(route_id.into(), class.into());
+                    self.state.route(route_id).repair_required = Some("sequence_gap".into());
+                    outcome.repair_required.insert(route_id.into(), "sequence_gap".into());
                 }
                 return used; // never apply out of order
             }
@@ -198,7 +226,12 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
             self.state.route(route_id).observed_high_water_sequence =
                 sequence.max(self.state.route(route_id).observed_high_water_sequence);
             self.process_event(route_id, sequence, &event_id, &object.key, outcome);
-            if outcome.repair_required.contains_key(route_id) {
+            // Contiguity: if this event did not adjudicate (transient failure,
+            // journal trouble), the cursor did not move — the NEXT listed
+            // event would look like a hole. Stop the route for this cycle.
+            if self.state.route(route_id).last_applied_sequence < sequence
+                || outcome.repair_required.contains_key(route_id)
+            {
                 return used;
             }
         }
@@ -242,26 +275,30 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
                 return;
             }
         };
-        // Trust boundary: the payload's route/binding must match the prefix
-        // it was listed under; the prefix is the authority.
+        // Trust boundary: the payload's identity must match the prefix and
+        // filename it was listed under — including the full event_id (ULID
+        // and all, G3 review change 6); the listing is the authority.
         if event.route_id != route_id || event.binding_id != self.identity.binding_id
-            || event.sequence != sequence
+            || event.sequence != sequence || event.event_id != event_id
         {
             self.dead_letter(route_id, sequence, event_id, DeadLetterClass::SchemaInvalid,
-                             "payload identity does not match its prefix", Some(&raw), outcome);
+                             "payload identity does not match its prefix/filename", Some(&raw), outcome);
             return;
         }
         if event.op == "delete" {
             // v1 policy: parses, counted, ignored — auditable cursor advance.
-            self.state.delete_events_ignored += 1;
-            outcome.delete_ignored += 1;
-            let _ = self.append_and_fold(&JournalRecord::SkipSequence {
+            // Counter mutates only AFTER the durable record exists (G3
+            // review change 7): snapshots never carry non-durable counts.
+            if self.append_and_fold(&JournalRecord::SkipSequence {
                 route_id: route_id.into(),
                 sequence,
                 reason: "delete_ignored_v1".into(),
                 evidence: event_id.into(),
                 at: utc_now(),
-            });
+            }).is_ok() {
+                self.state.delete_events_ignored += 1;
+                outcome.delete_ignored += 1;
+            }
             return;
         }
         if let Err(e) = validate_key(&event.key) {
@@ -490,12 +527,23 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
             .join(utc_basic(&utc_now()));
         fs::create_dir_all(&dir)?;
         let target = dir.join(path.file_name().unwrap_or_default());
-        fs::copy(path, target)?;
+        fs::copy(path, &target)?;
+        // Displaced bytes must be DURABLE before the caller overwrites the
+        // original (G3 review change 1): fsync the copy and its directory,
+        // else a crash right after the rename keeps the new file and loses
+        // the only other copy of the old bytes.
+        let file = fs::File::open(&target)?;
+        file.sync_all()?;
+        if let Ok(dirf) = fs::File::open(&dir) {
+            let _ = dirf.sync_all(); // best effort on macOS
+        }
         Ok(())
     }
 
-    /// Transient failure: retry against the budget; past budget -> dead-letter
-    /// with the given class (poison rule: later events keep applying).
+    /// Transient failure: retry against the DURABLE budget; past budget ->
+    /// dead-letter with the given class (poison rule: later events keep
+    /// applying). Attempts persist across restarts (attempts.json) so a
+    /// poison event cannot block a route forever by riding restarts.
     fn transient(
         &mut self,
         route_id: &str,
@@ -506,19 +554,18 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
         raw: Option<&serde_json::Value>,
         outcome: &mut PollOutcome,
     ) {
-        let attempts = {
-            let runtime = self.runtime.entry(route_id.into()).or_default();
-            let count = runtime.attempts.entry(event_id.into()).or_insert(0);
-            *count += 1;
-            *count
-        };
-        if attempts >= RETRY_BUDGET {
+        let mut attempts = load_attempts(self.store);
+        let count = attempts.entry(event_id.to_string()).or_insert(0);
+        *count += 1;
+        let reached = *count >= RETRY_BUDGET;
+        if reached {
+            attempts.remove(event_id);
+        }
+        save_attempts(self.store, &attempts);
+        if reached {
             self.dead_letter(route_id, sequence, event_id, class, detail, raw, outcome);
-            if let Some(runtime) = self.runtime.get_mut(route_id) {
-                runtime.attempts.remove(event_id);
-            }
         } else {
-            outcome.transient_errors.push(format!("{route_id}/{event_id} attempt {attempts}: {detail}"));
+            outcome.transient_errors.push(format!("{route_id}/{event_id}: {detail}"));
         }
     }
 

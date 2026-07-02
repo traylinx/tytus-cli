@@ -188,18 +188,98 @@ fn sequence_gap_holds_cursor_and_flags_repair_after_grace() {
 }
 
 #[test]
-fn retention_gap_when_min_visible_above_cursor_plus_one() {
+fn retention_gap_flags_immediately_for_fresh_consumer() {
     let h = harness();
     let s3 = MockS3::default();
     stage_event(&s3, 5, "late.md", b"late"); // janitor pruned 1..4, fresh consumer
     let (mut c, _) = consumer(&h, &s3);
+    // Contract: min visible > cursor+1 with cursor==0 is retention pruning by
+    // definition (the janitor never deletes the high-water event) — no grace.
+    let first = c.poll_once();
+    assert_eq!(first.repair_required.get(ROUTE).map(String::as_str), Some("retention_gap"));
+    assert!(!h.local_root.join("late.md").exists());
+}
+
+#[test]
+fn snapshot_never_carries_repair_state() {
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_event(&s3, 5, "late.md", b"late");
+    let (mut c, _) = consumer(&h, &s3);
+    c.poll_once();
+    assert!(c.state.route(ROUTE).repair_required.is_some());
+    h.store.compact(c.state).unwrap();
+    let snapshot = fs::read_to_string(h.store.snapshot_path()).unwrap();
+    assert!(!snapshot.contains("repair_required"), "derived state must not be durable: {snapshot}");
+    drop(c);
+    // after restart the condition re-derives from the very next poll
+    let (mut c, pending) = consumer(&h, &s3);
+    c.recover(pending);
+    assert!(c.state.route(ROUTE).repair_required.is_none(), "not resurrected from snapshot");
+    let outcome = c.poll_once();
+    assert_eq!(outcome.repair_required.get(ROUTE).map(String::as_str), Some("retention_gap"));
+}
+
+#[test]
+fn retry_budget_survives_restart() {
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_event_ext(&s3, 1, "gone.md", b"body", "put", false); // blob permanently missing
+    // two attempts in one process...
+    {
+        let (mut c, _) = consumer(&h, &s3);
+        c.poll_once();
+        c.poll_once();
+    }
+    // ...then a "restart": budget continues counting, not reset
+    let (mut c, pending) = consumer(&h, &s3);
+    c.recover(pending);
+    let mut dead = 0;
+    for _ in 0..3 {
+        dead += c.poll_once().dead_letters;
+    }
+    assert_eq!(dead, 1, "5 attempts total ACROSS restarts dead-letters the poison event");
+}
+
+#[test]
+fn repair_record_clears_repair_state() {
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_event(&s3, 1, "a.md", b"one");
+    stage_event(&s3, 3, "c.md", b"three");
+    let (mut c, _) = consumer(&h, &s3);
     for _ in 0..3 {
         c.poll_once();
     }
-    assert_eq!(
-        c.state.route(ROUTE).repair_required.as_deref(),
-        Some("retention_gap")
-    );
+    assert_eq!(c.state.route(ROUTE).repair_required.as_deref(), Some("sequence_gap"));
+    h.store.append(&JournalRecord::Repair {
+        source: "reconcile".into(),
+        corrections: serde_json::json!([{"route_id": ROUTE, "set_cursor_sequence": 2}]),
+        at: "2026-07-02T12:00:00Z".into(),
+    }).unwrap();
+    drop(c);
+    let (mut c, pending) = consumer(&h, &s3);
+    c.recover(pending);
+    assert!(c.state.route(ROUTE).repair_required.is_none());
+    assert_eq!(c.state.route(ROUTE).last_applied_sequence, 2);
+    assert_eq!(c.poll_once().applied, 1, "sequence 3 applies after the repair");
+}
+
+#[test]
+fn payload_event_id_must_match_filename() {
+    let h = harness();
+    let s3 = MockS3::default();
+    // stage a valid event, then overwrite its payload with a DIFFERENT ULID
+    let event_id = stage_event(&s3, 1, "a.md", b"one");
+    let object_key = format!("_tytus-sync/events/{BINDING}/{ROUTE}/{event_id}.json");
+    let bytes = s3.objects.borrow().get(&object_key).cloned().unwrap();
+    let mut payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    payload["event_id"] = format!("{:020}-{}", 1, "00000000000000000000000000").into();
+    s3.put(&object_key, serde_json::to_string(&payload).unwrap().as_bytes());
+    let (mut c, _) = consumer(&h, &s3);
+    let outcome = c.poll_once();
+    assert_eq!(outcome.dead_letters, 1);
+    assert!(!h.local_root.join("a.md").exists());
 }
 
 #[test]
