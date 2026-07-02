@@ -442,7 +442,29 @@ pub fn set_enabled(reference: &str, enable: bool) -> Result<ToggleReport, String
             "toggled_at": tytus_progressive_sync::state::utc_now(),
         }));
     }
-    write_sidecar_atomic(&binding.sidecar_path, &json).map_err(|e| format!("sidecar write: {e}"))?;
+    if let Err(e) = write_sidecar_atomic(&binding.sidecar_path, &json) {
+        if enable {
+            // Bisync is already unloaded; a failed flag write must not leave
+            // the binding with NO mover (codex PR#28 finding 2) — mirror the
+            // drain-failure rollback.
+            let rollback_ok = binding
+                .plist_label
+                .as_deref()
+                .map(reload_bisync_agent)
+                .unwrap_or(true);
+            return Err(if rollback_ok {
+                format!("sidecar write failed ({e}); binding left on bisync")
+            } else {
+                format!(
+                    "sidecar write failed ({e}) AND the bisync agent reload failed — binding \
+                     has NO active mover; reload the LaunchAgent manually"
+                )
+            });
+        }
+        // Disable path: sidecar still says consumer_enabled=true, so the
+        // consumer remains the active mover — consistent, just not disabled.
+        return Err(format!("sidecar write: {e}"));
+    }
     if !enable {
         // Pre-delta rollback: resume bisync for this binding.
         if let Some(label) = binding.plist_label.as_deref() {
@@ -592,12 +614,23 @@ pub fn start_background() {
                     }
                     // Lazy remote-namespace discovery: bindings toggled before
                     // the producer's first emit have no remote_binding_id yet.
-                    // Ambiguity fails closed (skip the poll, surface the error);
-                    // "not found yet" polls the local id, which is harmless.
+                    // Ambiguity AND persist failure fail closed (skip the poll,
+                    // surface the error) — events may only be applied under an
+                    // id that is durably bound to the sidecar. "Not found yet"
+                    // polls the local id, which is harmless.
                     if binding.remote_binding_id.is_none() {
-                        match discover_remote_binding_id(&binding.bucket, &binding.routes) {
+                        let resolved = discover_remote_binding_id(&binding.bucket, &binding.routes)
+                            .map_err(|e| format!("remote binding-id discovery: {e}"))
+                            .and_then(|found| match found {
+                                Some(remote_id) => {
+                                    persist_remote_binding_id(&binding.sidecar_path, &remote_id)
+                                        .map_err(|e| format!("remote binding-id persist: {e}"))
+                                        .map(|()| Some(remote_id))
+                                }
+                                None => Ok(None),
+                            });
+                        match resolved {
                             Ok(Some(remote_id)) => {
-                                let _ = persist_remote_binding_id(&binding.sidecar_path, &remote_id);
                                 binding.remote_binding_id = Some(remote_id);
                             }
                             Ok(None) => {}
@@ -606,7 +639,7 @@ pub fn start_background() {
                                 let status = map.entry(id.clone()).or_default();
                                 status.last_poll_at = Some(epoch_now());
                                 status.last_outcome = Some(serde_json::json!({
-                                    "transient_errors": [format!("remote binding-id discovery: {e}")],
+                                    "transient_errors": [e],
                                 }));
                                 status.consecutive_errors = status.consecutive_errors.saturating_add(1);
                                 drop(map);
