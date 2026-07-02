@@ -218,6 +218,18 @@ fn unload_bisync_agent(label: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Positive proof the agent is NOT loaded (`launchctl print` on the service
+/// target fails when it does not exist). The toggle fails closed on ambiguity:
+/// a binding must never end up with BOTH movers active (G3-B review).
+fn bisync_agent_loaded(label: &str) -> bool {
+    Command::new("launchctl")
+        .arg("print")
+        .arg(format!("gui/{}/{}", uid_string(), label))
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(true) // cannot prove it's gone -> treat as loaded
+}
+
 fn reload_bisync_agent(label: &str) -> bool {
     let Some(plist) = plist_path(label) else { return false };
     if !plist.exists() {
@@ -292,14 +304,29 @@ pub fn set_enabled(reference: &str, enable: bool) -> Result<ToggleReport, String
         // (3) set flags — polls start on the next scheduler tick.
         if let Some(label) = binding.plist_label.as_deref() {
             unloaded = unload_bisync_agent(label);
+            // Fail closed (G3-B review): flags are set only with positive
+            // proof the agent is NOT loaded — both movers must never run.
+            if bisync_agent_loaded(label) {
+                return Err(format!(
+                    "bisync agent {label} is still loaded after bootout; toggle aborted (fail closed)"
+                ));
+            }
         }
         drained = drain_lock(binding.workdir.as_deref());
         if !drained {
             // Roll back step 1: never leave a binding with neither mover.
-            if let Some(label) = binding.plist_label.as_deref() {
-                reload_bisync_agent(label);
-            }
-            return Err("bisync lock did not drain within timeout; binding left on bisync".into());
+            let rollback_ok = binding
+                .plist_label
+                .as_deref()
+                .map(reload_bisync_agent)
+                .unwrap_or(true);
+            return Err(if rollback_ok {
+                "bisync lock did not drain within timeout; binding left on bisync".into()
+            } else {
+                "bisync lock did not drain AND the agent reload failed — binding has \
+                 NO active mover; reload the LaunchAgent manually"
+                    .into()
+            });
         }
     }
     let schema_version = json.get("schema_version").and_then(|v| v.as_u64()).unwrap_or(2);

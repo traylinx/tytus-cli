@@ -57,11 +57,20 @@ fn load_attempts(store: &StateStore) -> HashMap<String, u32> {
         .unwrap_or_default()
 }
 
-fn save_attempts(store: &StateStore, attempts: &HashMap<String, u32>) {
-    let _ = atomic_write(
-        &attempts_path(store),
-        &serde_json::to_vec(attempts).unwrap_or_default(),
-    );
+/// Record one attempt DURABLY and return the new count. Fail closed: if the
+/// attempts file cannot be persisted, no retry/dead-letter decision may
+/// advance (G3-B review) — the caller surfaces a transient system error and
+/// the route halts for the cycle (cursor untouched).
+fn record_attempt(store: &StateStore, event_id: &str) -> Result<u32, std::io::Error> {
+    let mut attempts = load_attempts(store);
+    let count = attempts.get(event_id).copied().unwrap_or(0) + 1;
+    if count >= RETRY_BUDGET {
+        attempts.remove(event_id);
+    } else {
+        attempts.insert(event_id.to_string(), count);
+    }
+    atomic_write(&attempts_path(store), &serde_json::to_vec(&attempts).unwrap_or_default())?;
+    Ok(count)
 }
 
 pub struct BindingConsumer<'a, S: S3Ops> {
@@ -554,18 +563,21 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
         raw: Option<&serde_json::Value>,
         outcome: &mut PollOutcome,
     ) {
-        let mut attempts = load_attempts(self.store);
-        let count = attempts.entry(event_id.to_string()).or_insert(0);
-        *count += 1;
-        let reached = *count >= RETRY_BUDGET;
-        if reached {
-            attempts.remove(event_id);
-        }
-        save_attempts(self.store, &attempts);
-        if reached {
-            self.dead_letter(route_id, sequence, event_id, class, detail, raw, outcome);
-        } else {
-            outcome.transient_errors.push(format!("{route_id}/{event_id}: {detail}"));
+        match record_attempt(self.store, event_id) {
+            Err(e) => {
+                // Attempt not durable -> no decision advances; the route
+                // halts for this cycle and the event retries next poll
+                // without consuming budget.
+                outcome
+                    .transient_errors
+                    .push(format!("{route_id}/{event_id}: attempts persist failed: {e}"));
+            }
+            Ok(count) if count >= RETRY_BUDGET => {
+                self.dead_letter(route_id, sequence, event_id, class, detail, raw, outcome);
+            }
+            Ok(_) => {
+                outcome.transient_errors.push(format!("{route_id}/{event_id}: {detail}"));
+            }
         }
     }
 
