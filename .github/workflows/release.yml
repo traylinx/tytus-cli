@@ -36,9 +36,12 @@ env:
   # Bumped for the shared-folder sync fix: this ref adds `garagetytus sync
   # heal-endpoint` (stale-endpoint self-heal) + `garagetytus sync health`
   # (mac-sync-health-v1 producer) + the Mac exclude-floor alignment
-  # (target/dist/build/vendor/.terraform, mirroring the pod-side contract).
-  # Pinned to the garagetytus#1 merge commit on main.
-  GARAGETYTUS_REF: 9d47b9fee56b12e349284be59a768d3c5d9b5372
+  # (target/dist/build/vendor/.terraform, mirroring the pod-side contract)
+  # + progressive-sync P1/P2/P5 (reserved _tytus-sync excludes outside
+  # SYNC_ALL, route_id in pod credentials, `sync reconcile` with honest
+  # per-prefix timeouts, per-binding lock, outcome markers).
+  # Pinned to the garagetytus#4 merge commit on main.
+  GARAGETYTUS_REF: d7a7eb5d775877e6ad74513358de3e20052c992f
 
 jobs:
   check-nonproduction-release-policy:
