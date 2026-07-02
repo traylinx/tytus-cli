@@ -3505,6 +3505,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tytus-progressive-sync"
+version = "0.7.75"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tytus-tray"
 version = "0.7.75"
 dependencies = [
