@@ -216,3 +216,45 @@ Every call has a ~100 ms baseline over the WireGuard tunnel, so a
 hit "did it freeze?" territory faster than they get useful progress.
 
 For GB-scale transfers, use the Garage/garagetytus shared-folder path where provisioned. `tytus push` keeps the 100 MB safety cap because docker-exec base64 streaming is still the wrong transport for large files.
+
+## Progressive sync (pod → Mac, v1)
+
+Shared-folder bindings historically moved with `rclone bisync` — a full-tree
+listing on every run, which freezes on large folders over the tunnel.
+Progressive sync replaces the mover per binding with an **event consumer**:
+pods emit one immutable event per settled upload under the reserved
+`_tytus-sync/` namespace, and the tray applies exactly those keys with
+bounded StartAfter listings (hundreds of milliseconds instead of minutes).
+
+Properties:
+
+- **Per-binding opt-in.** Bisync stays the default; toggling a binding
+  progressive unloads its bisync LaunchAgent first (proven, fail-closed —
+  a binding never has two movers, and never zero).
+- **Pull-only in v1.** Pod → Mac. Local edits are counted and shown
+  honestly (`local_edits_not_synced`) but do NOT sync up until v2.
+- **Never overwrites silently.** Content divergence goes through
+  deterministic keep-both conflict naming; sha256 is verified end-to-end;
+  cursor state is a fsync'd journal.
+- **Self-healing.** Every 24 h a report-only reconcile compares the remote
+  listing against the local tree (honest per-prefix timeouts — a slow
+  prefix is named, never faked). A gap-halted route is only released by an
+  adjudicated reconcile proving the files present.
+
+Tray API (localhost, requires `Sec-Fetch-Site: same-origin`):
+
+```text
+POST /api/shared-folders/progressive            {"binding": <id|slug|alias>, "enabled": true|false}
+POST /api/shared-folders/progressive/sync-now   {"binding": <id|slug|alias>}
+GET  /api/shared-folders/progressive/status     per-binding cursors, errors, reconcile summary
+```
+
+Kill switch: `TYTUS_PROGRESSIVE_SHARED_SYNC=0` pauses all consumer polls
+without touching state. The sharing master pause gates it too.
+
+Note on identities: producers emit under the Provider registry's folder id
+(`grant.folder_id`), which is not the local sidecar id — the tray discovers
+the remote namespace automatically and caches it in the binding sidecar as
+`progressive.remote_binding_id`. Contract details live in the sprint package
+(`docs/sprints/tytus-garagetytus-progressive-sync-2026-06-30/` in
+ProjectWannolot).
