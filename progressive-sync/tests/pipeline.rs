@@ -556,6 +556,29 @@ fn cursor_never_beyond_last_durable_record() {
     assert_eq!(c.state.routes.get(ROUTE).map(|r| r.last_applied_sequence).unwrap_or(0), 0);
 }
 
+#[test]
+fn gap_observation_raises_observed_high_water() {
+    // The first visible sequence beyond a gap must raise
+    // observed_high_water_sequence even though nothing applies — the
+    // auto-reconcile Repair correction (tray, PR#30) skips the cursor TO
+    // this value once a complete reconcile proves the files present.
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_event(&s3, 5, "notes/late.md", b"beyond gap"); // cursor 0, min visible 5
+    let (mut c, _) = consumer(&h, &s3);
+    let outcome = c.poll_once();
+    assert_eq!(outcome.applied, 0);
+    assert_eq!(
+        outcome.repair_required.get(ROUTE).map(String::as_str),
+        Some("retention_gap")
+    );
+    assert_eq!(
+        c.state.route(ROUTE).observed_high_water_sequence,
+        5,
+        "gap observation must raise the high water"
+    );
+}
+
 /// Stage an event under an arbitrary remote binding id (the Provider grant
 /// id producers actually use, which differs from the local sidecar id).
 fn stage_event_remote(s3: &MockS3, remote_binding: &str, sequence: u64, key: &str, body: &[u8]) -> String {

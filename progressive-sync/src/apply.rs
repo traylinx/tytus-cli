@@ -219,6 +219,18 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
                 continue;
             }
             if sequence != cursor + 1 {
+                // "Observed" means observed: the first visible sequence
+                // beyond the gap raises the high water even though nothing
+                // applies (codex PR#30 round B). Gap adjudication (the
+                // auto-reconcile Repair correction) skips the cursor TO this
+                // value — the reconcile proved the FILES present, and
+                // re-applying a visible event onto an unledgered local file
+                // would raise a spurious keep-both conflict.
+                {
+                    let route = self.state.route(route_id);
+                    route.observed_high_water_sequence =
+                        sequence.max(route.observed_high_water_sequence);
+                }
                 if cursor == 0 {
                     // Fresh consumer, non-empty prefix, min visible > 1: the
                     // janitor never deletes the high-water event, so this is
