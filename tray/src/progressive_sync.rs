@@ -17,13 +17,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tytus_progressive_sync::apply::{file_sha256, BindingConsumer, DEFAULT_CYCLE_BUDGET};
 use tytus_progressive_sync::s3::RcloneS3;
-use tytus_progressive_sync::state::{BindingIdentity, StateStore};
+use tytus_progressive_sync::state::{BindingIdentity, JournalRecord, StateStore};
 
 pub const POLL_INTERVAL_SECS: u64 = 20;
 pub const BACKOFF_MAX_SECS: u64 = 300;
 pub const LOCK_DRAIN_TIMEOUT_SECS: u64 = 120;
 pub const LOCAL_EDIT_SCAN_INTERVAL_SECS: u64 = 3600;
+/// Report-only auto-reconcile cadence (sprint P6 deferred item): every 24 h
+/// per enabled binding, plus a 1 h retry while any route is gap-halted
+/// (`repair_required`) — the adjudicated report is what durably clears it.
+pub const RECONCILE_INTERVAL_SECS: u64 = 86_400;
+pub const RECONCILE_REPAIR_RETRY_SECS: u64 = 3_600;
+/// First run after tray start is delayed so polls settle first.
+pub const RECONCILE_STARTUP_DELAY_SECS: u64 = 600;
 const RCLONE_REMOTE: &str = "garagetytus";
+/// Absolute path — the tray runs under launchd (no /usr/local/bin in PATH).
+const GARAGETYTUS_BIN: &str = "/usr/local/bin/garagetytus";
 
 /// Global kill switch (TECH-SPEC §12): `TYTUS_PROGRESSIVE_SHARED_SYNC=0`
 /// pauses every consumer poll without touching any state.
@@ -230,10 +239,20 @@ pub struct BindingStatus {
     pub consecutive_errors: u32,
     pub unpushed_local_edits: Option<u64>,
     pub last_local_scan_at: Option<u64>,
+    /// 24 h report-only auto-reconcile: when it last ran and a counts-only
+    /// summary (never key paths — bindings can hold client data).
+    pub last_reconcile_at: Option<u64>,
+    pub last_reconcile: Option<serde_json::Value>,
 }
 
 static STATUS: OnceLock<Mutex<HashMap<String, BindingStatus>>> = OnceLock::new();
 static NUDGE: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+/// Bindings with a reconcile subprocess in flight (one at a time each).
+static RECONCILING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+/// Adjudicated corrections handed back to the scheduler thread, which is the
+/// only journal writer in this process (append ordering stays serialized).
+#[allow(clippy::type_complexity)]
+static RECONCILE_RESULTS: OnceLock<Mutex<Vec<(String, ReconcileOutcome)>>> = OnceLock::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 fn status_map() -> &'static Mutex<HashMap<String, BindingStatus>> {
@@ -242,6 +261,14 @@ fn status_map() -> &'static Mutex<HashMap<String, BindingStatus>> {
 
 fn nudges() -> &'static Mutex<Vec<String>> {
     NUDGE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn reconciling() -> &'static Mutex<std::collections::HashSet<String>> {
+    RECONCILING.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+fn reconcile_results() -> &'static Mutex<Vec<(String, ReconcileOutcome)>> {
+    RECONCILE_RESULTS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 pub fn sync_now(binding_id: &str) {
@@ -262,6 +289,8 @@ pub fn status_snapshot() -> serde_json::Value {
             "consecutive_errors": status.consecutive_errors,
             "local_edits": {"unpushed_count": status.unpushed_local_edits,
                              "scanned_at": status.last_local_scan_at},
+            "reconcile": {"last_run_at": status.last_reconcile_at,
+                           "summary": status.last_reconcile},
         }));
     }
     serde_json::Value::Object(out)
@@ -482,6 +511,190 @@ pub fn set_enabled(reference: &str, enable: bool) -> Result<ToggleReport, String
     })
 }
 
+// ── 24 h report-only auto-reconcile (sprint P6, deferred from P5) ───────────
+//
+// Cadence: every RECONCILE_INTERVAL_SECS per enabled binding, escalated to
+// RECONCILE_REPAIR_RETRY_SECS while any route is gap-halted. The subprocess
+// (`garagetytus sync reconcile --binding <id> --json`, report-only — never
+// `--repair-keys`) runs on its own thread; the ADJUDICATION comes back to the
+// scheduler thread, the process's only journal writer. A durable Repair
+// record is appended ONLY when the report proves the local tree is whole:
+// complete=true and zero missing-local keys. Size mismatches never block
+// (divergence is the keep-both conflict flow's job, not the gap's).
+
+/// Counts-only reconcile outcome (no key paths — client data stays local).
+#[derive(Debug, Clone)]
+pub struct ReconcileOutcome {
+    pub summary: serde_json::Value,
+    pub corrections: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+/// When is a reconcile due? Pure so the cadence is unit-testable.
+pub fn reconcile_due(last_run_at: Option<u64>, started_at: u64, now: u64, any_repair_required: bool) -> bool {
+    match last_run_at {
+        None => now.saturating_sub(started_at) >= RECONCILE_STARTUP_DELAY_SECS,
+        Some(last) => {
+            let interval = if any_repair_required {
+                RECONCILE_REPAIR_RETRY_SECS
+            } else {
+                RECONCILE_INTERVAL_SECS
+            };
+            now.saturating_sub(last) >= interval
+        }
+    }
+}
+
+/// Adjudicate a sync-reconcile-report-v1 against the routes currently halted
+/// on `repair_required`. Returns Repair corrections ONLY for a complete
+/// report with zero missing-local keys; each halted route's cursor may then
+/// skip to its observed high water (the gap's events are pruned — the FILES
+/// are proven present, which is what the halt protects).
+pub fn adjudicate_report(
+    report: &serde_json::Value,
+    halted_routes: &[(String, u64)],
+) -> Option<serde_json::Value> {
+    let complete = report.get("complete").and_then(|v| v.as_bool()).unwrap_or(false);
+    let missing_local = report
+        .get("missing_local")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(usize::MAX);
+    if !complete || missing_local != 0 || halted_routes.is_empty() {
+        return None;
+    }
+    let rows: Vec<serde_json::Value> = halted_routes
+        .iter()
+        .map(|(route_id, high_water)| {
+            serde_json::json!({
+                "route_id": route_id,
+                "set_cursor_sequence": high_water,
+            })
+        })
+        .collect();
+    Some(serde_json::Value::Array(rows))
+}
+
+/// Counts-only summary of a report (never echoes keys/paths).
+fn summarize_report(report: &serde_json::Value) -> serde_json::Value {
+    let count = |k: &str| report.get(k).and_then(|v| v.as_array()).map(|a| a.len());
+    serde_json::json!({
+        "complete": report.get("complete"),
+        "remote_keys": report.get("remote_keys"),
+        "local_files": report.get("local_files"),
+        "missing_local": count("missing_local"),
+        "missing_remote": report.get("missing_remote_count"),
+        "size_mismatch": count("size_mismatch"),
+        "timed_out_prefixes": count("timed_out_prefixes"),
+        "failed_prefixes": count("failed_prefixes"),
+    })
+}
+
+/// Subprocess leg, run OFF the scheduler thread. Report-only by design.
+fn run_reconcile_report(binding_id: &str) -> Result<serde_json::Value, String> {
+    let out = Command::new(GARAGETYTUS_BIN)
+        .arg("sync")
+        .arg("reconcile")
+        .arg("--binding")
+        .arg(binding_id)
+        .arg("--prefix-timeout-seconds")
+        .arg("600")
+        .arg("--json")
+        .output()
+        .map_err(|e| format!("spawn {GARAGETYTUS_BIN}: {e}"))?;
+    // exit 2 = honest-incomplete (named timed-out prefixes) — still a report.
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("reconcile output parse: {e} (exit {:?})", out.status.code()))?;
+    Ok(parsed)
+}
+
+/// Spawn the reconcile thread for one binding (idempotent per binding).
+fn start_reconcile(binding: &EnabledBinding, halted_routes: Vec<(String, u64)>) {
+    {
+        let mut inflight = reconciling().lock().unwrap();
+        if !inflight.insert(binding.binding_id.clone()) {
+            return;
+        }
+    }
+    let binding_id = binding.binding_id.clone();
+    std::thread::Builder::new()
+        .name(format!("reconcile-{binding_id}"))
+        .spawn(move || {
+            let outcome = match run_reconcile_report(&binding_id) {
+                Ok(report) => ReconcileOutcome {
+                    summary: summarize_report(&report),
+                    corrections: adjudicate_report(&report, &halted_routes),
+                    error: None,
+                },
+                Err(e) => ReconcileOutcome {
+                    summary: serde_json::Value::Null,
+                    corrections: None,
+                    error: Some(e),
+                },
+            };
+            reconcile_results().lock().unwrap().push((binding_id.clone(), outcome));
+            reconciling().lock().unwrap().remove(&binding_id);
+        })
+        .ok();
+}
+
+/// Routes currently gap-halted, extracted from the last poll outcome:
+/// `(route_id, observed_high_water_sequence)` for every route whose
+/// `repair_required` is set. Pure so it is unit-testable.
+pub fn halted_routes_from_outcome(outcome: Option<&serde_json::Value>) -> Vec<(String, u64)> {
+    let Some(routes) = outcome.and_then(|o| o.get("routes")).and_then(|r| r.as_object()) else {
+        return Vec::new();
+    };
+    routes
+        .iter()
+        .filter(|(_, v)| v.get("repair_required").map(|r| !r.is_null()).unwrap_or(false))
+        .map(|(route_id, v)| {
+            (
+                route_id.clone(),
+                v.get("observed_high_water_sequence").and_then(|s| s.as_u64()).unwrap_or(0),
+            )
+        })
+        .collect()
+}
+
+/// Scheduler-thread half: drain finished reconciles, record status, and
+/// append the durable Repair record (single journal writer stays single).
+fn drain_reconcile_results() {
+    let finished: Vec<(String, ReconcileOutcome)> =
+        std::mem::take(&mut *reconcile_results().lock().unwrap());
+    for (binding_id, outcome) in finished {
+        if let Some(corrections) = outcome.corrections.as_ref() {
+            if let Some((binding, _)) = find_binding(&binding_id) {
+                if let Some(root) = state_root() {
+                    let identity = BindingIdentity {
+                        binding_id: binding.binding_id.clone(),
+                        bucket: binding.bucket.clone(),
+                        local_path: binding.local_path.clone(),
+                        alias: binding.alias.clone(),
+                    };
+                    if let Ok(store) = StateStore::open(&root, &identity) {
+                        let _ = store.append(&JournalRecord::Repair {
+                            source: "tray-auto-reconcile-v1".into(),
+                            corrections: corrections.clone(),
+                            at: tytus_progressive_sync::state::utc_now(),
+                        });
+                    }
+                }
+            }
+        }
+        let mut map = status_map().lock().unwrap();
+        let status = map.entry(binding_id).or_default();
+        status.last_reconcile_at = Some(epoch_now());
+        status.last_reconcile = Some(match &outcome.error {
+            Some(e) => serde_json::json!({"error": e}),
+            None => serde_json::json!({
+                "report": outcome.summary,
+                "repair_corrections": outcome.corrections.is_some(),
+            }),
+        });
+    }
+}
+
 // ── the poll scheduler ──────────────────────────────────────────────────────
 
 fn jittered_interval(binding_id: &str, tick: u64) -> Duration {
@@ -597,12 +810,14 @@ pub fn start_background() {
             let mut next_poll: HashMap<String, Instant> = HashMap::new();
             let mut backoff: HashMap<String, u64> = HashMap::new();
             let mut tick: u64 = 0;
+            let started_at = epoch_now();
             loop {
                 std::thread::sleep(Duration::from_secs(2));
                 tick += 1;
                 if kill_switch_engaged() || !crate::web_server::sharing_enabled_now() {
                     continue;
                 }
+                drain_reconcile_results();
                 let nudged: Vec<String> = std::mem::take(&mut *nudges().lock().unwrap());
                 for (mut binding, enabled) in discover() {
                     if !enabled || binding.routes.is_empty() {
@@ -678,6 +893,13 @@ pub fn start_background() {
                     let scan_due = status
                         .last_local_scan_at
                         .map_or(true, |at| epoch_now().saturating_sub(at) >= LOCAL_EDIT_SCAN_INTERVAL_SECS);
+                    let halted = halted_routes_from_outcome(status.last_outcome.as_ref());
+                    let recon_due = reconcile_due(
+                        status.last_reconcile_at,
+                        started_at,
+                        epoch_now(),
+                        !halted.is_empty(),
+                    );
                     drop(map);
                     if scan_due {
                         let count = scan_local_edits(&binding);
@@ -685,6 +907,9 @@ pub fn start_background() {
                         let status = map.entry(id.clone()).or_default();
                         status.unpushed_local_edits = count;
                         status.last_local_scan_at = Some(epoch_now());
+                    }
+                    if recon_due {
+                        start_reconcile(&binding, halted);
                     }
                 }
             }
@@ -987,5 +1212,53 @@ mod tests {
             ("sf_b".to_string(), vec!["r-claus".to_string()]),
         ];
         assert!(match_remote_candidates(&two, &routes).is_err());
+    }
+
+    #[test]
+    fn reconcile_due_cadence() {
+        let start = 1_000_000;
+        // never ran: waits out the startup delay
+        assert!(!reconcile_due(None, start, start + RECONCILE_STARTUP_DELAY_SECS - 1, false));
+        assert!(reconcile_due(None, start, start + RECONCILE_STARTUP_DELAY_SECS, false));
+        // ran: 24 h cadence normally
+        let last = start + 10_000;
+        assert!(!reconcile_due(Some(last), start, last + RECONCILE_INTERVAL_SECS - 1, false));
+        assert!(reconcile_due(Some(last), start, last + RECONCILE_INTERVAL_SECS, false));
+        // gap-halted route escalates to the 1 h retry
+        assert!(!reconcile_due(Some(last), start, last + RECONCILE_REPAIR_RETRY_SECS - 1, true));
+        assert!(reconcile_due(Some(last), start, last + RECONCILE_REPAIR_RETRY_SECS, true));
+    }
+
+    #[test]
+    fn adjudicate_report_requires_complete_and_whole() {
+        let halted = vec![("r1".to_string(), 42u64)];
+        let whole = serde_json::json!({"complete": true, "missing_local": []});
+        let rows = adjudicate_report(&whole, &halted).expect("whole report adjudicates");
+        assert_eq!(rows[0]["route_id"], "r1");
+        assert_eq!(rows[0]["set_cursor_sequence"], 42);
+        // incomplete report never clears a halt
+        let partial = serde_json::json!({"complete": false, "missing_local": []});
+        assert!(adjudicate_report(&partial, &halted).is_none());
+        // missing-local keys never clear a halt
+        let holes = serde_json::json!({"complete": true, "missing_local": ["k"]});
+        assert!(adjudicate_report(&holes, &halted).is_none());
+        // absent field fails closed
+        let bare = serde_json::json!({"complete": true});
+        assert!(adjudicate_report(&bare, &halted).is_none());
+        // nothing halted -> nothing to correct
+        assert!(adjudicate_report(&whole, &[]).is_none());
+    }
+
+    #[test]
+    fn halted_routes_extracted_from_outcome() {
+        let outcome = serde_json::json!({
+            "routes": {
+                "r-ok": {"repair_required": null, "observed_high_water_sequence": 7},
+                "r-halted": {"repair_required": "retention_gap", "observed_high_water_sequence": 9},
+            }
+        });
+        let halted = halted_routes_from_outcome(Some(&outcome));
+        assert_eq!(halted, vec![("r-halted".to_string(), 9)]);
+        assert!(halted_routes_from_outcome(None).is_empty());
     }
 }
