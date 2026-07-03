@@ -617,10 +617,11 @@ fn start_reconcile(binding: &EnabledBinding, halted_routes: Vec<(String, u64)>) 
         }
     }
     let binding_id = binding.binding_id.clone();
-    std::thread::Builder::new()
-        .name(format!("reconcile-{binding_id}"))
+    let spawn_id = binding_id.clone();
+    let spawned = std::thread::Builder::new()
+        .name(format!("reconcile-{spawn_id}"))
         .spawn(move || {
-            let outcome = match run_reconcile_report(&binding_id) {
+            let outcome = match run_reconcile_report(&spawn_id) {
                 Ok(report) => ReconcileOutcome {
                     summary: summarize_report(&report),
                     corrections: adjudicate_report(&report, &halted_routes),
@@ -632,10 +633,23 @@ fn start_reconcile(binding: &EnabledBinding, halted_routes: Vec<(String, u64)>) 
                     error: Some(e),
                 },
             };
-            reconcile_results().lock().unwrap().push((binding_id.clone(), outcome));
-            reconciling().lock().unwrap().remove(&binding_id);
-        })
-        .ok();
+            reconcile_results().lock().unwrap().push((spawn_id.clone(), outcome));
+            reconciling().lock().unwrap().remove(&spawn_id);
+        });
+    if let Err(e) = spawned {
+        // A failed spawn must not wedge the in-flight set (codex PR#30
+        // finding 1) — queue an error outcome so cadence/status behave
+        // exactly like any other reconcile failure.
+        reconcile_results().lock().unwrap().push((
+            binding_id.clone(),
+            ReconcileOutcome {
+                summary: serde_json::Value::Null,
+                corrections: None,
+                error: Some(format!("reconcile thread spawn: {e}")),
+            },
+        ));
+        reconciling().lock().unwrap().remove(&binding_id);
+    }
 }
 
 /// Routes currently gap-halted, extracted from the last poll outcome:
@@ -663,33 +677,50 @@ fn drain_reconcile_results() {
     let finished: Vec<(String, ReconcileOutcome)> =
         std::mem::take(&mut *reconcile_results().lock().unwrap());
     for (binding_id, outcome) in finished {
+        // Truthful append accounting (codex PR#30 finding 2): the status may
+        // claim a repair correction ONLY after the Repair record is durably
+        // appended. On failure the halt stays, the 1 h retry cadence re-runs
+        // the reconcile, and the status says exactly what happened.
+        let mut appended = false;
+        let mut append_error: Option<String> = None;
         if let Some(corrections) = outcome.corrections.as_ref() {
-            if let Some((binding, _)) = find_binding(&binding_id) {
-                if let Some(root) = state_root() {
-                    let identity = BindingIdentity {
-                        binding_id: binding.binding_id.clone(),
-                        bucket: binding.bucket.clone(),
-                        local_path: binding.local_path.clone(),
-                        alias: binding.alias.clone(),
-                    };
-                    if let Ok(store) = StateStore::open(&root, &identity) {
-                        let _ = store.append(&JournalRecord::Repair {
-                            source: "tray-auto-reconcile-v1".into(),
-                            corrections: corrections.clone(),
-                            at: tytus_progressive_sync::state::utc_now(),
-                        });
-                    }
-                }
+            let result: Result<(), String> = (|| {
+                let (binding, _) =
+                    find_binding(&binding_id).ok_or("binding vanished before append")?;
+                let root = state_root().ok_or("no HOME")?;
+                let identity = BindingIdentity {
+                    binding_id: binding.binding_id.clone(),
+                    bucket: binding.bucket.clone(),
+                    local_path: binding.local_path.clone(),
+                    alias: binding.alias.clone(),
+                };
+                let store = StateStore::open(&root, &identity).map_err(|e| e.to_string())?;
+                store
+                    .append(&JournalRecord::Repair {
+                        source: "tray-auto-reconcile-v1".into(),
+                        corrections: corrections.clone(),
+                        at: tytus_progressive_sync::state::utc_now(),
+                    })
+                    .map_err(|e| e.to_string())
+            })();
+            match result {
+                Ok(()) => appended = true,
+                Err(e) => append_error = Some(e),
             }
         }
         let mut map = status_map().lock().unwrap();
         let status = map.entry(binding_id).or_default();
         status.last_reconcile_at = Some(epoch_now());
-        status.last_reconcile = Some(match &outcome.error {
-            Some(e) => serde_json::json!({"error": e}),
-            None => serde_json::json!({
+        status.last_reconcile = Some(match (&outcome.error, &append_error) {
+            (Some(e), _) => serde_json::json!({"error": e}),
+            (None, Some(e)) => serde_json::json!({
                 "report": outcome.summary,
-                "repair_corrections": outcome.corrections.is_some(),
+                "repair_corrections": false,
+                "repair_append_error": e,
+            }),
+            (None, None) => serde_json::json!({
+                "report": outcome.summary,
+                "repair_corrections": appended,
             }),
         });
     }
