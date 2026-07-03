@@ -562,8 +562,10 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
         // Displaced bytes must be DURABLE before the caller overwrites the
         // original (G3 review change 1): fsync the copy and its directory,
         // else a crash right after the rename keeps the new file and loses
-        // the only other copy of the old bytes.
-        let file = fs::File::open(&target)?;
+        // the only other copy of the old bytes. The handle needs write
+        // access: Windows' FlushFileBuffers rejects read-only handles with
+        // ERROR_ACCESS_DENIED (Unix fsync accepts either).
+        let file = fs::OpenOptions::new().write(true).open(&target)?;
         file.sync_all()?;
         if let Ok(dirf) = fs::File::open(&dir) {
             let _ = dirf.sync_all(); // best effort on macOS
