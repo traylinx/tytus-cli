@@ -40,8 +40,10 @@ env:
   # + progressive-sync P1/P2/P5 (reserved _tytus-sync excludes outside
   # SYNC_ALL, route_id in pod credentials, `sync reconcile` with honest
   # per-prefix timeouts, per-binding lock, outcome markers).
-  # Pinned to the garagetytus#4 merge commit on main.
-  GARAGETYTUS_REF: d7a7eb5d775877e6ad74513358de3e20052c992f
+  # Pinned to the garagetytus#6 merge commit on main (adds #5 wrapper
+  # lockstep-sync + downgrade guard, #6 reconcile shallow-root/hidden-parity/
+  # prefix-subdivision fixes).
+  GARAGETYTUS_REF: 7e5a9d5ef2e6cf4a2d2e1d2200edd960d4e5c87e
 
 jobs:
   check-nonproduction-release-policy:
