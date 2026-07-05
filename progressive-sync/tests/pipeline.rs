@@ -845,3 +845,59 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+#[test]
+fn producer_heartbeat_malformed_timestamps_read_unknown() {
+    // codex B1/B2: impossible calendar dates and non-digit fractional
+    // seconds are malformed input — they must read "unknown", never
+    // normalize into an ok/stale verdict.
+    for written_at in [
+        "2026-02-31T00:00:00Z",     // impossible date (Feb 31)
+        "2025-02-29T00:00:00Z",     // non-leap Feb 29
+        "2026-01-01T00:00:00.fooZ", // non-digit fractional
+        "2026-01-01T00:00:00.Z",    // empty fractional
+        "2026-01-01T00:00:00",      // missing Z (non-UTC rejected)
+    ] {
+        let h = harness();
+        let s3 = MockS3::default();
+        stage_heartbeat(&s3, written_at, 60);
+        let (mut c, _) = consumer(&h, &s3);
+        let outcome = c.poll_once();
+        assert_eq!(
+            outcome.producer_health.get(ROUTE).copied(),
+            Some("unknown"),
+            "written_at={written_at:?}"
+        );
+    }
+    // control: valid digit fractional stays parseable
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_heartbeat(&s3, &format!("{}", utc_now().replace('Z', ".123Z")), 60);
+    let (mut c, _) = consumer(&h, &s3);
+    let outcome = c.poll_once();
+    assert_eq!(outcome.producer_health.get(ROUTE).copied(), Some("ok"));
+}
+
+#[test]
+fn gap_counter_for_removed_route_is_pruned_at_build() {
+    // codex B3: a route removed from the sidecar must not leave a durable
+    // grace counter behind that ambushes the same route on re-add.
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_event(&s3, 5, "later.md", b"x"); // gap: cursor 0 handled separately,
+    let (mut c, _) = consumer(&h, &s3);
+    let _ = c.poll_once();
+    drop(c);
+    let gap_file = h.store.dir.join("gap_polls.json");
+    // simulate a stale counter for a route that is no longer authorized
+    let mut disk: std::collections::HashMap<String, serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(&gap_file).unwrap_or_else(|_| b"{}".to_vec()))
+            .unwrap_or_default();
+    disk.insert("r0removed00".into(), serde_json::json!({"cursor": 0, "polls": 9}));
+    std::fs::write(&gap_file, serde_json::to_vec(&disk).unwrap()).unwrap();
+    let (c2, _) = consumer(&h, &s3); // build prunes unauthorized routes
+    drop(c2);
+    let disk2: std::collections::HashMap<String, serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(&gap_file).unwrap()).unwrap();
+    assert!(!disk2.contains_key("r0removed00"));
+}

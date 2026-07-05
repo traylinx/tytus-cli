@@ -152,6 +152,15 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
         identity: &'a BindingIdentity,
         authorized_routes: Vec<String>,
     ) -> Self {
+        // Route lifecycle hygiene (codex B3): counters for routes no longer
+        // authorized must not survive to ambush a re-added route at the same
+        // cursor with pre-accumulated grace.
+        let mut gap_grace = load_gap_polls(store);
+        let before = gap_grace.len();
+        gap_grace.retain(|route, _| authorized_routes.iter().any(|r| r == route));
+        if gap_grace.len() != before {
+            save_gap_polls(store, &gap_grace);
+        }
         Self {
             s3,
             store,
@@ -161,7 +170,7 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
             cycle_budget: DEFAULT_CYCLE_BUDGET,
             remote_binding_id: identity.binding_id.clone(),
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
-            gap_grace: load_gap_polls(store),
+            gap_grace,
         }
     }
 
@@ -177,7 +186,12 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
         };
         if prev != next {
             self.gap_grace.insert(route_id.to_string(), next);
-            save_gap_polls(self.store, &self.gap_grace);
+            // Read-modify-write scoped to THIS route (codex B4): a concurrent
+            // consumer on the same store (manual CLI run beside the tray)
+            // keeps its other-route entries; last-writer-wins per route only.
+            let mut disk = load_gap_polls(self.store);
+            disk.insert(route_id.to_string(), next);
+            save_gap_polls(self.store, &disk);
         }
         next.polls
     }
@@ -186,7 +200,9 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
     /// Only touches the side file when there was a live count to clear.
     fn reset_gap_polls(&mut self, route_id: &str) {
         if self.gap_grace.remove(route_id).is_some() {
-            save_gap_polls(self.store, &self.gap_grace);
+            let mut disk = load_gap_polls(self.store);
+            disk.remove(route_id);
+            save_gap_polls(self.store, &disk);
         }
     }
 
@@ -786,7 +802,17 @@ fn parse_utc_epoch(iso: &str) -> Option<u64> {
     if parts.next().is_some() {
         return None;
     }
-    let time = time.split('.').next()?; // tolerate fractional seconds
+    let time = match time.split_once('.') {
+        // Fractional seconds must be 1+ digits — "00.fooZ" or a bare trailing
+        // dot is malformed input, not something to tolerate (codex B2).
+        Some((whole, frac)) => {
+            if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            whole
+        }
+        None => time,
+    };
     let mut parts = time.split(':');
     let h: u64 = parts.next()?.parse().ok()?;
     let mi: u64 = parts.next()?.parse().ok()?;
@@ -794,6 +820,23 @@ fn parse_utc_epoch(iso: &str) -> Option<u64> {
     let ranges_ok =
         (1..=12).contains(&mo) && (1..=31).contains(&d) && h <= 23 && mi <= 59 && s <= 60;
     if parts.next().is_some() || !ranges_ok {
+        return None;
+    }
+    // Impossible calendar dates (Feb 31) must read as malformed → "unknown",
+    // not silently normalize through days-from-civil (codex B1).
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days_in_month = match mo {
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 31,
+    };
+    if d > days_in_month {
         return None;
     }
     // days-from-civil, the exact inverse of utc_now()'s civil-from-days
