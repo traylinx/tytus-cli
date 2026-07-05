@@ -21,6 +21,11 @@ use tytus_progressive_sync::state::{BindingIdentity, JournalRecord, StateStore};
 
 pub const POLL_INTERVAL_SECS: u64 = 20;
 pub const BACKOFF_MAX_SECS: u64 = 300;
+/// The scheduler tick sleeps SCHEDULER_TICK_SECS; a wall-clock delta beyond
+/// WAKE_JUMP_THRESHOLD_SECS across one tick can only mean the machine slept
+/// (or the wall clock stepped) — see `wake_detected`.
+pub const SCHEDULER_TICK_SECS: u64 = 2;
+pub const WAKE_JUMP_THRESHOLD_SECS: u64 = 30;
 pub const LOCK_DRAIN_TIMEOUT_SECS: u64 = 120;
 pub const LOCAL_EDIT_SCAN_INTERVAL_SECS: u64 = 3600;
 /// Report-only auto-reconcile cadence (sprint P6 deferred item): every 24 h
@@ -279,21 +284,55 @@ fn epoch_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-pub fn status_snapshot() -> serde_json::Value {
-    let map = status_map().lock().unwrap();
+fn status_entry_json(status: &BindingStatus) -> serde_json::Value {
+    serde_json::json!({
+        // Explicit lifecycle marker: "pending_first_poll" until the first
+        // poll completes, "polling" afterwards. The endpoint must never be
+        // ambiguous about WHY fields are null.
+        "state": if status.last_poll_at.is_none() { "pending_first_poll" } else { "polling" },
+        "last_poll_at": status.last_poll_at,
+        "outcome": status.last_outcome,
+        "consecutive_errors": status.consecutive_errors,
+        "local_edits": {"unpushed_count": status.unpushed_local_edits,
+                         "scanned_at": status.last_local_scan_at},
+        "reconcile": {"last_run_at": status.last_reconcile_at,
+                       "summary": status.last_reconcile},
+    })
+}
+
+/// Merge the in-memory poll status with the enabled-binding roster: every
+/// enabled binding the poller has not reported yet appears as a
+/// `pending_first_poll` entry. Invariant (sprint fix 3): the status endpoint
+/// must NEVER serve `{}` while bindings are configured — before this, a
+/// fresh tray (or one that just restarted) was indistinguishable from "no
+/// progressive sync configured" until the first poll landed. Pure over its
+/// inputs so the invariant is unit-testable.
+fn snapshot_with_roster(
+    map: &HashMap<String, BindingStatus>,
+    enabled_binding_ids: &[String],
+) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     for (binding_id, status) in map.iter() {
-        out.insert(binding_id.clone(), serde_json::json!({
-            "last_poll_at": status.last_poll_at,
-            "outcome": status.last_outcome,
-            "consecutive_errors": status.consecutive_errors,
-            "local_edits": {"unpushed_count": status.unpushed_local_edits,
-                             "scanned_at": status.last_local_scan_at},
-            "reconcile": {"last_run_at": status.last_reconcile_at,
-                           "summary": status.last_reconcile},
-        }));
+        out.insert(binding_id.clone(), status_entry_json(status));
+    }
+    for binding_id in enabled_binding_ids {
+        if !out.contains_key(binding_id) {
+            out.insert(binding_id.clone(), status_entry_json(&BindingStatus::default()));
+        }
     }
     serde_json::Value::Object(out)
+}
+
+pub fn status_snapshot() -> serde_json::Value {
+    // Roster BEFORE taking the lock (discover() reads sidecar files). The
+    // eligibility filter mirrors the scheduler's own skip condition.
+    let enabled: Vec<String> = discover()
+        .into_iter()
+        .filter(|(binding, enabled)| *enabled && !binding.routes.is_empty())
+        .map(|(binding, _)| binding.binding_id)
+        .collect();
+    let map = status_map().lock().unwrap();
+    snapshot_with_roster(&map, &enabled)
 }
 
 // ── enable / disable (the normative order) ──────────────────────────────────
@@ -728,6 +767,17 @@ fn drain_reconcile_results() {
 
 // ── the poll scheduler ──────────────────────────────────────────────────────
 
+/// Sleep-poisoned backoff detection (sprint fix 4), pure so it is
+/// unit-testable. `Instant` deadlines computed before the machine slept can
+/// sit minutes-to-hours in the future after wake, and any backoff doubled
+/// toward BACKOFF_MAX_SECS by pre-sleep network failures is equally poisoned
+/// — the network is simply different now. A single tick whose WALL delta
+/// exceeds the threshold (the tick only sleeps `expected_tick`) is the
+/// self-contained wake signal; no OS power-notification APIs.
+fn wake_detected(elapsed_wall: Duration, expected_tick: Duration) -> bool {
+    elapsed_wall > expected_tick + Duration::from_secs(WAKE_JUMP_THRESHOLD_SECS)
+}
+
 fn jittered_interval(binding_id: &str, tick: u64) -> Duration {
     // Deterministic ±25% jitter from a cheap hash — no rand dependency.
     let mut acc: u64 = tick.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -753,6 +803,9 @@ fn poll_binding(binding: &EnabledBinding) -> Result<serde_json::Value, String> {
     let s3 = RcloneS3::new(RCLONE_REMOTE, &binding.bucket, rclone_conf_path());
     let mut consumer = BindingConsumer::new(&s3, &store, &mut state, &identity, binding.routes.clone());
     consumer.cycle_budget = DEFAULT_CYCLE_BUDGET;
+    // The heartbeat staleness rule needs the REAL scheduler cadence, not the
+    // library default (producer-health-v1 dead-vs-quiet).
+    consumer.poll_interval_secs = POLL_INTERVAL_SECS;
     if let Some(remote_id) = binding.remote_binding_id.as_ref() {
         consumer.remote_binding_id = remote_id.clone();
     }
@@ -766,6 +819,9 @@ fn poll_binding(binding: &EnabledBinding) -> Result<serde_json::Value, String> {
         "delete_ignored": outcome.delete_ignored,
         "events_seen": outcome.events_seen,
         "repair_required": outcome.repair_required,
+        // route_id -> "ok" | "stale" | "unknown" — dead-vs-quiet producer
+        // heartbeat. Status signal only; never gates applies or repair.
+        "producer_health": outcome.producer_health,
         "transient_errors": outcome.transient_errors,
         "routes": state.routes.iter().map(|(route, cursor)| {
             (route.clone(), serde_json::json!({
@@ -842,9 +898,30 @@ pub fn start_background() {
             let mut backoff: HashMap<String, u64> = HashMap::new();
             let mut tick: u64 = 0;
             let started_at = epoch_now();
+            let mut last_tick_wall = SystemTime::now();
             loop {
-                std::thread::sleep(Duration::from_secs(2));
+                std::thread::sleep(Duration::from_secs(SCHEDULER_TICK_SECS));
                 tick += 1;
+                // Wake resume (fix 4): a wall jump across one tick means the
+                // machine slept. Every deadline and backoff computed before
+                // the sleep is poisoned — clear them so all bindings re-poll
+                // immediately instead of serving the pre-sleep penalty.
+                let now_wall = SystemTime::now();
+                let elapsed_wall = now_wall.duration_since(last_tick_wall).unwrap_or_default();
+                last_tick_wall = now_wall;
+                if wake_detected(elapsed_wall, Duration::from_secs(SCHEDULER_TICK_SECS)) {
+                    eprintln!(
+                        "[progressive-sync] wall clock jumped {}s across a {}s tick — \
+                         assuming wake from sleep; clearing backoff and re-polling all bindings",
+                        elapsed_wall.as_secs(),
+                        SCHEDULER_TICK_SECS
+                    );
+                    backoff.clear();
+                    let now = Instant::now();
+                    for deadline in next_poll.values_mut() {
+                        *deadline = now;
+                    }
+                }
                 if kill_switch_engaged() || !crate::web_server::sharing_enabled_now() {
                     continue;
                 }
@@ -1278,6 +1355,44 @@ mod tests {
         assert!(adjudicate_report(&bare, &halted).is_none());
         // nothing halted -> nothing to correct
         assert!(adjudicate_report(&whole, &[]).is_none());
+    }
+
+    #[test]
+    fn snapshot_never_omits_enabled_binding() {
+        // Fix 3 invariant: an enabled binding NEVER reports as absent while
+        // the poller is configured — a fresh tray (empty in-memory map) must
+        // serve a pending_first_poll entry, not {}.
+        let empty: HashMap<String, BindingStatus> = HashMap::new();
+        let snap = snapshot_with_roster(&empty, &["sf_a".to_string()]);
+        assert_eq!(snap["sf_a"]["state"], "pending_first_poll");
+        assert!(snap["sf_a"]["last_poll_at"].is_null());
+        // once a poll lands, the real status wins (no roster overwrite)
+        let mut polled = HashMap::new();
+        polled.insert(
+            "sf_a".to_string(),
+            BindingStatus { last_poll_at: Some(123), ..Default::default() },
+        );
+        let snap = snapshot_with_roster(&polled, &["sf_a".to_string()]);
+        assert_eq!(snap["sf_a"]["state"], "polling");
+        assert_eq!(snap["sf_a"]["last_poll_at"], 123);
+        // a binding known to the map but no longer enabled stays visible
+        // (current behavior: last status survives until tray restart)
+        let snap = snapshot_with_roster(&polled, &[]);
+        assert_eq!(snap["sf_a"]["last_poll_at"], 123);
+    }
+
+    #[test]
+    fn wake_detected_only_on_wall_jump() {
+        let tick = Duration::from_secs(SCHEDULER_TICK_SECS);
+        // normal ticks (with scheduler-load slop) never fire
+        assert!(!wake_detected(Duration::from_secs(2), tick));
+        assert!(!wake_detected(Duration::from_secs(10), tick));
+        assert!(!wake_detected(Duration::from_secs(32), tick)); // exactly at threshold
+        // a jump beyond tick + threshold means the machine slept
+        assert!(wake_detected(Duration::from_secs(33), tick));
+        assert!(wake_detected(Duration::from_secs(3600), tick));
+        // clock stepping BACKWARDS saturates to zero upstream — never fires
+        assert!(!wake_detected(Duration::ZERO, tick));
     }
 
     #[test]
