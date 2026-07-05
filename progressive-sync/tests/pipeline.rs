@@ -9,9 +9,9 @@ use std::fs;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
-use tytus_progressive_sync::apply::{file_sha256, BindingConsumer};
+use tytus_progressive_sync::apply::BindingConsumer;
 use tytus_progressive_sync::s3::{RemoteObject, S3Error, S3Ops};
-use tytus_progressive_sync::state::{BindingIdentity, DeadLetterClass, JournalRecord, StateStore};
+use tytus_progressive_sync::state::{utc_now, BindingIdentity, JournalRecord, StateStore};
 
 const BINDING: &str = "sf_testbinding0001";
 const BUCKET: &str = "tytus-progressive-canary";
@@ -664,6 +664,171 @@ fn remote_namespace_payload_with_foreign_binding_id_dead_letters() {
     assert_eq!(outcome.applied, 0);
     assert_eq!(outcome.dead_letters, 1, "payload/prefix identity mismatch must dead-letter");
     assert!(!h.local_root.join("docs/spoof.md").exists());
+}
+
+#[test]
+fn sequence_gap_trips_across_consumer_rebuilds() {
+    // THE production lifecycle (tray poll_binding): a FRESH StateStore +
+    // BindingConsumer per poll. Gap grace must accumulate in the durable
+    // side file (gap_polls.json) — an in-memory counter resets on every
+    // rebuild and the sequence_gap halt would never fire (sprint phase-3
+    // exit condition).
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_event(&s3, 1, "a.md", b"one");
+    stage_event(&s3, 3, "c.md", b"three"); // hole at 2
+    for poll in 0..3 {
+        let (mut c, pending) = consumer(&h, &s3);
+        c.recover(pending);
+        let outcome = c.poll_once();
+        if poll < 2 {
+            assert!(outcome.repair_required.is_empty(), "grace window poll {poll}");
+        } else {
+            assert_eq!(
+                outcome.repair_required.get(ROUTE).map(String::as_str),
+                Some("sequence_gap"),
+                "third poll across rebuilds must trip the halt"
+            );
+        }
+        drop(c); // exactly the tray's per-poll teardown
+    }
+}
+
+#[test]
+fn contiguous_apply_resets_persisted_gap_counter() {
+    // Companion to the cross-rebuild trip: once the hole fills and a
+    // contiguous apply lands, the persisted counter must restart — a LATER,
+    // unrelated gap gets its own full grace window instead of tripping off
+    // the stale count.
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_event(&s3, 1, "a.md", b"one");
+    stage_event(&s3, 3, "c.md", b"three"); // hole at 2
+    // two grace polls on rebuilt consumers → durable counter at 2, not tripped
+    for _ in 0..2 {
+        let (mut c, pending) = consumer(&h, &s3);
+        c.recover(pending);
+        assert!(c.poll_once().repair_required.is_empty());
+    }
+    // the missing event arrives late; a rebuilt consumer applies contiguously
+    stage_event(&s3, 2, "b.md", b"two");
+    {
+        let (mut c, pending) = consumer(&h, &s3);
+        c.recover(pending);
+        let outcome = c.poll_once();
+        assert_eq!(outcome.applied, 2, "{:?}", outcome.transient_errors); // 2 then 3
+        assert!(outcome.repair_required.is_empty());
+    }
+    // re-gap: two polls must NOT trip (fresh grace window, not 2 stale + 2)
+    stage_event(&s3, 5, "e.md", b"five"); // hole at 4
+    for poll in 0..2 {
+        let (mut c, pending) = consumer(&h, &s3);
+        c.recover(pending);
+        assert!(
+            c.poll_once().repair_required.is_empty(),
+            "stale counter re-tripped early on poll {poll}"
+        );
+    }
+    // and the third gap poll trips exactly on schedule
+    let (mut c, pending) = consumer(&h, &s3);
+    c.recover(pending);
+    assert_eq!(
+        c.poll_once().repair_required.get(ROUTE).map(String::as_str),
+        Some("sequence_gap")
+    );
+}
+
+#[test]
+fn repair_cleared_gap_counter_does_not_retrip_next_gap_instantly() {
+    // The durable counter sits at >= GAP_GRACE_POLLS after a trip. A Repair
+    // record clears the halt and advances the cursor — a NEW gap right after
+    // must get its own full grace window (the persisted count is keyed by
+    // the cursor it was observed at, so the advance invalidates it).
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_event(&s3, 1, "a.md", b"one");
+    stage_event(&s3, 3, "c.md", b"three"); // hole at 2
+    for _ in 0..3 {
+        let (mut c, pending) = consumer(&h, &s3);
+        c.recover(pending);
+        c.poll_once();
+    }
+    // reconcile proved the files present → Repair skips cursor to high water
+    h.store
+        .append(&JournalRecord::Repair {
+            source: "reconcile".into(),
+            corrections: serde_json::json!([{"route_id": ROUTE, "set_cursor_sequence": 3}]),
+            at: "2026-07-05T12:00:00Z".into(),
+        })
+        .unwrap();
+    // a NEW hole appears immediately (4 missing, 5 visible)
+    stage_event(&s3, 5, "e.md", b"five");
+    for poll in 0..2 {
+        let (mut c, pending) = consumer(&h, &s3);
+        c.recover(pending);
+        assert!(
+            c.poll_once().repair_required.is_empty(),
+            "stale counter re-tripped instantly on poll {poll}"
+        );
+    }
+    let (mut c, pending) = consumer(&h, &s3);
+    c.recover(pending);
+    assert_eq!(
+        c.poll_once().repair_required.get(ROUTE).map(String::as_str),
+        Some("sequence_gap"),
+        "the new gap still trips after its own grace"
+    );
+}
+
+/// Stage a producer-health-v1 heartbeat for ROUTE under the local binding id.
+fn stage_heartbeat(s3: &MockS3, written_at: &str, scan_interval_seconds: u64) {
+    let payload = serde_json::json!({
+        "schema_version": "producer-health-v1",
+        "route_id": ROUTE,
+        "binding_id": BINDING,
+        "written_at": written_at,
+        "scan_interval_seconds": scan_interval_seconds,
+    });
+    s3.put(
+        &format!("_tytus-sync/health/{BINDING}/{ROUTE}.json"),
+        payload.to_string().as_bytes(),
+    );
+}
+
+#[test]
+fn producer_heartbeat_fresh_reads_ok() {
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_heartbeat(&s3, &utc_now(), 60);
+    let (mut c, _) = consumer(&h, &s3);
+    let outcome = c.poll_once();
+    assert_eq!(outcome.producer_health.get(ROUTE).copied(), Some("ok"));
+}
+
+#[test]
+fn producer_heartbeat_old_written_at_reads_stale_without_halting() {
+    let h = harness();
+    let s3 = MockS3::default();
+    stage_heartbeat(&s3, "2020-01-01T00:00:00Z", 60); // years past 3*scan+poll
+    stage_event(&s3, 1, "a.md", b"one");
+    let (mut c, _) = consumer(&h, &s3);
+    let outcome = c.poll_once();
+    assert_eq!(outcome.producer_health.get(ROUTE).copied(), Some("stale"));
+    // dead-vs-quiet is a STATUS signal: applies proceed, repair untouched
+    assert_eq!(outcome.applied, 1, "{:?}", outcome.transient_errors);
+    assert!(outcome.repair_required.is_empty());
+}
+
+#[test]
+fn producer_heartbeat_missing_or_unparsable_reads_unknown() {
+    let h = harness();
+    let s3 = MockS3::default();
+    // no heartbeat object at all: an OLDER producer — must NOT alarm
+    let (mut c, _) = consumer(&h, &s3);
+    assert_eq!(c.poll_once().producer_health.get(ROUTE).copied(), Some("unknown"));
+    // an unparsable body reads unknown too, never stale
+    s3.put(&format!("_tytus-sync/health/{BINDING}/{ROUTE}.json"), b"not json");
+    assert_eq!(c.poll_once().producer_health.get(ROUTE).copied(), Some("unknown"));
 }
 
 fn walk(dir: &Path) -> Vec<std::path::PathBuf> {

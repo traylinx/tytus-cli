@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::conflict::{
@@ -25,6 +26,15 @@ use crate::state::{
 pub const RETRY_BUDGET: u32 = 5;
 pub const GAP_GRACE_POLLS: u32 = 3;
 pub const DEFAULT_CYCLE_BUDGET: usize = 50;
+/// Default consumer poll cadence (seconds) — overridden by the tray, which
+/// owns the real scheduler interval; used in the producer-heartbeat
+/// staleness rule below.
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 20;
+/// producer-health-v1: the producer is presumed dead once its heartbeat is
+/// older than this many scan intervals (plus one consumer poll interval of
+/// listing slack).
+pub const PRODUCER_DEAD_SCAN_MULTIPLIER: u64 = 3;
+pub const PRODUCER_HEALTH_SCHEMA_VERSION: &str = "producer-health-v1";
 
 #[derive(Debug, Default, Clone)]
 pub struct PollOutcome {
@@ -36,14 +46,31 @@ pub struct PollOutcome {
     /// route_id -> repair_required class currently in effect
     pub repair_required: HashMap<String, String>,
     pub events_seen: u64,
+    /// route_id -> "ok" | "stale" | "unknown" from the producer-health-v1
+    /// heartbeat (dead-vs-quiet). Truthful-status signal ONLY: a stale
+    /// producer never halts the consumer or touches repair_required.
+    pub producer_health: HashMap<String, &'static str>,
 }
 
-/// Per-route in-memory progress. Gap grace is re-derived after a restart;
-/// retry ATTEMPTS are durable (attempts.json) so a poison event cannot dodge
-/// its dead-letter budget by riding process restarts (G3 review change 2).
-#[derive(Default)]
-struct RouteRuntime {
-    gap_polls: u32,
+/// Per-route gap-grace progress, DURABLE (gap_polls.json). The tray builds a
+/// fresh BindingConsumer for every poll, so an in-memory counter alone can
+/// never reach GAP_GRACE_POLLS in production — the halt would simply never
+/// fire (sprint phase-3 exit condition). Same side-file discipline as retry
+/// attempts (attempts.json, G3 review change 2).
+///
+/// The count is keyed by the cursor it was observed AT: any durable cursor
+/// advance (contiguous apply, dead-letter, SkipSequence, Repair) makes the
+/// stored cursor stale, so the next gap observation starts a FRESH grace
+/// window instead of re-tripping off a counter left >= grace by an already
+/// adjudicated gap. This is the "reset when a Repair/SkipSequence record is
+/// folded" requirement expressed without hooking fold() — fold() is pure
+/// state with no store access, and Repair records are appended by the tray,
+/// outside this consumer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct GapGrace {
+    /// last_applied_sequence at the time the gap was observed
+    cursor: u64,
+    polls: u32,
 }
 
 fn attempts_path(store: &StateStore) -> PathBuf {
@@ -73,6 +100,27 @@ fn record_attempt(store: &StateStore, event_id: &str) -> Result<u32, std::io::Er
     Ok(count)
 }
 
+fn gap_polls_path(store: &StateStore) -> PathBuf {
+    store.dir.join("gap_polls.json")
+}
+
+fn load_gap_polls(store: &StateStore) -> HashMap<String, GapGrace> {
+    fs::read(gap_polls_path(store))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the gap-grace map. BEST EFFORT, unlike record_attempt's fail
+/// closed: a lost gap count merely degrades to the old per-process grace
+/// (conservative — the halt fires later, never spuriously), whereas a lost
+/// retry attempt would let a poison event dodge its dead-letter budget
+/// forever. Writes happen only when a value actually changed — polls are
+/// frequent and the steady state is "no gap".
+fn save_gap_polls(store: &StateStore, map: &HashMap<String, GapGrace>) {
+    let _ = atomic_write(&gap_polls_path(store), &serde_json::to_vec(map).unwrap_or_default());
+}
+
 pub struct BindingConsumer<'a, S: S3Ops> {
     pub s3: &'a S,
     pub store: &'a StateStore,
@@ -88,7 +136,12 @@ pub struct BindingConsumer<'a, S: S3Ops> {
     /// dead letters) stays keyed by `identity.binding_id`; only the remote
     /// namespace and the payload trust check use this id.
     pub remote_binding_id: String,
-    runtime: HashMap<String, RouteRuntime>,
+    /// The scheduler's poll cadence, used only in the producer-heartbeat
+    /// staleness rule. The tray overwrites this with its real interval.
+    pub poll_interval_secs: u64,
+    /// Durable gap-grace counters, loaded from gap_polls.json at build so a
+    /// per-poll consumer lifecycle still accumulates grace across rebuilds.
+    gap_grace: HashMap<String, GapGrace>,
 }
 
 impl<'a, S: S3Ops> BindingConsumer<'a, S> {
@@ -107,7 +160,33 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
             authorized_routes,
             cycle_budget: DEFAULT_CYCLE_BUDGET,
             remote_binding_id: identity.binding_id.clone(),
-            runtime: HashMap::new(),
+            poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+            gap_grace: load_gap_polls(store),
+        }
+    }
+
+    /// Record one gap observation at `cursor`; returns the accumulated count.
+    /// A stored count taken at a DIFFERENT cursor is stale by definition (the
+    /// cursor only moves via durable records — apply, dead-letter, skip,
+    /// repair) and restarts the grace window at 1.
+    fn bump_gap_polls(&mut self, route_id: &str, cursor: u64) -> u32 {
+        let prev = self.gap_grace.get(route_id).copied().unwrap_or_default();
+        let next = GapGrace {
+            cursor,
+            polls: if prev.cursor == cursor { prev.polls.saturating_add(1) } else { 1 },
+        };
+        if prev != next {
+            self.gap_grace.insert(route_id.to_string(), next);
+            save_gap_polls(self.store, &self.gap_grace);
+        }
+        next.polls
+    }
+
+    /// Clear the durable grace counter (empty prefix, contiguous apply).
+    /// Only touches the side file when there was a live count to clear.
+    fn reset_gap_polls(&mut self, route_id: &str) {
+        if self.gap_grace.remove(route_id).is_some() {
+            save_gap_polls(self.store, &self.gap_grace);
         }
     }
 
@@ -170,6 +249,24 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
                 outcome.repair_required.entry(route_id.clone()).or_insert_with(|| class.clone());
             }
         }
+        // Producer heartbeat (producer-health-v1, dead-vs-quiet): one small
+        // GET per route per poll. Status signal only — never gates applies.
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for route_id in self.authorized_routes.clone() {
+            let key = format!(
+                "_tytus-sync/health/{}/{}.json",
+                self.remote_binding_id, route_id
+            );
+            // Any fetch failure (absent object, transient error) reads as
+            // "unknown" — an older producer without heartbeats must NOT alarm.
+            let body = self.s3.cat_small(&key).ok();
+            let health =
+                producer_health_from_heartbeat(body.as_deref(), now_epoch, self.poll_interval_secs);
+            outcome.producer_health.insert(route_id, health);
+        }
         if self.store.journal_len() > COMPACT_THRESHOLD {
             let _ = self.store.compact(self.state);
         }
@@ -198,7 +295,7 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
         if listed.is_empty() {
             // Empty prefix with an existing cursor is NOT a gap (the janitor
             // never deletes the high-water event).
-            self.runtime.entry(route_id.into()).or_default().gap_polls = 0;
+            self.reset_gap_polls(route_id);
             return 0;
         }
         let mut used = 0;
@@ -242,16 +339,17 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
                     return used;
                 }
                 // Hole above an existing cursor: bounded grace for eventual
-                // listing, then repair-required.
-                let runtime = self.runtime.entry(route_id.into()).or_default();
-                runtime.gap_polls += 1;
-                if runtime.gap_polls >= GAP_GRACE_POLLS {
+                // listing, then repair-required. The counter is DURABLE
+                // (gap_polls.json) — the tray rebuilds this consumer every
+                // poll, so grace must accumulate across rebuilds to ever
+                // reach the threshold.
+                if self.bump_gap_polls(route_id, cursor) >= GAP_GRACE_POLLS {
                     self.state.route(route_id).repair_required = Some("sequence_gap".into());
                     outcome.repair_required.insert(route_id.into(), "sequence_gap".into());
                 }
                 return used; // never apply out of order
             }
-            self.runtime.entry(route_id.into()).or_default().gap_polls = 0;
+            self.reset_gap_polls(route_id);
             self.state.route(route_id).observed_high_water_sequence =
                 sequence.max(self.state.route(route_id).observed_high_water_sequence);
             self.process_event(route_id, sequence, &event_id, &object.key, outcome);
@@ -480,7 +578,7 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
             .and_then(|p| p.agent_label.clone())
             .filter(|l| !l.is_empty())
             .unwrap_or_else(|| route_id.to_string());
-        let mut name = conflict_name(&event.key, &basic, &producer_label, &sha_hex);
+        let name = conflict_name(&event.key, &basic, &producer_label, &sha_hex);
         let mut written: Option<String> = None;
         let mut quarantined: Option<String> = None;
         for attempt in 0..10u32 {
@@ -633,6 +731,82 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
             outcome.dead_letters += 1;
         }
     }
+}
+
+/// Pure dead-vs-quiet rule over a producer-health-v1 heartbeat body.
+///
+/// - `None` body, unparsable JSON, wrong/missing schema fields → "unknown"
+///   (an older producer never wrote heartbeats — that must NOT alarm).
+/// - `now - written_at > 3 * scan_interval + poll_interval` → "stale": the
+///   producer missed three consecutive scan cycles plus one poll of listing
+///   slack, which distinguishes a DEAD producer from a QUIET one (a quiet
+///   producer still rewrites its heartbeat every scan).
+/// - otherwise → "ok". A future `written_at` (clock skew) saturates to ok:
+///   skew must not fabricate a dead producer.
+pub fn producer_health_from_heartbeat(
+    body: Option<&[u8]>,
+    now_epoch: u64,
+    poll_interval_secs: u64,
+) -> &'static str {
+    let Some(bytes) = body else { return "unknown" };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes) else { return "unknown" };
+    if json.get("schema_version").and_then(|v| v.as_str()) != Some(PRODUCER_HEALTH_SCHEMA_VERSION) {
+        return "unknown";
+    }
+    let Some(written_at) = json
+        .get("written_at")
+        .and_then(|v| v.as_str())
+        .and_then(parse_utc_epoch)
+    else {
+        return "unknown";
+    };
+    let Some(scan_interval) = json.get("scan_interval_seconds").and_then(|v| v.as_u64()) else {
+        return "unknown";
+    };
+    let dead_after = PRODUCER_DEAD_SCAN_MULTIPLIER
+        .saturating_mul(scan_interval)
+        .saturating_add(poll_interval_secs);
+    if now_epoch.saturating_sub(written_at) > dead_after {
+        "stale"
+    } else {
+        "ok"
+    }
+}
+
+/// Parse `YYYY-MM-DDTHH:MM:SS[.fff]Z` (ISO 8601, UTC only) to epoch seconds.
+/// Mirror of `state::utc_now()` — days-from-civil (Howard Hinnant), no
+/// chrono dependency. Anything non-UTC or malformed is None (→ "unknown").
+fn parse_utc_epoch(iso: &str) -> Option<u64> {
+    let rest = iso.strip_suffix('Z')?;
+    let (date, time) = rest.split_once('T')?;
+    let mut parts = date.split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let mo: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let time = time.split('.').next()?; // tolerate fractional seconds
+    let mut parts = time.split(':');
+    let h: u64 = parts.next()?.parse().ok()?;
+    let mi: u64 = parts.next()?.parse().ok()?;
+    let s: u64 = parts.next()?.parse().ok()?;
+    let ranges_ok =
+        (1..=12).contains(&mo) && (1..=31).contains(&d) && h <= 23 && mi <= 59 && s <= 60;
+    if parts.next().is_some() || !ranges_ok {
+        return None;
+    }
+    // days-from-civil, the exact inverse of utc_now()'s civil-from-days
+    let y_adj = if mo <= 2 { y - 1 } else { y };
+    let era = y_adj.div_euclid(400);
+    let yoe = y_adj - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    if days < 0 {
+        return None; // pre-epoch heartbeat can only be garbage
+    }
+    Some(days as u64 * 86_400 + h * 3600 + mi * 60 + s)
 }
 
 pub fn parse_sequence(event_id: &str) -> Option<u64> {
