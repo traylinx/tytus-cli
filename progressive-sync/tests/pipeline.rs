@@ -901,3 +901,84 @@ fn gap_counter_for_removed_route_is_pruned_at_build() {
         serde_json::from_slice(&std::fs::read(&gap_file).unwrap()).unwrap();
     assert!(!disk2.contains_key("r0removed00"));
 }
+
+// ---- bounded blob-retry -> dead-letter demotion (F-SOAK-4) ----
+
+#[test]
+fn age_backstop_demotes_slow_failing_event_and_unblocks_route() {
+    let h = harness();
+    let s3 = MockS3::default();
+    let poisoned = stage_event(&s3, 1, "stuck.bin", b"poison");
+    stage_event(&s3, 2, "after.md", b"queued behind");
+    // One recorded attempt long ago: with the age backstop this event is
+    // overdue for demotion on its NEXT failure even though count < budget.
+    fs::write(
+        h.store.dir.join("attempts.json"),
+        format!("{{\"{poisoned}\": {{\"count\": 1, \"first_at\": 1}}}}"),
+    )
+    .unwrap();
+    *s3.fail_downloads.borrow_mut() = 1; // event 1 fails once more; event 2 downloads fine
+    let (mut c, _) = consumer(&h, &s3);
+    let mut dead = 0;
+    let mut applied = 0;
+    for _ in 0..2 {
+        let o = c.poll_once();
+        dead += o.dead_letters;
+        applied += o.applied;
+    }
+    assert_eq!(dead, 1, "ancient first_at must demote on next failure");
+    assert_eq!(applied, 1, "event behind the poison must apply");
+    assert_eq!(c.state.route(ROUTE).last_applied_sequence, 2);
+    assert!(h.store.dir.join("dead-letter").join(format!("{poisoned}.json")).exists());
+}
+
+#[test]
+fn budget_demotes_persistently_failing_event_and_clears_attempts() {
+    let h = harness();
+    let s3 = MockS3::default();
+    let poisoned = stage_event(&s3, 1, "stuck.bin", b"poison");
+    *s3.fail_downloads.borrow_mut() = 200;
+    let (mut c, _) = consumer(&h, &s3);
+    for i in 1..=4 {
+        let o = c.poll_once();
+        assert_eq!(o.dead_letters, 0, "poll {i} must still be within budget");
+    }
+    let o = c.poll_once();
+    assert_eq!(o.dead_letters, 1, "5th failure exhausts RETRY_BUDGET");
+    assert_eq!(c.state.route(ROUTE).dead_letter_count, 1);
+    let attempts = fs::read_to_string(h.store.dir.join("attempts.json")).unwrap_or_default();
+    assert!(!attempts.contains(&poisoned), "demoted event must not leak an attempts entry");
+}
+
+#[test]
+fn legacy_count_only_attempts_schema_migrates_and_keeps_counting() {
+    let h = harness();
+    let s3 = MockS3::default();
+    let poisoned = stage_event(&s3, 1, "stuck.bin", b"poison");
+    // Old schema: bare count. Migration adopts "now" as first_at, so the
+    // age backstop must NOT fire; the count continues 3 -> 4 -> 5 (demote).
+    fs::write(
+        h.store.dir.join("attempts.json"),
+        format!("{{\"{poisoned}\": 3}}"),
+    )
+    .unwrap();
+    *s3.fail_downloads.borrow_mut() = 200;
+    let (mut c, _) = consumer(&h, &s3);
+    assert_eq!(c.poll_once().dead_letters, 0, "migrated count=4 stays within budget");
+    assert_eq!(c.poll_once().dead_letters, 1, "count=5 demotes");
+}
+
+#[test]
+fn successful_apply_clears_attempt_record() {
+    let h = harness();
+    let s3 = MockS3::default();
+    let event_id = stage_event(&s3, 1, "a.md", b"body");
+    *s3.fail_downloads.borrow_mut() = 1;
+    let (mut c, _) = consumer(&h, &s3);
+    assert_eq!(c.poll_once().applied, 0);
+    let attempts = fs::read_to_string(h.store.dir.join("attempts.json")).unwrap();
+    assert!(attempts.contains(&event_id), "failed attempt must be recorded");
+    assert_eq!(c.poll_once().applied, 1);
+    let attempts = fs::read_to_string(h.store.dir.join("attempts.json")).unwrap_or_default();
+    assert!(!attempts.contains(&event_id), "successful apply must clear the record");
+}

@@ -24,6 +24,13 @@ use crate::state::{
 };
 
 pub const RETRY_BUDGET: u32 = 5;
+/// Age backstop on the retry budget: an event still failing this long after
+/// its FIRST recorded attempt dead-letters even below RETRY_BUDGET. Counting
+/// alone is not enough — when each failing download burns many minutes of
+/// wall clock (idle-timeout rclone cycles over a degraded path) the budget
+/// accrues so slowly that one poison event dammed a route for 10+ hours
+/// (live incident 2026-07-05T21:28Z → 2026-07-06, F-SOAK-4).
+pub const RETRY_MAX_AGE_SECS: u64 = 3600;
 pub const GAP_GRACE_POLLS: u32 = 3;
 pub const DEFAULT_CYCLE_BUDGET: usize = 50;
 /// Default consumer poll cadence (seconds) — overridden by the tray, which
@@ -73,31 +80,88 @@ struct GapGrace {
     polls: u32,
 }
 
+/// Per-event retry bookkeeping: how many attempts were consumed and when the
+/// FIRST one happened (epoch seconds). The age drives the RETRY_MAX_AGE_SECS
+/// demotion backstop; the count drives RETRY_BUDGET.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct AttemptRecord {
+    count: u32,
+    first_at: u64,
+}
+
+fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn attempts_path(store: &StateStore) -> PathBuf {
     store.dir.join("attempts.json")
 }
 
-fn load_attempts(store: &StateStore) -> HashMap<String, u32> {
-    fs::read(attempts_path(store))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+fn load_attempts(store: &StateStore) -> HashMap<String, AttemptRecord> {
+    let Ok(bytes) = fs::read(attempts_path(store)) else {
+        return HashMap::new();
+    };
+    if let Ok(map) = serde_json::from_slice::<HashMap<String, AttemptRecord>>(&bytes) {
+        return map;
+    }
+    // Legacy count-only schema (pre age-backstop): adopt "now" as first_at —
+    // the age window starts fresh, never fabricates instant demotion.
+    serde_json::from_slice::<HashMap<String, u32>>(&bytes)
+        .map(|old| {
+            let now = epoch_now();
+            old.into_iter()
+                .map(|(k, count)| (k, AttemptRecord { count, first_at: now }))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-/// Record one attempt DURABLY and return the new count. Fail closed: if the
-/// attempts file cannot be persisted, no retry/dead-letter decision may
+/// Demote when the durable budget is spent OR the event has been failing
+/// longer than the age backstop. Pure so the rule is directly testable.
+fn should_demote(rec: &AttemptRecord, now: u64) -> bool {
+    rec.count >= RETRY_BUDGET || now.saturating_sub(rec.first_at) >= RETRY_MAX_AGE_SECS
+}
+
+/// Record one attempt DURABLY and return the updated record. Fail closed: if
+/// the attempts file cannot be persisted, no retry/dead-letter decision may
 /// advance (G3-B review) — the caller surfaces a transient system error and
-/// the route halts for the cycle (cursor untouched).
-fn record_attempt(store: &StateStore, event_id: &str) -> Result<u32, std::io::Error> {
+/// the route halts for the cycle (cursor untouched). A record that reaches
+/// its demotion condition is removed in the same durable write.
+fn record_attempt(
+    store: &StateStore,
+    event_id: &str,
+    now: u64,
+) -> Result<AttemptRecord, std::io::Error> {
     let mut attempts = load_attempts(store);
-    let count = attempts.get(event_id).copied().unwrap_or(0) + 1;
-    if count >= RETRY_BUDGET {
+    let prev = attempts.get(event_id).copied();
+    let rec = AttemptRecord {
+        count: prev.map(|r| r.count).unwrap_or(0) + 1,
+        first_at: prev.map(|r| r.first_at).unwrap_or(now),
+    };
+    if should_demote(&rec, now) {
         attempts.remove(event_id);
     } else {
-        attempts.insert(event_id.to_string(), count);
+        attempts.insert(event_id.to_string(), rec);
     }
     atomic_write(&attempts_path(store), &serde_json::to_vec(&attempts).unwrap_or_default())?;
-    Ok(count)
+    Ok(rec)
+}
+
+/// Best-effort removal after a successful apply so a once-failed event does
+/// not leave a stale record whose old first_at would instantly demote an
+/// unrelated future failure of a recycled event id (and so the file cannot
+/// grow without bound). Only rewrites when the key was actually present.
+fn clear_attempt(store: &StateStore, event_id: &str) {
+    let mut attempts = load_attempts(store);
+    if attempts.remove(event_id).is_some() {
+        let _ = atomic_write(
+            &attempts_path(store),
+            &serde_json::to_vec(&attempts).unwrap_or_default(),
+        );
+    }
 }
 
 fn gap_polls_path(store: &StateStore) -> PathBuf {
@@ -267,10 +331,7 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
         }
         // Producer heartbeat (producer-health-v1, dead-vs-quiet): one small
         // GET per route per poll. Status signal only — never gates applies.
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now_epoch = epoch_now();
         for route_id in self.authorized_routes.clone() {
             let key = format!(
                 "_tytus-sync/health/{}/{}.json",
@@ -523,6 +584,7 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
                     key: event.key.clone(), sha256: event.object.sha256.clone(), at: utc_now(),
                 }).is_ok() {
                     outcome.applied += 1;
+                    clear_attempt(self.store, event_id);
                 }
                 return;
             }
@@ -571,6 +633,7 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
             key: event.key.clone(), sha256: event.object.sha256.clone(), at: utc_now(),
         }).is_ok() {
             outcome.applied += 1;
+            clear_attempt(self.store, event_id);
         }
     }
 
@@ -687,10 +750,14 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
         Ok(())
     }
 
-    /// Transient failure: retry against the DURABLE budget; past budget ->
-    /// dead-letter with the given class (poison rule: later events keep
-    /// applying). Attempts persist across restarts (attempts.json) so a
-    /// poison event cannot block a route forever by riding restarts.
+    /// Transient failure: retry against the DURABLE budget; past budget OR
+    /// past the age backstop -> dead-letter with the given class (poison
+    /// rule: later events keep applying). Attempts persist across restarts
+    /// (attempts.json) so a poison event cannot block a route forever by
+    /// riding restarts — and cannot block one by failing SLOWLY either: when
+    /// each attempt burns minutes of wall clock, the count alone may never
+    /// reach RETRY_BUDGET within a day (F-SOAK-4), so an event still failing
+    /// RETRY_MAX_AGE_SECS after its first attempt demotes regardless.
     fn transient(
         &mut self,
         route_id: &str,
@@ -701,7 +768,8 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
         raw: Option<&serde_json::Value>,
         outcome: &mut PollOutcome,
     ) {
-        match record_attempt(self.store, event_id) {
+        let now = epoch_now();
+        match record_attempt(self.store, event_id, now) {
             Err(e) => {
                 // Attempt not durable -> no decision advances; the route
                 // halts for this cycle and the event retries next poll
@@ -710,7 +778,7 @@ impl<'a, S: S3Ops> BindingConsumer<'a, S> {
                     .transient_errors
                     .push(format!("{route_id}/{event_id}: attempts persist failed: {e}"));
             }
-            Ok(count) if count >= RETRY_BUDGET => {
+            Ok(rec) if should_demote(&rec, now) => {
                 self.dead_letter(route_id, sequence, event_id, class, detail, raw, outcome);
             }
             Ok(_) => {
