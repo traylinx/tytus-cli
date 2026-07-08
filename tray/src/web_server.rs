@@ -12190,6 +12190,19 @@ fn normalize_shared_binding_value(binding: &mut serde_json::Value) {
     });
     obj.entry("sync_layout".to_string())
         .or_insert_with(|| serde_json::Value::String("legacy_bucket_root".to_string()));
+    // The UI contract types pods_provisioned as a required array; route-only
+    // sidecars (schema v3 progressive bindings) may omit it entirely, and a
+    // hand-edited sidecar could carry null or a non-array.
+    let pods_is_array = obj
+        .get("pods_provisioned")
+        .map(|v| v.is_array())
+        .unwrap_or(false);
+    if !pods_is_array {
+        obj.insert(
+            "pods_provisioned".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
+    }
 
     let pods = obj
         .get("pods_provisioned")
@@ -19090,6 +19103,55 @@ mod tests {
         assert!(claus.starts_with("Yes."));
         assert!(claus.contains("/app/workspace/Shared/marketing/"));
         assert!(claus.contains("HANDOFF.md"));
+    }
+
+    #[test]
+    fn normalize_backfills_pods_provisioned_for_route_only_sidecar() {
+        // Regression: a schema-v3 progressive-sync sidecar carries only
+        // routes_provisioned; serving it without pods_provisioned crashed the
+        // Files and Settings sharing UIs (2026-07-08).
+        let mut binding = serde_json::json!({
+            "schema_version": 3,
+            "bucket": "tytus-progressive-canary",
+            "slug": "p6canary",
+            "local_path": "/tmp/p6canary/",
+            "auto_sync": false,
+            "routes_provisioned": ["r0g3", "r1adv"],
+        });
+        normalize_shared_binding_value(&mut binding);
+        assert_eq!(
+            binding.get("pods_provisioned"),
+            Some(&serde_json::json!([])),
+            "route-only sidecars must serialize pods_provisioned as an empty array"
+        );
+        // Malformed values (null / non-array) are coerced, not passed through.
+        let mut with_null = serde_json::json!({
+            "schema_version": 2,
+            "bucket": "shared",
+            "slug": "shared",
+            "local_path": "/tmp/shared/",
+            "auto_sync": true,
+            "pods_provisioned": serde_json::Value::Null,
+        });
+        normalize_shared_binding_value(&mut with_null);
+        assert_eq!(
+            with_null.get("pods_provisioned"),
+            Some(&serde_json::json!([]))
+        );
+        // Existing pod lists must pass through untouched.
+        let mut with_pods = serde_json::json!({
+            "schema_version": 2,
+            "bucket": "shared",
+            "slug": "shared",
+            "local_path": "/tmp/shared/",
+            "auto_sync": true,
+            "pods_provisioned": ["wannolot-01"],
+        });
+        normalize_shared_binding_value(&mut with_pods);
+        assert_eq!(
+            with_pods.get("pods_provisioned"),
+            Some(&serde_json::json!(["wannolot-01"]))
+        );
     }
 
     #[test]
