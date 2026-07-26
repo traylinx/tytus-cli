@@ -8,13 +8,17 @@
 // directly contradict. Nothing caught it because nothing was watching. These
 // checks watch.
 //
-// Run: node web/pricing.test.mjs
+// Run: node tests/landing-pricing.test.mjs
+//
+// NOT in web/. That directory is the published asset root -- Cloudflare Workers
+// serves ./web directly and the Pages job does `cp -rL web/. _site/` -- so a
+// test file living there would be downloadable at get.traylinx.com.
 
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-const HTML = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+const HTML = fs.readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
 const SCRIPT = HTML.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 let failures = 0;

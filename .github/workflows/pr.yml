@@ -189,7 +189,7 @@ jobs:
       # 2026-07-26 drift where get.traylinx.com advertised three retired plans
       # and a money-back guarantee the terms of sale contradict.
       - name: Landing page must render prices from the live API, not literals
-        run: node web/pricing.test.mjs
+        run: node tests/landing-pricing.test.mjs
 
   rust:
     name: Rust ${{ matrix.os }}
