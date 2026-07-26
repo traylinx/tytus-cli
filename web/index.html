@@ -402,13 +402,20 @@
     // Structural only. A card may legitimately carry a null amount, so we check
     // the SHAPE and let render skip anything unpriceable -- rejecting the whole
     // live payload over one odd card would pin the page to the snapshot forever.
-    function isValidPricing(body) {
+    //
+    // The interval check is NOT cosmetic. A proxy that drops `interval` returns a
+    // structurally perfect MONTHLY payload for a YEARLY request, and the page
+    // would print monthly amounts under the Yearly toggle. That exact bug shipped
+    // in the pricing proxy on 2026-07-26 and nothing failed loudly, because the
+    // payload was valid -- it was just the wrong term. Demand the term back.
+    function isValidPricing(body, wantInterval) {
       return !!(body && body.success === true && body.data &&
+        body.data.interval === wantInterval &&
         Array.isArray(body.data.cards) && body.data.cards.length &&
         body.data.cards.every(c => c && typeof c.id === 'string' && c.price && Array.isArray(c.highlights)));
     }
 
-    function render(data) {
+    function render(data, mode) {
       const grid = document.getElementById('pricing-grid');
       if (!grid) return;
 
@@ -429,7 +436,7 @@
       // the pay button, so the promise cannot drift between the two.
       const terms = document.getElementById('annual-terms');
       const annual = data.annual;
-      const showTerms = billingMode === 'year' && annual && annual.enabled && annual.consent_text;
+      const showTerms = mode === 'year' && annual && annual.enabled && annual.consent_text;
       if (terms) {
         terms.textContent = showTerms ? annual.consent_text : '';
         terms.hidden = !showTerms;
@@ -444,16 +451,46 @@
       }
     }
 
+    function setBillingButtons(mode) {
+      document.querySelectorAll('[data-billing]').forEach(b =>
+        b.classList.toggle('active', b.getAttribute('data-billing') === mode));
+    }
+
+    // An UNCONFIRMED annual ladder is the dangerous one. If annual has been
+    // switched off server-side we would be advertising a term we will not sell,
+    // and the bundled snapshot cannot know that. So a failed annual load drops
+    // to the SHORTER commitment and moves the toggle with it: the label then
+    // still matches the amounts, and monthly is always honourable. This mirrors
+    // the same asymmetry the pricing services use -- leniency falls toward the
+    // shorter term, never toward the longer one.
+    function degrade(mode) {
+      if (mode === 'year') {
+        billingMode = 'month';
+        setBillingButtons('month');
+      }
+      render(FALLBACK.month, 'month');
+    }
+
+    // Monotonic request id. Toggling month -> year while the month request is
+    // still in flight used to let the late MONTHLY response paint itself under
+    // an active Yearly toggle. Only the newest request may render.
+    let requestSeq = 0;
+
     async function loadPricing() {
-      const params = new URLSearchParams({ interval: billingMode });
+      const seq = ++requestSeq;
+      const mode = billingMode;
+      const params = new URLSearchParams({ interval: mode });
       if (billingCountry) params.set('country', billingCountry);
       try {
         const res = await fetch(`${PRICING_ENDPOINT}?${params}`, { headers: { Accept: 'application/json' } });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const body = await res.json();
-        render(isValidPricing(body) ? body.data : FALLBACK[billingMode]);
+        if (seq !== requestSeq) return;
+        if (!isValidPricing(body, mode)) throw new Error('unusable payload');
+        render(body.data, mode);
       } catch (_) {
-        render(FALLBACK[billingMode]);
+        if (seq !== requestSeq) return;
+        degrade(mode);
       }
     }
 
@@ -475,7 +512,7 @@
     document.querySelectorAll('[data-billing]').forEach(btn => {
       btn.addEventListener('click', () => {
         billingMode = btn.getAttribute('data-billing');
-        document.querySelectorAll('[data-billing]').forEach(b => b.classList.toggle('active', b === btn));
+        setBillingButtons(billingMode);
         loadPricing();
       });
     });

@@ -34,15 +34,28 @@ const test = (name, fn) => {
 function boot(fetchImpl) {
   const mk = () => ({ innerHTML: '', textContent: '', hidden: false, classList: { toggle() {} } });
   const els = { 'pricing-grid': mk(), 'annual-terms': mk(), 'pricing-footnote': mk() };
+  // Real toggle stubs so setBillingButtons() is exercised: the failed-annual
+  // path MOVES the toggle, and a test that cannot see that proves nothing.
+  const buttons = ['month', 'year'].map(mode => ({
+    mode, active: mode === 'month',
+    getAttribute: () => mode,
+    addEventListener() {},
+    classList: { toggle(_cls, on) { this.owner.active = on; } }
+  }));
+  buttons.forEach(b => { b.classList.owner = b; });
   const ctx = {
-    document: { getElementById: id => els[id] || null, querySelectorAll: () => [] },
+    document: {
+      getElementById: id => els[id] || null,
+      querySelectorAll: sel => (sel === '[data-billing]' ? buttons : [])
+    },
     navigator: { language: 'de-DE', languages: ['de-DE'] },
     Intl: { DateTimeFormat: () => ({ resolvedOptions: () => ({ timeZone: 'Europe/Berlin' }) }) },
     fetch: fetchImpl, URLSearchParams, console, setTimeout, clearTimeout
   };
   vm.createContext(ctx);
   vm.runInContext(SCRIPT, ctx);
-  return { ctx, els };
+  const activeToggle = () => (buttons.find(b => b.active) || {}).mode;
+  return { ctx, els, buttons, activeToggle };
 }
 
 async function renderAt(ctx, els, mode) {
@@ -173,6 +186,55 @@ await test('escapes API-supplied text', async () => {
   const r = await renderAt(ctx, els, 'month');
   assert.ok(!r.html.includes('<img'), 'API text was injected as raw HTML');
   assert.ok(r.html.includes('&lt;img'), 'API text was not escaped');
+});
+
+// ── 6. term integrity: never show one term's prices under the other's label ──
+// These three come from the codex review of PR #37. The first is the same bug
+// class that shipped in the pricing proxy the same day: a structurally perfect
+// payload carrying the WRONG TERM, which nothing failed loudly on.
+
+await test('rejects a payload whose interval is not the one requested', async () => {
+  // Asked for a year, proxy answered with month. Structurally valid, wrong term.
+  const wrong = livePayload('month', '€24');
+  const { ctx, els, activeToggle } = boot(jsonOk(wrong));
+  const r = await renderAt(ctx, els, 'year');
+  assert.ok(!r.prices.includes('€24') || r.prices.length >= 4,
+    'monthly amounts were rendered for a yearly request');
+  assert.equal(activeToggle(), 'month', 'toggle must follow the term actually shown');
+});
+
+await test('a late reply from a superseded request cannot repaint the page', async () => {
+  let release;
+  const slowMonth = new Promise(res => { release = res; });
+  const fetchImpl = async url => {
+    if (String(url).includes('interval=month')) {
+      await slowMonth;
+      return { ok: true, json: async () => livePayload('month', '€24') };
+    }
+    return { ok: true, json: async () => livePayload('year', '€269/yr') };
+  };
+  const { ctx, els } = boot(fetchImpl);
+
+  vm.runInContext("billingMode='month';", ctx);
+  const monthCall = vm.runInContext('loadPricing()', ctx);   // in flight
+  vm.runInContext("billingMode='year';", ctx);
+  await vm.runInContext('loadPricing()', ctx);               // supersedes it
+  release();                                                  // month lands late
+  await monthCall;
+
+  const prices = [...els['pricing-grid'].innerHTML.matchAll(/<strong>([^<]+)<\/strong>/g)].map(m => m[1]);
+  assert.deepEqual(prices, ['€269/yr'], 'a stale monthly response repainted the yearly view');
+});
+
+await test('a failed ANNUAL load drops to monthly and moves the toggle with it', async () => {
+  // The bundled snapshot cannot know whether annual is still sellable. Showing
+  // an unconfirmed annual ladder would advertise a term we may have switched
+  // off, so degrade toward the SHORTER commitment, never the longer one.
+  const { ctx, els, activeToggle } = boot(dead);
+  const r = await renderAt(ctx, els, 'year');
+  assert.equal(activeToggle(), 'month', 'toggle still said Yearly while showing fallback prices');
+  assert.equal(r.terms.hidden, true, 'annual terms shown for an unconfirmed annual ladder');
+  assert.ok(r.prices.every(p => !/\/yr/.test(p)), 'yearly labels survived a failed annual load');
 });
 
 console.log(failures ? `\n${failures} failing` : '\nall passing');
