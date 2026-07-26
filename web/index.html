@@ -252,73 +252,33 @@
       </section>
 
 
+      <!-- PRICING. Rendered from the LIVE pricing API, never hardcoded.
+           https://tytus.traylinx.com/public/pricing is the single source of
+           truth (payments -> Provider proxy); a price change is Stripe +
+           catalog only, with zero edits here. This section used to hardcode
+           Explorer/Creator/Operator at $39/$79/$149 -- plans that no longer
+           exist -- which is exactly the drift this removes. -->
       <section id="pricing">
         <div class="pricing-intro">
           <h2>Private pod pricing.</h2>
-          <p id="pricing-subtitle">Start free, then reserve a dedicated Tytus pod when you need private infrastructure, stable keys, and bundled model credits.</p>
+          <p id="pricing-subtitle">A dedicated EU-hosted server, optionally with a managed AI plan. Checkout confirms the exact recurring total from your billing address.</p>
           <div class="billing-toggle" aria-label="Billing cadence">
-            <button type="button" class="active" data-billing="monthly">Monthly</button>
-            <button type="button" data-billing="yearly">Yearly</button>
-            <span class="save">Save 2 months</span>
+            <button type="button" class="active" data-billing="month">Monthly</button>
+            <button type="button" data-billing="year">Yearly</button>
+            <!-- No number here. The saving is not uniform across plans (it runs
+                 from 0.79 to 1.91 months), so a badge above ALL cards may only
+                 claim what the WEAKEST card actually delivers. -->
+            <span class="save">Save with annual</span>
           </div>
         </div>
-        <div class="pricing-grid">
-          <article class="pricing-card primary-plan">
-            <span class="pricing-badge">Most popular</span>
-            <div class="plan-name">Explorer</div>
-            <div class="price-line"><strong data-price-monthly="39" data-price-yearly="390">$39</strong><span data-period>/mo</span></div>
-            <div class="tax-line" data-tax-line>+ applicable taxes; checkout confirms final billing address tax.</div>
-            <p class="plan-copy">Your own private Tytus pod. Run OpenClaw inside an isolated WireGuard tunnel.</p>
-            <ul class="feature-list">
-              <li>1 Dedicated Tytus AI Pod</li>
-              <li>Runs OpenClaw (1 pod unit)</li>
-              <li>WireGuard-encrypted tunnel</li>
-              <li>Dedicated OpenAI-compatible gateway per pod</li>
-              <li>Stable URL + stable per-user API key</li>
-              <li>Bundled token plan: text, vision, audio, image, embeddings</li>
-              <li>Sentinel Pass credentials</li>
-              <li>BYOK on top of bundled tokens</li>
-              <li>7-day money-back guarantee</li>
-            </ul>
-            <a class="small-btn primaryish" href="https://traylinx.com/admin/tytus">Deploy my pod</a>
-          </article>
-          <article class="pricing-card">
-            <div class="plan-name">Creator</div>
-            <div class="price-line"><strong data-price-monthly="79" data-price-yearly="790">$79</strong><span data-period>/mo</span></div>
-            <div class="tax-line" data-tax-line>+ applicable taxes; checkout confirms final billing address tax.</div>
-            <p class="plan-copy">Run OpenClaw and Hermes side by side. The most popular plan for builders.</p>
-            <ul class="feature-list">
-              <li>Up to 2 Dedicated Tytus AI Pods</li>
-              <li>Run OpenClaw and/or Hermes Agent (Hermes = 2 units)</li>
-              <li>Everything in Explorer</li>
-              <li>Team access for Sentinel Passes</li>
-              <li>Custom model preferences in your gateway</li>
-              <li>Advanced routing across providers</li>
-              <li>Bundled token plan, doubled</li>
-            </ul>
-            <a class="small-btn" href="https://traylinx.com/admin/tytus">Get started</a>
-          </article>
-          <article class="pricing-card">
-            <div class="plan-name">Operator</div>
-            <div class="price-line"><strong data-price-monthly="149" data-price-yearly="1490">$149</strong><span data-period>/mo</span></div>
-            <div class="tax-line" data-tax-line>+ applicable taxes; checkout confirms final billing address tax.</div>
-            <p class="plan-copy">For teams and agencies. Up to 4 pods running OpenClaw and Hermes in parallel.</p>
-            <ul class="feature-list">
-              <li>Up to 4 Dedicated Tytus AI Pods</li>
-              <li>Run OpenClaw and Hermes in parallel</li>
-              <li>Everything in Creator</li>
-              <li>Dev / Staging / Prod pod split</li>
-              <li>Hierarchical Sentinel policies</li>
-              <li>Central organization management</li>
-              <li>Bundled token plan, quadrupled</li>
-            </ul>
-            <a class="small-btn" href="https://traylinx.com/admin/tytus">Get started</a>
-          </article>
-        </div>
+        <div class="pricing-grid" id="pricing-grid" aria-live="polite"></div>
+        <!-- The free tier is not a priced card and is not sold through the
+             pricing API, so it stays static. EUR-only products mean €0 is
+             correct in every region. -->
         <div class="free-plan">
           <div>
             <div class="plan-name">Free</div>
-            <div class="price-line"><strong data-price-free>$0</strong><span data-period>/mo</span></div>
+            <div class="price-line"><strong>€0</strong><span>/mo</span></div>
             <p class="caption">Forever. No card. Try Tytus on shared infrastructure.</p>
           </div>
           <div class="free-features">
@@ -331,7 +291,8 @@
           </div>
           <a class="small-btn" href="https://traylinx.com/admin/tytus">Start free</a>
         </div>
-        <p id="pricing-footnote" class="pricing-footnote">All prices in USD. Taxes calculated at checkout from your billing address. Annual billing saves 2 months. 7-day money-back on first paid month.</p>
+        <p id="annual-terms" class="pricing-footnote" hidden></p>
+        <p id="pricing-footnote" class="pricing-footnote"></p>
       </section>
 
       <section>
@@ -381,15 +342,48 @@
   </div>
   <script>
 
-    const EU_VAT_COUNTRIES = new Set(['AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE']);
+    // ── LIVE PRICING ────────────────────────────────────────────────────
+    // Single source of truth: payments -> Provider proxy. Nothing about the
+    // price ladder is hardcoded here, so changing a price is Stripe + catalog
+    // only. Before 2026-07-26 this page hardcoded Explorer/Creator/Operator at
+    // $39/$79/$149 with a "7-day money-back guarantee" -- three retired plans,
+    // prices we do not charge, and a refund promise the terms contradict.
+    const PRICING_ENDPOINT = 'https://tytus.traylinx.com/public/pricing';
+
+    // Bundled snapshot of the live values (2026-07-26). Used ONLY when the API
+    // is unreachable, so the page degrades to a stale-but-real ladder instead
+    // of blanking. It must never be the thing that decides a price.
+    const FALLBACK = {
+      month: {
+        region: { tax_copy: 'VAT included where applicable' },
+        cards: [
+          { id: 'starter', name: 'Starter', self_serve: true, popular: false, tagline: 'One private server, your own AI keys.', price: { label: '€24' }, highlights: ['1× Server L (6 vCPU · 8 GB · 240 GB), EU-hosted', 'BYOK or SwitchAI Cloud — no managed AI bill', 'Pay-on-delivery: €0 today'] },
+          { id: 'starter_managed', name: 'Starter · Managed', self_serve: true, popular: false, tagline: 'A private server with managed AI included.', price: { label: '€49' }, highlights: ['1× Server L, EU-hosted', 'Managed Tytus AI (Lite) — no key to manage', 'One AI plan feeds your server'] },
+          { id: 'builder', name: 'Builder', self_serve: true, popular: true, tagline: 'The everyday build box: private server + more AI.', price: { label: '€89' }, highlights: ['1× Server L, EU-hosted', 'Managed Tytus AI (Pro) — more headroom', 'The most popular way to run Tytus'] },
+          { id: 'power', name: 'Power', self_serve: true, popular: false, tagline: 'One private box with the most managed AI.', price: { label: '€179' }, highlights: ['1× Server L, EU-hosted', 'Managed Tytus AI (Max) — top quota', 'Most AI throughput on a single private server'] }
+        ]
+      },
+      year: {
+        region: { tax_copy: 'VAT included where applicable' },
+        annual: { enabled: true, refundable: false, consent_text: '' },
+        cards: [
+          { id: 'starter', name: 'Starter', self_serve: true, popular: false, tagline: 'One private server, your own AI keys.', price: { label: '€269/yr' }, highlights: ['1× Server L (6 vCPU · 8 GB · 240 GB), EU-hosted', 'BYOK or SwitchAI Cloud — no managed AI bill', 'Pay-on-delivery: €0 today'] },
+          { id: 'starter_managed', name: 'Starter · Managed', self_serve: true, popular: false, tagline: 'A private server with managed AI included.', price: { label: '€538/yr' }, highlights: ['1× Server L, EU-hosted', 'Managed Tytus AI (Lite) — no key to manage', 'One AI plan feeds your server'] },
+          { id: 'builder', name: 'Builder', self_serve: true, popular: true, tagline: 'The everyday build box: private server + more AI.', price: { label: '€968/yr' }, highlights: ['1× Server L, EU-hosted', 'Managed Tytus AI (Pro) — more headroom', 'The most popular way to run Tytus'] },
+          { id: 'power', name: 'Power', self_serve: true, popular: false, tagline: 'One private box with the most managed AI.', price: { label: '€1968/yr' }, highlights: ['1× Server L, EU-hosted', 'Managed Tytus AI (Max) — top quota', 'Most AI throughput on a single private server'] }
+        ]
+      }
+    };
+
     const GEO_ENDPOINTS = [
       { url: 'https://api.country.is/', pick: d => d.country },
       { url: 'https://get.geojs.io/v1/ip/country.json', pick: d => d.country },
       { url: 'https://ipwho.is/', pick: d => d.country_code },
       { url: 'https://ipapi.co/json/', pick: d => d.country_code },
     ];
-    let billingMode = 'monthly';
-    let pricingCurrency = 'usd';
+
+    let billingMode = 'month';
+    let billingCountry = null;
 
     function countryFromLocale() {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
@@ -399,51 +393,81 @@
       return m ? m[1].toUpperCase() : null;
     }
 
-    function pricingRegion(countryCode) {
-      const code = (countryCode || '').toUpperCase();
-      if (EU_VAT_COUNTRIES.has(code)) {
-        return {
-          currency: 'eur',
-          symbol: '€',
-          taxLine: 'VAT included where applicable',
-          subtitle: 'EU consumer prices are shown in EUR with VAT included where applicable. Checkout confirms the exact recurring total from your billing address.',
-          footnote: 'EU consumer prices shown in EUR include VAT where applicable. Stripe Checkout confirms the exact recurring total from your billing address. Annual billing saves 2 months. 7-day money-back on first paid month.'
-        };
-      }
-      return {
-        currency: 'usd',
-        symbol: '$',
-        taxLine: '+ applicable taxes; checkout confirms final billing address tax.',
-        subtitle: 'Global prices are shown in USD. Checkout confirms taxes from your billing address before payment.',
-        footnote: 'All prices in USD. Taxes calculated at checkout from your billing address. Annual billing saves 2 months. 7-day money-back on first paid month.'
-      };
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, ch => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+      ));
     }
 
-    function applyPricing(countryCode) {
-      const region = pricingRegion(countryCode);
-      pricingCurrency = region.currency;
-      document.querySelectorAll('[data-price-monthly]').forEach(el => {
-        const amount = el.getAttribute(billingMode === 'yearly' ? 'data-price-yearly' : 'data-price-monthly');
-        el.textContent = region.symbol + amount;
-      });
-      document.querySelectorAll('[data-price-free]').forEach(el => { el.textContent = region.symbol + '0'; });
-      document.querySelectorAll('[data-period]').forEach(el => { el.textContent = billingMode === 'yearly' ? '/year' : '/mo'; });
-      document.querySelectorAll('[data-tax-line]').forEach(el => { el.textContent = region.taxLine; });
-      const subtitle = document.getElementById('pricing-subtitle');
+    // Structural only. A card may legitimately carry a null amount, so we check
+    // the SHAPE and let render skip anything unpriceable -- rejecting the whole
+    // live payload over one odd card would pin the page to the snapshot forever.
+    function isValidPricing(body) {
+      return !!(body && body.success === true && body.data &&
+        Array.isArray(body.data.cards) && body.data.cards.length &&
+        body.data.cards.every(c => c && typeof c.id === 'string' && c.price && Array.isArray(c.highlights)));
+    }
+
+    function render(data) {
+      const grid = document.getElementById('pricing-grid');
+      if (!grid) return;
+
+      const cards = (data.cards || []).filter(c => c.self_serve && c.price && c.price.label);
+      grid.innerHTML = cards.map(c => `
+          <article class="pricing-card${c.popular ? ' primary-plan' : ''}">
+            ${c.popular ? '<span class="pricing-badge">Most popular</span>' : ''}
+            <div class="plan-name">${esc(c.name)}</div>
+            <div class="price-line"><strong>${esc(c.price.label)}</strong></div>
+            <div class="tax-line">${esc((data.region && data.region.tax_copy) || '')}</div>
+            <p class="plan-copy">${esc(c.tagline)}</p>
+            <ul class="feature-list">${(c.highlights || []).map(h => `<li>${esc(h)}</li>`).join('')}</ul>
+            <a class="small-btn${c.popular ? ' primaryish' : ''}" href="https://traylinx.com/admin/tytus">${esc((c.cta && c.cta.label) || 'Deploy my pod')}</a>
+          </article>`).join('');
+
+      // Annual terms are shown ONLY on the annual view and ONLY when the API
+      // says annual is sellable -- the same words Stripe Checkout puts above
+      // the pay button, so the promise cannot drift between the two.
+      const terms = document.getElementById('annual-terms');
+      const annual = data.annual;
+      const showTerms = billingMode === 'year' && annual && annual.enabled && annual.consent_text;
+      if (terms) {
+        terms.textContent = showTerms ? annual.consent_text : '';
+        terms.hidden = !showTerms;
+      }
+
       const footnote = document.getElementById('pricing-footnote');
-      if (subtitle) subtitle.textContent = region.subtitle;
-      if (footnote) footnote.textContent = region.footnote;
+      if (footnote) {
+        const tax = (data.region && data.region.tax_copy) || '';
+        footnote.textContent = tax
+          ? `${tax}. Checkout confirms the exact recurring total from your billing address.`
+          : 'Checkout confirms the exact recurring total from your billing address.';
+      }
+    }
+
+    async function loadPricing() {
+      const params = new URLSearchParams({ interval: billingMode });
+      if (billingCountry) params.set('country', billingCountry);
+      try {
+        const res = await fetch(`${PRICING_ENDPOINT}?${params}`, { headers: { Accept: 'application/json' } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const body = await res.json();
+        render(isValidPricing(body) ? body.data : FALLBACK[billingMode]);
+      } catch (_) {
+        render(FALLBACK[billingMode]);
+      }
     }
 
     async function detectPricingCountry() {
-      applyPricing(countryFromLocale());
+      billingCountry = countryFromLocale();
+      await loadPricing();
       for (const endpoint of GEO_ENDPOINTS) {
         try {
           const res = await fetch(endpoint.url, { cache: 'no-store' });
           if (!res.ok) continue;
           const data = await res.json();
           const country = endpoint.pick(data);
-          if (country) { applyPricing(country); return; }
+          if (country && country !== billingCountry) { billingCountry = country; await loadPricing(); }
+          if (country) return;
         } catch (_) {}
       }
     }
@@ -452,7 +476,7 @@
       btn.addEventListener('click', () => {
         billingMode = btn.getAttribute('data-billing');
         document.querySelectorAll('[data-billing]').forEach(b => b.classList.toggle('active', b === btn));
-        applyPricing(pricingCurrency === 'eur' ? 'DE' : 'US');
+        loadPricing();
       });
     });
 

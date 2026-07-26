@@ -177,6 +177,20 @@ jobs:
           }
           $global:LASTEXITCODE = 0
 
+  landing-pricing:
+    name: Landing pricing contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      # Network-free by design: the test stubs fetch, so a red run means the
+      # PAGE changed, never that the pricing API wobbled. Guards against the
+      # 2026-07-26 drift where get.traylinx.com advertised three retired plans
+      # and a money-back guarantee the terms of sale contradict.
+      - name: Landing page must render prices from the live API, not literals
+        run: node web/pricing.test.mjs
+
   rust:
     name: Rust ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
