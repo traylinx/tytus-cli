@@ -252,12 +252,12 @@
       </section>
 
 
-      <!-- PRICING. Rendered from the LIVE pricing API, never hardcoded.
+      <!-- PRICING. Rendered from the live pricing API, never hardcoded.
            https://tytus.traylinx.com/public/pricing is the single source of
-           truth (payments -> Provider proxy); a price change is Stripe +
-           catalog only, with zero edits here. This section used to hardcode
-           Explorer/Creator/Operator at $39/$79/$149 -- plans that no longer
-           exist -- which is exactly the drift this removes. -->
+           truth; a price change is Stripe + catalog only, with zero edits
+           here. Rationale and regression history live in
+           tests/landing-pricing.test.mjs -- deliberately outside web/, which
+           is the published asset root. -->
       <section id="pricing">
         <div class="pricing-intro">
           <h2>Private pod pricing.</h2>
@@ -345,9 +345,8 @@
     // ── LIVE PRICING ────────────────────────────────────────────────────
     // Single source of truth: payments -> Provider proxy. Nothing about the
     // price ladder is hardcoded here, so changing a price is Stripe + catalog
-    // only. Before 2026-07-26 this page hardcoded Explorer/Creator/Operator at
-    // $39/$79/$149 with a "7-day money-back guarantee" -- three retired plans,
-    // prices we do not charge, and a refund promise the terms contradict.
+    // only. Everything in this file is served to the public verbatim, so keep
+    // internal history in tests/landing-pricing.test.mjs, not here.
     const PRICING_ENDPOINT = 'https://tytus.traylinx.com/public/pricing';
 
     // Bundled snapshot of the live values (2026-07-26). Used ONLY when the API

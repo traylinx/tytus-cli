@@ -96,15 +96,26 @@ const livePayload = (interval, label) => ({
 console.log('landing pricing contract');
 
 // ── 1. the page must never carry a price of its own ───────────────────────
-await test('no retired plan names survive in the markup', () => {
-  const body = HTML.split('<script>')[0];
-  for (const dead of ['Explorer', 'Creator', 'Operator']) {
-    assert.ok(!body.includes(`>${dead}<`), `retired plan "${dead}" is still rendered`);
+//
+// These scan the WHOLE file, comments included. web/index.html is the website:
+// Cloudflare Workers serves ./web directly and the Pages job copies it
+// wholesale, so a source comment explaining our old prices is published to
+// anyone who hits View Source. Internal history belongs in this file, which is
+// not served. (The first cut of this suite stripped `//` comments and therefore
+// passed while the page still shipped that history.)
+await test('no retired plan names anywhere in the published file', () => {
+  for (const gone of ['Explorer', 'Creator', 'Operator']) {
+    assert.ok(!HTML.includes(gone), `retired plan "${gone}" is still published`);
   }
 });
 
 await test('no refund promise anywhere (the terms say no refunds)', () => {
-  assert.ok(!/money-back|money back/i.test(HTML.replace(/\/\/[^\n]*/g, '')), 'a money-back promise is still on the page');
+  assert.ok(!/money-back|money back/i.test(HTML), 'a money-back promise is still published');
+});
+
+await test('no retired price literal anywhere in the published file', () => {
+  const literals = HTML.match(/\$\d{2,4}\b/g) || [];
+  assert.deepEqual(literals, [], `hardcoded USD amounts are published: ${literals.join(', ')}`);
 });
 
 await test('the annual toggle badge names no number of months', () => {
