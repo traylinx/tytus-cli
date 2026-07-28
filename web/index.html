@@ -427,7 +427,7 @@
             <div class="tax-line">${esc((data.region && data.region.tax_copy) || '')}</div>
             <p class="plan-copy">${esc(c.tagline)}</p>
             <ul class="feature-list">${(c.highlights || []).map(h => `<li>${esc(h)}</li>`).join('')}</ul>
-            <a class="small-btn${c.popular ? ' primaryish' : ''}" href="https://traylinx.com/admin/tytus">${esc((c.cta && c.cta.label) || 'Deploy my pod')}</a>
+            <a class="small-btn${c.popular ? ' primaryish' : ''}" href="https://traylinx.com/admin/tytus">${esc((c.cta && c.cta.label) || 'Get started')}</a>
           </article>`).join('');
 
       // Annual terms are shown ONLY on the annual view and ONLY when the API
