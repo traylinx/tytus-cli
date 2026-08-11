@@ -42,7 +42,7 @@ brew install traylinx/tap/tytus
 
 - **Stable gateway:** `http://10.42.42.1:18080/v1` plus a per-user key from `tytus env --export`. Paste once into Cursor, Claude Desktop, OpenCode, Codex, Aider, Vibe, or any OpenAI-compatible SDK.
 - **TytusOS:** the local browser desktop served by the tray. It is the primary UI for pods, files, channels, settings, terminal, Atomek, and app workflows. Legacy Tower is hidden rollback only via `TYTUS_ENABLE_LEGACY_TOWER=1`.
-- **Private pods:** OpenClaw and Hermes agent runtimes inside isolated pod slots, reachable through the Tytus forwarder.
+- **Private pods:** OpenClaw, Hermes, and the gated Cortex knowledge-engine preview run inside isolated pod slots, reachable through the Tytus forwarder.
 - **Tytus Home:** `~/Tytus` with `Downloads`, `Inbox`, `Logs`, `Outbox`, `Pods`, `Projects`, and `Shared`, used by Files and Terminal.
 - **Atomek:** the TytusOS workbench for local files, chat, artifacts, embedded docs/skills, AIL routing, and Resource Fabric control.
 - **MCP + skills:** `tytus-mcp`, `tytus llm-docs`, and `tytus os-docs` give AI agents the exact product contract.
@@ -107,14 +107,17 @@ allocated:
 | Agent | Cost | Gateway port | Description |
 |---|---|---|---|
 | `openclaw` | 1 unit | 3000 | OpenClaw runtime |
-| `hermes` | 2 units | 8642 | Nous Research Hermes gateway |
+| `hermes` | 1 unit | 8642 | Nous Research Hermes gateway |
+| `cortex` | 2 units | 8080 | API-first cited knowledge engine; Creator or higher; no browser UI; production activation gated |
 
 You can mix and match within your budget. For example, an Operator user
-can run 4 OpenClaw pods, or 2 Hermes pods, or 2 OpenClaw pods + 1 Hermes pod.
+can run four 1-unit OpenClaw/Hermes pods, two Cortex pods, or one Cortex pod
+plus two 1-unit agents.
 
 ```bash
 tytus connect --agent openclaw    # default — 1 unit
-tytus connect --agent hermes      # 2 units
+tytus connect --agent hermes      # 1 unit
+tytus connect --agent cortex      # 2 units; gated preview
 ```
 
 ## Models on the pod gateway

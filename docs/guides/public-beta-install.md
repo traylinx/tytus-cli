@@ -10,7 +10,7 @@ Open:
 https://get.traylinx.com/
 ```
 
-Download one file for your computer, open it, then open **Tytus** and follow the setup wizard. The wizard signs you in, lets you pick OpenClaw or Hermes, starts the private tunnel, and runs the test.
+Download one file for your computer, open it, then open **Tytus** and follow the setup wizard. The wizard signs you in, lets you pick OpenClaw, Hermes, or the gated Cortex preview when enabled, starts the private tunnel, and runs the test.
 
 ## macOS
 
@@ -87,7 +87,7 @@ The setup wizard does this:
 
 1. Sign in through the browser.
 2. Check your plan.
-3. Pick an assistant: OpenClaw or Hermes.
+3. Pick an assistant: OpenClaw, Hermes, or the gated Cortex preview when enabled.
 4. Start the private encrypted tunnel.
 5. Run a health test.
 

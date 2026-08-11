@@ -82,7 +82,7 @@ The setup wizard walks you through everything:
 
 1. **Sign in** — Opens your browser for secure login (no passwords typed in the terminal)
 2. **Plan check** — Shows your subscription tier and available units
-3. **Agent pick** — Choose OpenClaw (default, 1 unit) or Hermes (2 units)
+3. **Agent pick** — Choose OpenClaw (default, 1 unit), Hermes (1 unit), or the gated Cortex preview (2 units, Creator or higher)
 4. **Connect** — Allocates your pod and opens the WireGuard tunnel
 5. **Test** — Sends a sample chat to verify everything works
 

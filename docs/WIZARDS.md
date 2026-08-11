@@ -29,7 +29,7 @@ Goal: anyone can install, set up, and use Tytus without reading docs or touching
 
 | Command | What it does | Wizard? |
 |---------|-------------|---------|
-| `tytus configure` | Configure agent (OpenClaw/Hermes) | ✓ Interactive wizard |
+| `tytus configure` | Configure agent (OpenClaw/Hermes/Cortex) | ✓ Interactive wizard |
 | `tytus exec <cmd>` | Run command in pod container | No (power tool) |
 | `tytus logs` | Stream agent logs | ✓ Live tail with colors |
 | `tytus restart` | Restart agent container | ✓ Confirmation + progress |
@@ -86,7 +86,7 @@ Goal: anyone can install, set up, and use Tytus without reading docs or touching
 3. [onboarding wizard runs]
    - Welcome screen with logo
    - "Do you have an account?" → opens browser for login
-   - "Which agent do you want?" → OpenClaw (simple) or Hermes (advanced)
+   - "Which agent do you want?" → OpenClaw (simple), Hermes (advanced), or Cortex (2-unit gated knowledge-engine preview)
    - "Connecting to your pod..." → animated progress
    - "Configuring OpenClaw..." → runs exec commands
    - "Let's test it!" → runs a sample chat completion

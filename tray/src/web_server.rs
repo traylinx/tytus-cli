@@ -476,7 +476,7 @@ fn probe_agent_status(
     if api_url.is_empty() {
         return AgentStatus::Stopped;
     }
-    let probe_url = format!("{}/models", api_url.trim_end_matches('/'));
+    let probe_url = agent_probe_url(agent_type, api_url);
     let bearer = probe_bearer_token(agent_type, user_key, gateway_token);
     if bearer.is_empty() {
         return AgentStatus::Starting;
@@ -504,6 +504,18 @@ fn probe_agent_status(
             _ => AgentStatus::Unknown,
         },
         Err(_) => AgentStatus::Stopped,
+    }
+}
+
+fn agent_probe_url(agent_type: &str, api_url: &str) -> String {
+    if agent_type == "cortex" {
+        let base = api_url
+            .trim_end_matches('/')
+            .strip_suffix("/v1")
+            .unwrap_or_else(|| api_url.trim_end_matches('/'));
+        format!("{}/health", base)
+    } else {
+        format!("{}/models", api_url.trim_end_matches('/'))
     }
 }
 
@@ -1417,6 +1429,7 @@ fn resource_agent_display_name(agent_type: &str) -> String {
         // Legacy internal id. Never leak it to product surfaces.
         "nemoclaw" | "openclaw" => "OpenClaw".to_string(),
         "hermes" => "Hermes".to_string(),
+        "cortex" => "Cortex".to_string(),
         "none" => "AIL Gateway".to_string(),
         other if !other.trim().is_empty() => other.to_string(),
         _ => "Tytus Agent".to_string(),
@@ -1427,6 +1440,7 @@ fn resource_agent_family(agent_type: &str) -> &'static str {
     match agent_type {
         "nemoclaw" | "openclaw" => "openclaw",
         "hermes" => "hermes",
+        "cortex" => "cortex",
         "none" => "ail",
         _ => "agent",
     }
@@ -7084,7 +7098,7 @@ struct IncludedSlot {
 
 /// Per-plan unit budgets — must match Scalesys `AGENT_UNITS` + the Rails
 /// plan tiering. Keep aligned with `services/wannolot-provider/src/...`
-/// where OpenClaw=1, Hermes=2, included AIL=0 and Explorer=1 / Creator=2 /
+/// where OpenClaw=1, Hermes=1, Cortex=2, included AIL=0 and Explorer=1 / Creator=2 /
 /// Operator=4. Unknown agent types default to 1 unit (conservative so
 /// we never under-count the user's spend).
 /// Compute the per-pod gateway auth token. The edge plugin accepts
@@ -7114,7 +7128,7 @@ fn plan_limit_for(tier: &str) -> u32 {
 }
 fn agent_units_for(agent_type: &str) -> u32 {
     match agent_type {
-        "hermes" => 2,
+        "cortex" => 2,
         "none" => 0,
         _ => 1, // OpenClaw-family agents
     }
@@ -8978,9 +8992,13 @@ fn compute_state_snapshot() -> StateSnapshot {
                     .map(|base| format!("{}/p/{}", base.trim_end_matches('/'), pod_id))
             });
             let api_url = public_url.as_ref().map(|u| format!("{}/v1", u));
-            let ui_url = match (public_url.as_ref(), gateway_token.as_ref()) {
-                (Some(u), Some(t)) => Some(format!("{}/?token={}", u, t)),
-                _ => None,
+            let ui_url = if agent_has_browser_ui(&agent_type) {
+                match (public_url.as_ref(), gateway_token.as_ref()) {
+                    (Some(u), Some(t)) => Some(format!("{}/?token={}", u, t)),
+                    _ => None,
+                }
+            } else {
+                None
             };
 
             if agent_type == "none" {
@@ -9422,6 +9440,18 @@ fn handle_pod_open(request: Request, query: &str) {
         );
         return;
     };
+    if !agent_has_browser_ui(&agent.agent_type) {
+        respond_json(
+            request,
+            409,
+            &serde_json::json!({
+                "error": "agent has no browser UI",
+                "agent_type": agent.agent_type,
+                "api_url": agent.api_url,
+            }),
+        );
+        return;
+    }
     // 1) Prefer the cached tokenized UI URL (public edge + gateway_token)
     //    when the daemon already has one — fastest path, no Provider hop.
     if let Some(u) = agent.ui_url.clone() {
@@ -10335,11 +10365,7 @@ fn handle_sharing_defaults_save(mut request: Request) {
     let body: Body = match serde_json::from_str(&buf) {
         Ok(b) => b,
         Err(e) => {
-            respond_json(
-                request,
-                400,
-                &serde_json::json!({"error":format!("bad json: {}", e)}),
-            );
+            respond_json(request, 400, &serde_json::json!({"error":format!("bad json: {}", e)}));
             return;
         }
     };
@@ -11810,7 +11836,11 @@ fn handle_progressive_toggle(mut request: Request) {
     let body: Body = match serde_json::from_str(&buf) {
         Ok(b) => b,
         Err(e) => {
-            respond_json(request, 400, &serde_json::json!({"error":format!("bad json: {}", e)}));
+            respond_json(
+                request,
+                400,
+                &serde_json::json!({"error":format!("bad json: {}", e)}),
+            );
             return;
         }
     };
@@ -14876,7 +14906,8 @@ fn handle_shared_folders_provision_pod(mut request: Request, registry: &Registry
 /// Probe whether a just-installed pod is actually reachable. The CLI's
 /// `agent install` returns as soon as Scalesys allocates the pod row +
 /// fires the DAM deploy — the container is typically still starting at
-/// that moment (15-60 s for OpenClaw, 30-90 s for Hermes). The wizard
+/// that moment (15-60 s for OpenClaw, 30-90 s for Hermes, up to 240 s for
+/// Cortex's multi-container blueprint). The wizard
 /// polls this endpoint post-install so the user doesn't see a fake
 /// "done" screen with a broken "Chat now" button.
 ///
@@ -15004,7 +15035,10 @@ fn handle_pod_ready(request: Request, query: &str) {
             return;
         }
     };
-    let probe_url = format!("{}/models", api.trim_end_matches('/'));
+    let probe_url = agent_probe_url(
+        agent.as_ref().map(|a| a.agent_type.as_str()).unwrap_or(""),
+        &api,
+    );
     let Some(agent) = agent else {
         respond_json(
             request,
@@ -15222,7 +15256,7 @@ fn handle_pod_uninstall(request: Request, query: &str) {
             return;
         }
     };
-    // Only agent pods (OpenClaw, Hermes) can be uninstalled. AIL-included
+    // Only agent pods (OpenClaw, Hermes, Cortex) can be uninstalled. AIL-included
     // pods have no agent to remove — `tytus agent uninstall <pod>` on a
     // default pod is a no-op + confusing error.
     let snap = compute_state_snapshot();
@@ -18670,10 +18704,23 @@ mod tests {
     }
 
     #[test]
-    fn hermes_is_a_browser_ui_agent() {
+    fn browser_ui_support_is_explicit() {
         assert!(agent_has_browser_ui("hermes"));
         assert!(agent_has_browser_ui("nemoclaw"));
+        assert!(!agent_has_browser_ui("cortex"));
         assert!(!agent_has_browser_ui("none"));
+    }
+
+    #[test]
+    fn cortex_uses_health_readiness_and_two_units() {
+        assert_eq!(
+            agent_probe_url("cortex", "https://pod.example/v1"),
+            "https://pod.example/health"
+        );
+        assert_eq!(agent_units_for("cortex"), 2);
+        assert_eq!(agent_units_for("hermes"), 1);
+        assert_eq!(resource_agent_display_name("cortex"), "Cortex");
+        assert_eq!(resource_agent_family("cortex"), "cortex");
     }
 
     #[test]
