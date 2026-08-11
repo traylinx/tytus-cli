@@ -33,7 +33,9 @@ fn wall_cap(idle_timeout_secs: u32) -> Duration {
 /// drained on threads so a chatty child can never deadlock against a full
 /// pipe while we wait. On deadline: kill + reap + Transient error.
 fn run_wall_capped(mut cmd: Command, cap: Duration) -> Result<std::process::Output, S3Error> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
         .map_err(|e| S3Error::Transient(format!("spawn rclone: {e}")))?;
@@ -83,7 +85,11 @@ fn run_wall_capped(mut cmd: Command, cap: Duration) -> Result<std::process::Outp
     };
     let stdout = out_thread.join().unwrap_or_default();
     let stderr = err_thread.join().unwrap_or_default();
-    Ok(std::process::Output { status, stdout, stderr })
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -117,8 +123,12 @@ impl std::error::Error for S3Error {}
 pub trait S3Ops {
     /// Bounded listing of `prefix`, keys AFTER `start_after` only (G0
     /// decision: StartAfter is the normative steady-state poll shape).
-    fn list_after(&self, prefix: &str, start_after: Option<&str>, max: usize)
-        -> Result<Vec<RemoteObject>, S3Error>;
+    fn list_after(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max: usize,
+    ) -> Result<Vec<RemoteObject>, S3Error>;
     /// Fetch a small object (event JSON) with the 8 KiB guard.
     fn cat_small(&self, key: &str) -> Result<Vec<u8>, S3Error>;
     /// Download one object to a local temp path (same-filesystem apply).
@@ -161,9 +171,12 @@ impl RcloneS3 {
 }
 
 impl S3Ops for RcloneS3 {
-    fn list_after(&self, prefix: &str, start_after: Option<&str>, max: usize)
-        -> Result<Vec<RemoteObject>, S3Error>
-    {
+    fn list_after(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max: usize,
+    ) -> Result<Vec<RemoteObject>, S3Error> {
         let mut cmd = self.base(LSJSON_TIMEOUT_SECS);
         cmd.arg("lsjson")
             .arg("--files-only")
@@ -185,7 +198,10 @@ impl S3Ops for RcloneS3 {
             .filter_map(|v| {
                 let name = v.get("Path").and_then(|p| p.as_str())?;
                 let size = v.get("Size").and_then(|s| s.as_u64()).unwrap_or(0);
-                Some(RemoteObject { key: format!("{prefix}{name}"), size })
+                Some(RemoteObject {
+                    key: format!("{prefix}{name}"),
+                    size,
+                })
             })
             .collect();
         rows.sort_by(|a, b| a.key.cmp(&b.key)); // lexicographic == sequence order
@@ -212,7 +228,9 @@ impl S3Ops for RcloneS3 {
             return Err(S3Error::Transient(stderr.chars().take(300).collect()));
         }
         if output.stdout.len() > MAX_EVENT_OBJECT_BYTES {
-            return Err(S3Error::Permanent(format!("event object over {MAX_EVENT_OBJECT_BYTES} bytes")));
+            return Err(S3Error::Permanent(format!(
+                "event object over {MAX_EVENT_OBJECT_BYTES} bytes"
+            )));
         }
         Ok(output.stdout)
     }
@@ -229,7 +247,9 @@ impl S3Ops for RcloneS3 {
             return Err(S3Error::Transient(stderr.chars().take(300).collect()));
         }
         if !target.exists() {
-            return Err(S3Error::Transient("copyto reported success but target missing".into()));
+            return Err(S3Error::Transient(
+                "copyto reported success but target missing".into(),
+            ));
         }
         Ok(())
     }
@@ -250,8 +270,15 @@ mod tests {
     #[test]
     fn wall_cap_kills_a_hung_child_and_reports_transient() {
         let started = Instant::now();
-        let err = run_wall_capped(sh("sleep 30"), Duration::from_millis(300)).unwrap_err();
-        assert!(started.elapsed() < Duration::from_secs(5), "child was not killed promptly");
+        // Replace the shell with the hung process. Without `exec`, Linux /bin/sh
+        // leaves `sleep` as a grandchild holding the captured pipes open after
+        // the shell is killed, so the test measures shell process-tree behavior
+        // rather than the direct rclone child used in production.
+        let err = run_wall_capped(sh("exec sleep 30"), Duration::from_millis(300)).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "child was not killed promptly"
+        );
         match err {
             S3Error::Transient(msg) => assert!(msg.contains("wall-clock cap"), "{msg}"),
             other => panic!("expected Transient, got {other}"),
@@ -261,8 +288,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wall_cap_passes_through_a_fast_child_with_output() {
-        let out = run_wall_capped(sh("printf hello; printf world >&2; exit 3"),
-                                  Duration::from_secs(10)).unwrap();
+        let out = run_wall_capped(
+            sh("printf hello; printf world >&2; exit 3"),
+            Duration::from_secs(10),
+        )
+        .unwrap();
         assert_eq!(out.stdout, b"hello");
         assert_eq!(out.stderr, b"world");
         assert_eq!(out.status.code(), Some(3));
