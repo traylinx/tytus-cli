@@ -370,7 +370,7 @@ Identity & integrations:
   link         Wire Tytus into a project (drops CLAUDE.md / .mcp.json)
   mcp          Print MCP server config for your AI CLI
   channels     Add bot tokens / API secrets for chat channels
-  configure    Configure your agent (OpenClaw / Hermes)
+  configure    Configure your agent (OpenClaw / Hermes / Cortex)
 
 Settings:
   autostart    Auto-start the tunnel at login
@@ -404,6 +404,7 @@ enum AgentType {
     #[value(alias = "nemoclaw")]
     Openclaw,
     Hermes,
+    Cortex,
 }
 
 #[derive(Clone, ValueEnum, Debug)]
@@ -421,6 +422,7 @@ impl AgentType {
         match self {
             AgentType::Openclaw => "openclaw",
             AgentType::Hermes => "hermes",
+            AgentType::Cortex => "cortex",
         }
     }
 }
@@ -640,7 +642,7 @@ enum Commands {
         #[command(subcommand)]
         action: Option<ChatAction>,
     },
-    /// Configure your agent (OpenClaw / Hermes) interactively
+    /// Configure your agent (OpenClaw / Hermes / Cortex) interactively
     Configure,
     /// Login to Traylinx (opens browser for device auth)
     Login,
@@ -3538,6 +3540,7 @@ fn display_agent_name(agent: &str) -> &str {
         "none" => "default",
         "nemoclaw" | "openclaw" => "OpenClaw",
         "hermes" => "Hermes",
+        "cortex" => "Cortex",
         other => other,
     }
 }
@@ -3719,9 +3722,16 @@ async fn configure_agent_for_zero_auth(
 ) -> Result<(), String> {
     match agent_type {
         "hermes" => configure_hermes_for_zero_auth(client, pod_id, json).await,
-        // OpenClaw is the default; other values fall through to the
-        // openclaw-style path since they're all likely OpenClaw-derived.
-        _ => configure_nemoclaw_for_zero_auth(client, pod_id, json).await,
+        "nemoclaw" | "openclaw" => configure_nemoclaw_for_zero_auth(client, pod_id, json).await,
+        "cortex" => {
+            if !json {
+                println!(
+                    "  Configuration: Cortex provider and storage overlays are managed by the pod blueprint."
+                );
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -6332,12 +6342,17 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
     wizard::print_step(2, total_steps, "Choose your AI agent");
     println!();
     wizard::print_info("OpenClaw — lightweight assistant (1 unit, good for most tasks)");
-    wizard::print_info("Hermes   — advanced reasoning agent (2 units, better for complex tasks)");
+    wizard::print_info("Hermes   — advanced reasoning agent (1 unit, better for complex tasks)");
+    wizard::print_info("Cortex   — cited knowledge engine (2 units, Creator plan or higher)");
     println!();
 
     let agent = if state.pods.is_empty() {
-        match wizard::select("Which agent?", &["OpenClaw (recommended)", "Hermes"]) {
+        match wizard::select(
+            "Which agent?",
+            &["OpenClaw (recommended)", "Hermes", "Cortex"],
+        ) {
             Ok(s) if s.to_ascii_lowercase().starts_with("hermes") => "hermes",
+            Ok(s) if s.to_ascii_lowercase().starts_with("cortex") => "cortex",
             _ => "nemoclaw", // backend identifier for the public OpenClaw brand
         }
     } else {
@@ -6348,6 +6363,7 @@ async fn cmd_setup(http: &atomek_core::HttpClient, json: bool) {
         let display = match first_agent.as_str() {
             "nemoclaw" => "OpenClaw",
             "hermes" => "Hermes",
+            "cortex" => "Cortex",
             "none" => "Default (AIL only)",
             other => other,
         };
@@ -6835,12 +6851,13 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
             std::process::exit(1);
         }
     };
+    let agent_type = pod.agent_type.as_deref().unwrap_or("none");
 
     wizard::print_header("Configure your agent");
     wizard::print_info(&format!(
         "Pod: {} — Agent: {}",
         pod.pod_id,
-        pod.agent_type.as_deref().unwrap_or("?")
+        display_agent_name(agent_type)
     ));
     println!();
 
@@ -6860,16 +6877,26 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
             match atomek_pods::exec_in_agent(
                 &client,
                 &pod.pod_id,
-                "openclaw --version 2>&1 || echo 'not installed'",
+                agent_test_command(agent_type),
                 10,
             )
             .await
             {
-                Ok(result) => {
+                Ok(result) if result.exit_code == 0 => {
                     let out = result.stdout.unwrap_or_default();
                     wizard::finish_ok(&pb, "Agent responded");
                     println!();
                     wizard::print_info(out.trim());
+                }
+                Ok(result) => {
+                    let error = result
+                        .stderr
+                        .or(result.stdout)
+                        .unwrap_or_else(|| "health probe failed".to_string());
+                    wizard::finish_fail(
+                        &pb,
+                        &format!("Agent probe exited {}: {}", result.exit_code, error.trim()),
+                    );
                 }
                 Err(e) => {
                     wizard::finish_fail(&pb, &format!("Failed: {}", e));
@@ -6877,13 +6904,18 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
             }
         }
         Ok("View agent logs") => {
-            wizard::print_info("Use: tytus exec 'tail -50 /var/log/openclaw.log'");
+            wizard::print_info(&format!("Use: tytus logs --pod {} --lines 50", pod.pod_id));
         }
         Ok("Restart agent") => {
             if wizard::confirm("Restart the agent container?", true).unwrap_or(false) {
-                wizard::print_info(
-                    "Restart via DAM — use `tytus exec` for custom commands or contact support.",
-                );
+                let pb = wizard::spinner("Restarting agent...");
+                let (sk, auid) = get_credentials(&mut state, http).await;
+                let client = atomek_pods::TytusClient::new(http, &sk, &auid);
+                let target = atomek_pods::AgentTarget::new(&pod.pod_id, pod.route_id.as_deref());
+                match atomek_pods::restart_agent_target(&client, target).await {
+                    Ok(_) => wizard::finish_ok(&pb, "Agent restarted"),
+                    Err(e) => wizard::finish_fail(&pb, &format!("Restart failed: {}", e)),
+                }
             }
         }
         Ok("Advanced: run custom command") => {
@@ -6911,6 +6943,17 @@ async fn cmd_configure(http: &atomek_core::HttpClient, json: bool) {
         _ => {
             wizard::print_info("Cancelled");
         }
+    }
+}
+
+fn agent_test_command(agent_type: &str) -> &'static str {
+    match agent_type {
+        "cortex" => {
+            "python -c \"import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read().decode())\""
+        }
+        "hermes" => "hermes --version",
+        "nemoclaw" | "openclaw" => "openclaw --version",
+        _ => "printf 'agent runtime available\\n'",
     }
 }
 
@@ -8028,15 +8071,17 @@ async fn cmd_ui(
     // through the sidecar's socat forwarder on 10.42.42.1:18080 — there
     // is no `/` web UI to show. Silently forwarding would land the user
     // on a blank page with no explanation.
-    if pod.agent_type.as_deref() == Some("none") {
+    if matches!(pod.agent_type.as_deref(), Some("none" | "cortex")) {
+        let reason = if pod.agent_type.as_deref() == Some("cortex") {
+            "Cortex is API-first and has no browser UI."
+        } else {
+            "This is the default AIL-only pod and has no agent UI."
+        };
         eprintln!(
-            "Pod {} is the default pod (AIL-only, no agent installed).\n\
-             There's no agent UI to open. Either install an agent:\n  \
-               tytus agent install openclaw --pod {}\n\
-             or use the stable AIL endpoint directly:\n  \
-               http://10.42.42.1:18080/v1",
+            "Pod {} has no browser UI. {}\n\
+             Use `tytus configure`, `tytus exec`, or the agent API instead.",
             target.label(),
-            target_key,
+            reason,
         );
         std::process::exit(1);
     }
@@ -8490,7 +8535,7 @@ async fn ensure_controlui_overlay(
         .find(|p| p.pod_id == pod_id)
         .and_then(|p| p.agent_type.clone())
         .unwrap_or_default();
-    if agent_type == "hermes" || agent_type == "none" {
+    if !matches!(agent_type.as_str(), "nemoclaw" | "openclaw") {
         return Ok(());
     }
     let secret = st.secret_key.as_deref().ok_or("no secret_key in state")?;
@@ -8606,14 +8651,16 @@ async fn fetch_gateway_token_via_provider(
         .and_then(|p| p.agent_type.clone())
         .unwrap_or_else(|| "nemoclaw".into());
     let client = atomek_pods::TytusClient::new(http, secret, user_id);
-    let script = if agent_type == "hermes" {
-        "cat /app/workspace/.hermes/api_server_key 2>/dev/null"
-    } else {
-        "cat /app/workspace/.openclaw/config.json 2>/dev/null | \
+    let script = match agent_type.as_str() {
+        "hermes" => "cat /app/workspace/.hermes/api_server_key 2>/dev/null",
+        "nemoclaw" | "openclaw" => {
+            "cat /app/workspace/.openclaw/config.json 2>/dev/null | \
          node -e \"let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{\
          try{const c=JSON.parse(d);\
          process.stdout.write((c.gateway&&c.gateway.auth&&c.gateway.auth.token)||'');}\
          catch(e){process.exit(0);}})\""
+        }
+        _ => return None,
     };
     let res = atomek_pods::exec_in_agent(&client, pod_id, script, 10)
         .await
@@ -9343,6 +9390,7 @@ fn find_crlf2(buf: &[u8]) -> Option<usize> {
 fn agent_ui_port(agent_type: &str) -> u16 {
     match agent_type {
         "hermes" => 9119,
+        "cortex" => 8080,
         _ => 3000,
     }
 }
@@ -9350,6 +9398,7 @@ fn agent_ui_port(agent_type: &str) -> u16 {
 fn agent_api_port(agent_type: &str) -> u16 {
     match agent_type {
         "hermes" => 8642,
+        "cortex" => 8080,
         _ => 3000,
     }
 }
@@ -9987,7 +10036,8 @@ the CLI.
 - **Pod** = one user's isolated slice: a WireGuard sidecar + an agent container
 - **Agents** (containerised AIs running INSIDE a pod):
   - `openclaw` = OpenClaw runtime (1 unit, port 3000)
-  - `hermes` = Nous Research Hermes gateway (2 units, port 8642)
+  - `hermes` = Nous Research Hermes gateway (1 unit, port 8642)
+  - `cortex` = cited knowledge engine (2 units, API port 8080, no browser UI)
 - **Plan tiers**: Explorer (1 unit), Creator (2 units), Operator (4 units).
   Unit budget is enforced atomically by Scalesys; you cannot overspend.
 - **SwitchAILocal**: the OpenAI-compatible LLM gateway on every droplet.
@@ -10014,7 +10064,7 @@ tytus doctor                 # full diagnostic (auth, tunnel, gateway, MCP)
 
 # Pods
 tytus setup                  # interactive wizard: auth → pick → tunnel → test
-tytus connect [--agent openclaw|hermes] [--pod NN]
+tytus connect [--agent openclaw|hermes|cortex] [--pod NN]
 tytus disconnect [--pod NN]  # tear down tunnel daemon, leave allocation
 tytus revoke <pod_id>        # free units (does NOT need disconnect first)
 tytus restart [--pod NN]     # restart agent container (re-runs entry script)
@@ -10051,7 +10101,9 @@ The agent is a containerised AI with its own filesystem and config.
 ```bash
 tytus connect --agent openclaw                 # OpenClaw
 # OR
-tytus connect --agent hermes                   # Nous Research Hermes (2 units)
+tytus connect --agent hermes                   # Nous Research Hermes (1 unit)
+# OR
+tytus connect --agent cortex                   # Cited knowledge engine (2 units; gated preview)
 
 # Customise the agent without rebuilding the image:
 tytus exec --pod 02 "cat /app/workspace/config.user.json.example"
@@ -10113,9 +10165,10 @@ written to `.tytus/os-manual.md` in linked projects.
 
 ### What is Tytus
 - **Pod** = one user's isolated slice (WireGuard sidecar + agent container)
-- **Two agent types** runnable inside a pod:
+- **Agent types** runnable inside a pod:
   - `openclaw` (1 unit, port 3000) — OpenClaw runtime
-  - `hermes` (2 units, port 8642) — Nous Research Hermes
+  - `hermes` (1 unit, port 8642) — Nous Research Hermes
+  - `cortex` (2 units, port 8080) — cited knowledge engine, no browser UI, gated preview
 - **Plan tiers**: Explorer=1u, Creator=2u, Operator=4u
 - **Models** on the gateway: live AIL aliases returned by `/v1/models`; do not hardcode provider ids
 
@@ -10130,7 +10183,7 @@ eval "$(tytus env --export)"
 ```bash
 tytus status [--json]                       # account + pods + tunnel
 tytus doctor                                # full health diagnostic
-tytus connect [--agent openclaw|hermes]     # allocate + tunnel up
+tytus connect [--agent openclaw|hermes|cortex] # allocate + tunnel up
 tytus disconnect [--pod NN]                 # tear down tunnel
 tytus revoke <pod_id>                       # free units
 tytus restart [--pod NN]                    # restart the agent container
@@ -10190,8 +10243,8 @@ Then dispatch on `$ARGUMENTS`:
   tunnel state. If `--json` is needed for parsing, use `tytus status --json`.
   Always run `tytus doctor` if anything looks off.
 
-- **connect**: `tytus connect [--agent openclaw|hermes]`. Default agent is
-  OpenClaw (1 unit). Hermes costs 2 units. Confirm with the user before
+- **connect**: `tytus connect [--agent openclaw|hermes|cortex]`. OpenClaw and
+  Hermes cost 1 unit. Cortex costs 2 units and has no browser UI. Confirm before
   spending units.
 
 - **test**: `tytus test` — full E2E health check (auth → pod → tunnel →
@@ -10208,7 +10261,7 @@ Then dispatch on `$ARGUMENTS`:
   OPENAI_API_KEY pair. Use `--raw` for the legacy per-pod values.
 
 - **deploy AGENT** or **--agent AGENT**: shorthand for `tytus connect
-  --agent <openclaw|hermes>`. Verify the user understands the unit cost.
+  --agent <openclaw|hermes|cortex>`. Verify the user understands the unit cost.
 
 - **disconnect**: `tytus disconnect` — tears down the tunnel daemon, leaves
   the allocation alive. Cheap to reconnect.
@@ -10248,7 +10301,7 @@ tytus os-docs        # Tytus OS user manual — desktop, windows, apps, settings
 
 `llm-docs` is the authoritative documentation for the `tytus` tool:
 every subcommand, the stable URL/key model, agent types (OpenClaw=1u,
-hermes=2u), plan tiers (Explorer=1u, Creator=2u, Operator=4u), models
+Hermes=1u, Cortex=2u gated preview), plan tiers (Explorer=1u, Creator=2u, Operator=4u), models
 (ail-compound, ail-image, ail-embed), and a troubleshooting catalog.
 
 `os-docs` is the authoritative documentation for the desktop OS — read
@@ -10261,7 +10314,7 @@ Common flow:
 
 ```bash
 tytus status                                   # what does the user have?
-tytus connect [--agent openclaw|hermes]        # if no pod yet
+tytus connect [--agent openclaw|hermes|cortex] # if no pod yet
 tytus test                                     # E2E health
 eval "$(tytus env --export)"                   # load OPENAI_* envs
 tytus chat                                     # REPL, OR

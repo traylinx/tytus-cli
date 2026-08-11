@@ -8,8 +8,8 @@ Every Tytus plan comes with a **unit budget** — a fixed number of units you ca
 
 | Plan | Price | Units | What you can run |
 |---|---|---|---|
-| Explorer | $39/mo | 1 unit | 1 OpenClaw pod |
-| Creator | $79/mo | 2 units | 2 OpenClaw pods, or 1 Hermes pod |
+| Explorer | $39/mo | 1 unit | 1 OpenClaw or Hermes pod |
+| Creator | $79/mo | 2 units | 2 one-unit pods, or 1 Cortex pod after activation |
 | Operator | $149/mo | 4 units | Any mix up to 4 units |
 
 Check your current plan and usage:
@@ -34,7 +34,7 @@ OpenClaw runtime. Lightweight, fast startup. Best for:
 - Quick tasks and one-off queries
 - When you want maximum pods per plan
 
-### Hermes (2 units)
+### Hermes (1 unit)
 
 ```bash
 tytus connect --agent hermes
@@ -44,6 +44,21 @@ Nous Research Hermes agent. More capable, heavier runtime. Best for:
 - Complex multi-step reasoning
 - Agentic workflows
 - When quality matters more than quantity
+
+### Cortex (2 units, gated preview)
+
+```bash
+tytus connect --agent cortex
+```
+
+Cortex is an API-first cited knowledge engine. It uses the pod-local
+switchAILocal aliases `ail-compound` and `ail-embed`, has no browser UI, and
+requires Creator or higher. The CLI/provider/infra path can be shipped before
+customer production activation; until that separate gate opens, allocation can
+still be refused by the service.
+
+Use `tytus configure` for health and restart actions. Use the Cortex API or
+`tytus exec` for operator work; `tytus ui` deliberately refuses Cortex.
 
 ### Switching Agents
 
@@ -118,10 +133,10 @@ tytus exec "ls /workspace"
 
 | You have | You can run |
 |---|---|
-| 1 unit (Explorer) | 1 OpenClaw pod |
-| 2 units (Creator) | 2 OpenClaw pods, OR 1 Hermes pod |
-| 3 units | 3 OpenClaw pods, OR 1 Hermes pod + 1 OpenClaw pod |
-| 4 units (Operator) | 4 OpenClaw pods, OR 2 Hermes pods, OR 2 OpenClaw pods + 1 Hermes pod |
+| 1 unit (Explorer) | 1 OpenClaw or Hermes pod; Cortex is refused |
+| 2 units (Creator) | 2 one-unit pods, OR 1 Cortex pod after activation |
+| 3 units | 3 one-unit pods, OR 1 Cortex pod + 1 one-unit pod |
+| 4 units (Operator) | 4 one-unit pods, OR 2 Cortex pods, OR 1 Cortex pod + 2 one-unit pods |
 
 If you try to allocate more than your budget allows:
 ```

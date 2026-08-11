@@ -103,7 +103,7 @@ Core apps:
 
 ## Agent team workflow
 
-Tytus is not just one chat app. It is a resource fabric that lets OpenClaw, Hermes, local agents, shared folders, channels, and local apps work from the same mission context.
+Tytus is not just one chat app. It is a resource fabric that lets OpenClaw, Hermes, the gated Cortex knowledge-engine preview, local agents, shared folders, channels, and local apps work from the same mission context.
 
 Recommended loop:
 
@@ -115,7 +115,7 @@ Recommended loop:
 6. Keep transcripts in `runs/`, artifacts in `outputs/`, edits in `proposals/`, and final handoff in `OUTBOX.md`.
 7. Apply edits only after preview/approval.
 
-Use **OpenClaw** and **Hermes** in user-facing docs and UI. Old internal agent labels are not product names.
+Use **OpenClaw**, **Hermes**, and **Cortex** in user-facing docs and UI. Old internal agent labels are not product names.
 
 ## Atomek workbench
 
@@ -207,7 +207,7 @@ Rules:
 
 ## Agent defaults and autonomy
 
-A fresh OpenClaw or Hermes pod should have enough environment to work without manual bootstrap:
+A fresh OpenClaw, Hermes, or Cortex pod should have enough environment to work without manual bootstrap. Cortex is API-first, has no browser UI, and remains production-gated until separately activated:
 
 - `AIL_URL` / `AIL_INFERENCE_URL` / `OPENAI_BASE_URL`
 - `AIL_API_KEY` / `OPENAI_API_KEY`
@@ -233,6 +233,7 @@ tytus env --export           # stable SDK env
 tytus agent catalog          # available agents
 tytus agent install openclaw # allocate/install OpenClaw
 tytus agent install hermes   # allocate/install Hermes
+tytus agent install cortex   # 2-unit gated knowledge-engine preview
 tytus ls /app/workspace --pod 01
 tytus push ./file.pdf --pod 01
 tytus pull /app/workspace/out/result.md --pod 01

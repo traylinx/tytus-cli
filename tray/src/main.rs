@@ -381,7 +381,7 @@ pub struct TrayState {
     /// Concrete per-pod info (id + which agent is running). Drives the
     /// "Pods & Agents" submenu. Empty when the user has no allocations.
     pub pods: Vec<PodInfo>,
-    /// Units currently consumed by allocated pods (OpenClaw=1, Hermes=2).
+    /// Units currently consumed by allocated pods (OpenClaw=1, Hermes=1, Cortex=2).
     /// Derived from `pods` but cached so menu building doesn't recompute.
     pub units_used: u32,
     /// Hard cap from the user's plan. Explorer=1, Creator=2, Operator=4.
@@ -485,13 +485,13 @@ impl PodInfo {
         Some(format!("{}/?token={}", base, token))
     }
 
-    /// Unit cost — mirrors Scalesys: OpenClaw=1, Hermes=2, included AIL pod=0.
+    /// Unit cost — mirrors Scalesys: OpenClaw=1, Hermes=1, Cortex=2, AIL=0.
     pub fn units(&self) -> u32 {
         if let Some(units) = self.agent_units {
             return units;
         }
         match self.agent_type.as_str() {
-            "hermes" => 2,
+            "cortex" => 2,
             "none" => 0, // agent-less default pod (SPRINT §4.1)
             _ => 1,
         }
@@ -506,6 +506,7 @@ impl PodInfo {
             return match self.agent_type.as_str() {
                 "nemoclaw" => format!("{} · OpenClaw", name),
                 "hermes" => format!("{} · Hermes", name),
+                "cortex" => format!("{} · Cortex", name),
                 "none" => name.to_string(),
                 _ => name.to_string(),
             };
@@ -518,6 +519,7 @@ impl PodInfo {
         match self.agent_type.as_str() {
             "nemoclaw" => "OpenClaw".into(),
             "hermes" => "Hermes".into(),
+            "cortex" => "Cortex".into(),
             "none" => "Default (AIL only)".into(),
             other if !other.is_empty() => other.to_string(),
             _ => "Unknown".into(),
@@ -1666,7 +1668,8 @@ fn build_menu(state: &TrayState) -> Menu {
         let add_sub = Submenu::new("Install Agent (terminal)", true);
         let remaining = state.units_limit.saturating_sub(state.units_used);
         let nemo_ok = state.units_limit == 0 || remaining >= 1;
-        let hermes_ok = state.units_limit == 0 || remaining >= 2;
+        let hermes_ok = state.units_limit == 0 || remaining >= 1;
+        let cortex_ok = state.units_limit == 0 || remaining >= 2;
         let _ = add_sub.append(&MenuItem::with_id(
             "install_agent_nemoclaw",
             format!(
@@ -1683,7 +1686,7 @@ fn build_menu(state: &TrayState) -> Menu {
         let _ = add_sub.append(&MenuItem::with_id(
             "install_agent_hermes",
             format!(
-                "Hermes  (2 units){}",
+                "Hermes  (1 unit){}",
                 if hermes_ok {
                     ""
                 } else {
@@ -1691,6 +1694,19 @@ fn build_menu(state: &TrayState) -> Menu {
                 }
             ),
             hermes_ok,
+            None,
+        ));
+        let _ = add_sub.append(&MenuItem::with_id(
+            "install_agent_cortex",
+            format!(
+                "Cortex  (2 units){}",
+                if cortex_ok {
+                    ""
+                } else {
+                    "  — not enough units"
+                }
+            ),
+            cortex_ok,
             None,
         ));
         let _ = pods_sub.append(&add_sub);
@@ -2500,6 +2516,11 @@ fn handle_menu_event(id: &str, state: &Arc<Mutex<TrayState>>) {
         "install_agent_hermes" => {
             open_in_terminal_simple(
                 "tytus agent install hermes; echo; echo 'Press Enter to close…'; read _",
+            );
+        }
+        "install_agent_cortex" => {
+            open_in_terminal_simple(
+                "tytus agent install cortex; echo; echo 'Press Enter to close…'; read _",
             );
         }
         other if other.starts_with("launch_") => {

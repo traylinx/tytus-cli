@@ -250,7 +250,9 @@ mod tests {
     #[test]
     fn wall_cap_kills_a_hung_child_and_reports_transient() {
         let started = Instant::now();
-        let err = run_wall_capped(sh("sleep 30"), Duration::from_millis(300)).unwrap_err();
+        // Use a direct hung child. Without `exec`, Linux /bin/sh leaves sleep as a
+        // grandchild holding the captured pipes open after the shell is killed.
+        let err = run_wall_capped(sh("exec sleep 30"), Duration::from_millis(300)).unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(5), "child was not killed promptly");
         match err {
             S3Error::Transient(msg) => assert!(msg.contains("wall-clock cap"), "{msg}"),

@@ -23,6 +23,7 @@ impl ResolvedPodTarget {
         match self.agent_type.as_deref() {
             Some("nemoclaw") => "OpenClaw",
             Some("hermes") => "Hermes",
+            Some("cortex") => "Cortex",
             Some("none") => "AIL",
             _ => "unknown",
         }
